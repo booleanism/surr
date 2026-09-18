@@ -1,0 +1,14 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS nodes (
+  id BLOB PRIMARY KEY DEFAULT (randomblob(16)),
+  bitrate INTEGER NOT NULL, 
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id BLOB PRIMARY KEY DEFAULT (randomblob(16)),
+  email VARCHAR(64) UNIQUE NOT NULL,
+  passwd VARCHAR(64) NOT NULL
+);

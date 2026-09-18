@@ -1,0 +1,14 @@
+.cache
+nodes/.venv
+bin/
+
+*.db
+bundle.sh
+dist/
+tx/lib
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.pt
+
