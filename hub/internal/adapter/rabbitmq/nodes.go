@@ -10,6 +10,10 @@ import (
 	"github.com/google/uuid"
 )
 
+type AnalyticsFilters struct {
+	TimeCluster string `json:"time_cluster"`
+}
+
 type nodes struct {
 	r protocols.Router
 	s Siblings
@@ -24,9 +28,14 @@ func NewNodes(r protocols.Router, s Siblings, t RunTask) nodes {
 	}
 }
 
-func (n nodes) GetAnalytics(ctx context.Context, nodeID uuid.UUID, buf *[]byte) (int, error) {
+func (n nodes) GetAnalytics(ctx context.Context, nodeID uuid.UUID, f AnalyticsFilters, buf *[]byte) (int, error) {
 	cmd := fmt.Sprintf("%s.sink.analytics", nodeID.String())
-	err := n.do(ctx, protocols.Command(cmd), []byte("{}"), buf)
+	payload, err := json.Marshal(&f)
+	if err != nil {
+		return 0, err
+	}
+
+	err = n.do(ctx, protocols.Command(cmd), payload, buf)
 	if err != nil {
 		return 0, err
 	}

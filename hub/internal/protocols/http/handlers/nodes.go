@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/booleanism/surr/hub/internal/adapter/rabbitmq"
 	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
@@ -17,7 +18,7 @@ type Node interface {
 }
 
 type Analytics interface {
-	GetAnalytics(ctx context.Context, user models.User, node models.Node, buf *[]byte) (int, error)
+	GetAnalytics(ctx context.Context, user models.User, node models.Node, filter rabbitmq.AnalyticsFilters, buf *[]byte) (int, error)
 }
 
 type nodeHandlers struct {
@@ -68,8 +69,17 @@ func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
 		ID: nodeID,
 	}
 
+	timeCluster := r.URL.Query().Get("time_cluster")
+	if timeCluster == "" {
+		timeCluster = "hours"
+	}
+
+	filter := rabbitmq.AnalyticsFilters{
+		TimeCluster: timeCluster,
+	}
+
 	var nbuf int
-	nbuf, err = n.a.GetAnalytics(r.Context(), user, node, buf)
+	nbuf, err = n.a.GetAnalytics(r.Context(), user, node, filter, buf)
 	if err != nil {
 		fmt.Printf("ERRO: get analytics: %s\n", err.Error())
 		http.Error(w, "unable to fetch analytics", http.StatusInternalServerError)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/booleanism/surr/hub/internal/adapter/rabbitmq"
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/google/uuid"
@@ -14,7 +15,7 @@ type Subscription interface {
 }
 
 type NodesGetAnalytics interface {
-	GetAnalytics(ctx context.Context, nodeID uuid.UUID, buf *[]byte) (int, error)
+	GetAnalytics(ctx context.Context, nodeID uuid.UUID, filter rabbitmq.AnalyticsFilters, buf *[]byte) (int, error)
 }
 
 type analytics struct {
@@ -29,7 +30,7 @@ func NewAnalytics(s Subscription, n NodesGetAnalytics) analytics {
 	}
 }
 
-func (a analytics) GetAnalytics(ctx context.Context, user models.User, node models.Node, buf *[]byte) (int, error) {
+func (a analytics) GetAnalytics(ctx context.Context, user models.User, node models.Node, filter rabbitmq.AnalyticsFilters, buf *[]byte) (int, error) {
 	nodes := pools.NodePool.Get().(*[]models.Node)
 	defer pools.NodePoolResetAndPut(nodes)
 
@@ -40,7 +41,7 @@ func (a analytics) GetAnalytics(ctx context.Context, user models.User, node mode
 
 	for _, nd := range (*nodes)[:n] {
 		if nd.ID == node.ID {
-			n, err = a.n.GetAnalytics(ctx, nd.ID, buf)
+			n, err = a.n.GetAnalytics(ctx, nd.ID, filter, buf)
 			if err != nil {
 				return n, err
 			}

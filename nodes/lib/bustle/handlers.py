@@ -21,7 +21,7 @@ class Pipeline(typing.Protocol):
 
 @dataclass
 class AnalyticsParams:
-    time_type: str
+    time_cluster: str
 
 @dataclass
 class NodeSource:
@@ -62,7 +62,7 @@ class BustleHandlers:
     ) -> None:
         try:
             p = AnalyticsParams(**json.loads(req.payload))
-            match p.time_type:
+            match p.time_cluster:
                 case "minutes":
                     start_time = datetime.now() - timedelta(minutes=5)
                     unit_time = "second"
