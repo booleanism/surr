@@ -120,7 +120,7 @@ func (s subscription) DeleteSubscriptions(ctx context.Context, subsID []models.S
 }
 
 func (s subscription) SelectSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error) {
-	rws, err := s.DB.QueryContext(ctx, "SELECT node_id FROM subscribed_nodes WHERE subscription_id = ?", sub.ID)
+	rws, err := s.DB.QueryContext(ctx, "SELECT node_id FROM subscribed_nodes WHERE subscription_id = ?", sub.ID[:])
 	if err != nil {
 		return 0, err
 	}
@@ -154,7 +154,7 @@ func (s subscription) SelectAllSubscribedNodes(ctx context.Context, nodes *[]mod
 }
 
 func (s subscription) SelectSubscriptionByNode(ctx context.Context, node models.Node, subs *[]models.Subscription) error {
-	rw := s.DB.QueryRowContext(ctx, "SELECT subscription_id FROM subscribed_nodes WHERE node_id = ?", node.ID)
+	rw := s.DB.QueryRowContext(ctx, "SELECT subscription_id FROM subscribed_nodes WHERE node_id = ?", node.ID[:])
 	(*subs) = append((*subs), models.Subscription{})
 	err := rw.Scan(&(*subs)[0].ID)
 	if err != nil {
@@ -162,4 +162,21 @@ func (s subscription) SelectSubscriptionByNode(ctx context.Context, node models.
 	}
 
 	return rw.Err()
+}
+
+func (s subscription) SelectNodeIDsByUser(ctx context.Context, user models.User, nodes *[]models.Node) (int, error) {
+	rws, err := s.DB.QueryContext(ctx, "SELECT sn.node_id	FROM subscribed_nodes sn 	JOIN subscriptions s ON sn.subscription_id = s.id	WHERE s.user_id = ?", user.ID[:])
+	if err != nil {
+		return 0, err
+	}
+	defer rws.Close() //nolint:errcheck
+
+	return s.scanRows(rws, func(i int) []any {
+		if i >= cap(*nodes) {
+			return nil
+		}
+
+		*nodes = append(*nodes, models.Node{})
+		return []any{&(*nodes)[i].ID}
+	})
 }

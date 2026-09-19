@@ -1,4 +1,4 @@
-package adapter
+package rabbitmq
 
 import (
 	"context"
@@ -39,6 +39,20 @@ func (s subscription) InsertSubscriptions(ctx context.Context, subsNodes []model
 
 func (s subscription) DeleteSubscriptions(ctx context.Context, subsNodes []models.SubscribedNodes) error {
 	return s.insertDeleteSubscriptionWrap(ctx, "subscriptions.remove", subsNodes)
+}
+
+func (s subscription) SelectNodeIDsByUser(ctx context.Context, user models.User, nodes *[]models.Node) (int, error) {
+	payload, err := json.Marshal(&user)
+	if err != nil {
+		return 0, err
+	}
+
+	err = s.do(ctx, "subscriptions.nodes.by.user.get", payload, nodes)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(*nodes), nil
 }
 
 func (s subscription) SelectSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error) {

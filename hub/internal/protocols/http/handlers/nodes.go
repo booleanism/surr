@@ -6,26 +6,35 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
+	"github.com/google/uuid"
 )
 
 type Node interface {
 	AvailableNodes(ctx context.Context, nodes *[]models.Node) (int, error)
 }
 
+type Analytics interface {
+	GetAnalytics(ctx context.Context, user models.User, node models.Node, buf *[]byte) (int, error)
+}
+
 type nodeHandlers struct {
 	m *http.ServeMux
 	n Node
+	a Analytics
 }
 
-func NewNode(mux *http.ServeMux, n Node) nodeHandlers {
+func NewNode(mux *http.ServeMux, n Node, a Analytics) nodeHandlers {
 	h := nodeHandlers{
 		m: mux,
 		n: n,
+		a: a,
 	}
 
 	mux.HandleFunc("GET /availability", h.getAvailableNodeHandler)
+	mux.HandleFunc("GET /analytics", h.analyticsHandler)
 	return h
 }
 
@@ -33,7 +42,45 @@ func (s nodeHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.m.ServeHTTP(w, r)
 }
 
-func (n *nodeHandlers) getAvailableNodeHandler(w http.ResponseWriter, r *http.Request) {
+func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
+	buf := pools.BytesPool.Get().(*[]byte)
+	defer pools.BytesPoolResetAndPut(buf)
+
+	userID, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
+	if err != nil {
+		fmt.Printf("ERRO: parsing user id: %s\n", err.Error())
+		http.Error(w, "unable to parse user id", http.StatusBadRequest)
+		return
+	}
+
+	nodeID, err := uuid.Parse(r.URL.Query().Get("node_id"))
+	if err != nil {
+		fmt.Printf("ERRO: parsing node id: %s\n", err.Error())
+		http.Error(w, "parsing node id", http.StatusBadRequest)
+		return
+	}
+
+	user := models.User{
+		ID: userID,
+	}
+
+	node := models.Node{
+		ID: nodeID,
+	}
+
+	var nbuf int
+	nbuf, err = n.a.GetAnalytics(r.Context(), user, node, buf)
+	if err != nil {
+		fmt.Printf("ERRO: get analytics: %s\n", err.Error())
+		http.Error(w, "unable to fetch analytics", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Add("Content-Type", "application/json")
+	w.Write((*buf)[:nbuf])
+}
+
+func (n nodeHandlers) getAvailableNodeHandler(w http.ResponseWriter, r *http.Request) {
 	nodes := pools.NodePool.Get().(*[]models.Node)
 	defer pools.NodePoolResetAndPut(nodes)
 

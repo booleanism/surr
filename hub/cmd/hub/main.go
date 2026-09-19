@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/booleanism/surr/hub/internal/adapter"
+	rabbitmqAdapter "github.com/booleanism/surr/hub/internal/adapter/rabbitmq"
 	"github.com/booleanism/surr/hub/internal/db/sqlite"
 	httpHandlers "github.com/booleanism/surr/hub/internal/protocols/http/handlers"
 	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
-	rabbitmqHanlders "github.com/booleanism/surr/hub/internal/protocols/rabbitmq/handlers"
+	rabbitmqHandlers "github.com/booleanism/surr/hub/internal/protocols/rabbitmq/handlers"
 	"github.com/booleanism/surr/hub/internal/usecases"
 	"github.com/booleanism/surr/hub/internal/usecases/auth"
 	"github.com/booleanism/surr/internal/db"
@@ -85,7 +85,8 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 
 	router := rabbitmq.NewRouter(ch, routerQueue, routerHandlers, siblings)
 	goPool := pools.NewGoroutinesPool(cmdLine.NGoroutinesPool)
-	subsAdapter := adapter.NewSubscription(router, goPool, siblings)
+	subsAdapter := rabbitmqAdapter.NewSubscription(router, goPool, siblings)
+	nodesAdapter := rabbitmqAdapter.NewNodes(router, siblings, goPool)
 
 	argon := auth.NewArgonHashing(auth.ArgonParams{
 		Memory:      64 * 1024,
@@ -98,8 +99,9 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 	subsCase := usecases.NewSubscription(subsAdapter, usersRepo, nodesRepo)
 	userCase := usecases.NewUser(usersRepo, argon)
 	nodeCase := usecases.NewNode(nodesRepo, subsAdapter)
+	analCase := usecases.NewAnalytics(subsAdapter, nodesAdapter)
 
-	err = rabbitmqHanlders.SetupNode(nodeCase, routerHandlers)
+	err = rabbitmqHandlers.SetupNode(nodeCase, routerHandlers)
 	if err != nil {
 		fmt.Printf("ERRO: setup rabbitmq node handler: %s\n", err.Error())
 		return
@@ -176,7 +178,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 	userHandlers := httpHandlers.NewUser(userMux, userCase)
 
 	nodeMux := http.NewServeMux()
-	nodeHandlers := httpHandlers.NewNode(nodeMux, nodeCase)
+	nodeHandlers := httpHandlers.NewNode(nodeMux, nodeCase, analCase)
 
 	authMux := http.NewServeMux()
 	authHandlers := httpHandlers.NewAuthHandlers(authMux, refreshToken, auth, JWTTTL)

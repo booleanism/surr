@@ -16,6 +16,7 @@ type Subscriptions interface {
 	GetSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error)
 	GetAllSubscribedNodes(ctx context.Context, nodes *[]models.Node) (int, error)
 	GetSubscriptionByNode(ctx context.Context, node models.Node, subs *[]models.Subscription) error
+	GetNodeIDsByUser(ctx context.Context, user models.User, nodes *[]models.Node) (int, error)
 }
 
 type SetHandler interface {
@@ -49,6 +50,11 @@ func SetupSubscription(subs Subscriptions, h SetHandler) error {
 	}
 
 	err = s.h.Set("subscriptions.nodes.get", s.getSubscribedNodesHandler)
+	if err != nil {
+		return err
+	}
+
+	err = s.h.Set("subscriptions.nodes.by.user.get", s.getNodesIDByUserHandler)
 	if err != nil {
 		return err
 	}
@@ -173,6 +179,32 @@ func (s subscriptions) getSubscribedNodesHandler(ctx context.Context, trackID uu
 	}
 
 	_, err = s.s.GetSubscribedNodes(ctx, subs, nodes)
+	if err != nil {
+		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		return
+	}
+
+	res, err := json.Marshal(nodes)
+	if err != nil {
+		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		return
+	}
+
+	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: res})
+}
+
+func (s subscriptions) getNodesIDByUserHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
+	nodes := pools.NodePool.Get().(*[]models.Node)
+	defer pools.NodePoolResetAndPut(nodes)
+
+	user := models.User{}
+	err := json.Unmarshal(req.Payload, &user)
+	if err != nil {
+		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
+		return
+	}
+
+	_, err = s.s.GetNodeIDsByUser(ctx, user, nodes)
 	if err != nil {
 		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
 		return

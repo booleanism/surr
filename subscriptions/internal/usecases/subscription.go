@@ -14,6 +14,7 @@ type Subscription interface {
 	SelectSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error)
 	SelectSubscriptionsByUser(ctx context.Context, userID uuid.UUID, subs *[]models.Subscription) (int, error)
 	SelectSubscriptionByNode(ctx context.Context, node models.Node, subs *[]models.Subscription) error
+	SelectNodeIDsByUser(ctx context.Context, user models.User, nodes *[]models.Node) (int, error)
 }
 
 type subscription struct {
@@ -44,4 +45,8 @@ func (s subscription) GetSubscriptionByNode(ctx context.Context, node models.Nod
 
 func (s subscription) GetAllSubscribedNodes(ctx context.Context, nodes *[]models.Node) (int, error) {
 	return s.s.SelectAllSubscribedNodes(ctx, nodes)
+}
+
+func (s subscription) GetNodeIDsByUser(ctx context.Context, user models.User, nodes *[]models.Node) (int, error) {
+	return s.s.SelectNodeIDsByUser(ctx, user, nodes)
 }

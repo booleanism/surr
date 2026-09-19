@@ -1,12 +1,15 @@
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import json
 import typing
 import uuid
 
+from pymongo import collection
 from ultralytics.models import YOLO
 from core import handlers
 from core import pipeline
+from nodes.lib.bustle.analytics import detail_line_chart_pipeline, summary_bar_chart_pipeline
 from . import processing
 
 class Pipeline(typing.Protocol):
@@ -15,6 +18,10 @@ class Pipeline(typing.Protocol):
 
     def start(self, srt_address: str) -> None:
         ...
+
+@dataclass
+class AnalyticsParams:
+    time_type: str
 
 @dataclass
 class NodeSource:
@@ -36,14 +43,47 @@ class BustleHandlers:
         model: YOLO,
         chosen_classes: list[int],
         async_q: asyncio.Queue[dict[str, int]],
+        coll: collection.Collection
     ) -> None:
         cls._pipeline = pipeline
         cls._model = model
         cls._chosen_classes = chosen_classes
         cls._async_q = async_q
+        cls._coll = coll
+        cls._node_id = node_id
 
         handlers_mgr.set(f"{node_id}.sink.start", cls._start_sink)
         handlers_mgr.set(f"{node_id}.sink.stop", cls._stop_sink)
+        handlers_mgr.set(f"{node_id}.sink.analytics", cls._analytics)
+
+    @classmethod
+    async def _analytics(
+            cls, _trackID: uuid.UUID, req: handlers.RouterRequest, rep: handlers.ReplyFunc
+    ) -> None:
+        try:
+            p = AnalyticsParams(**json.loads(req.payload))
+            match p.time_type:
+                case "minutes":
+                    start_time = datetime.now() - timedelta(minutes=5)
+                    unit_time = "second"
+                case "hours":
+                    start_time = datetime.now() - timedelta(hours=5)
+                    unit_time = "minute"
+                case "dailies":
+                    start_time = datetime.now() - timedelta(days=5)
+                    unit_time = "hour"
+                case _:
+                    start_time = datetime.now() - timedelta(weeks=5)
+                    unit_time = "day"
+
+            summary_bar_chart = cls._coll.aggregate(summary_bar_chart_pipeline(cls._node_id, start_time))
+            detail_line_chart = cls._coll.aggregate(detail_line_chart_pipeline(cls._node_id, start_time, unit_time))
+
+            await rep(handlers.RouterResponse(0, json.dumps([dict(summary_bar_chart), dict(detail_line_chart)]).encode()))
+        except Exception as e:
+            await rep(handlers.RouterResponse(-1, str(e)))
+            raise
+        return None
 
     @classmethod
     async def _stop_worker_task(cls) -> None:

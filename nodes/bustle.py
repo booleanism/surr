@@ -70,7 +70,7 @@ async def main():
     async_q: asyncio.Queue[dict[str, int]] = asyncio.Queue()
     model = YOLO("yolo26s.pt")
 
-    bustle_handlers.BustleHandlers.setup(NODE_ID, handlers, streamer, model, CHOSEN_CLASSES, async_q)
+    bustle_handlers.BustleHandlers.setup(NODE_ID, handlers, streamer, model, CHOSEN_CLASSES, async_q, coll)
 
     tasks: list[asyncio.Task] = []
     connection = await aio_pika.connect_robust("amqp://guest:guest@localhost/")
