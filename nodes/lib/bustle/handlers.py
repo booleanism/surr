@@ -9,7 +9,7 @@ from pymongo import collection
 from ultralytics.models import YOLO
 from core import handlers
 from core import pipeline
-from nodes.lib.bustle.analytics import detail_line_chart_pipeline, summary_bar_chart_pipeline
+from lib.bustle.analytics import detail_line_chart_pipeline, summary_bar_chart_pipeline
 from . import processing
 
 class Pipeline(typing.Protocol):

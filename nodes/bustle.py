@@ -61,7 +61,7 @@ async def main():
     try:
         coll = await asyncio.to_thread(init_db)
     except Exception as e:
-        print(f"error opening database connection: {e}")
+        print(f"ERRO: error opening database connection: {e}")
         return
 
     handlers = core_handlers.Handlers()
@@ -85,6 +85,8 @@ async def main():
             )
 
             listen_task = asyncio.create_task(router.listen())
+            print("INFO: starting router listen")
+
             intro_task = asyncio.create_task(
                 introduce(INTRO_INTERVAL, router.introduce)
             )
@@ -94,6 +96,7 @@ async def main():
                     async_q, DRAIN_INTERVAL_SECONDS, NODE_ID, coll
                 )
             )
+            print("INFO: starting normalizer")
 
             tasks.extend([listen_task, intro_task, normalizer_task])
             done, _ = await asyncio.wait(
@@ -106,7 +109,7 @@ async def main():
                     raise exc
 
         except asyncio.CancelledError:
-            print("shutting down bustle node...")
+            print("INFO: shutting down bustle node...")
         finally:
             streamer.stop()
             for task in tasks:
@@ -121,4 +124,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("process terminated by user.")
+        print("ERRO: process terminated by user.")
