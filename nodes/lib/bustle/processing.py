@@ -57,11 +57,11 @@ async def normalizer(
 
 
 def frame_worker(
-    receiver: pipeline.SRTStreamer, 
-    model: YOLO, 
-    chosen_classes: list[int], 
-    loop: asyncio.AbstractEventLoop, 
-    async_q: asyncio.Queue[dict[str, int]]
+    receiver: pipeline.SRTStreamer,
+    model: YOLO,
+    chosen_classes: list[int],
+    loop: asyncio.AbstractEventLoop,
+    async_q: asyncio.Queue[dict[str, int]],
 ):
     while receiver.running:
         frame = receiver.get_frame()
@@ -83,10 +83,7 @@ def frame_worker(
 
         counts: Counter[int] = Counter(class_ids)
         frame_data: dict[str, int] = {
-            model.names[c]: counts.get(c, 0)
-            for c in chosen_classes
-            if c in model.names
+            model.names[c]: counts.get(c, 0) for c in chosen_classes if c in model.names
         }
 
         loop.call_soon_threadsafe(async_q.put_nowait, frame_data)
-

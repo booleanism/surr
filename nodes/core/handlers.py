@@ -2,8 +2,14 @@ from dataclasses import dataclass
 import json
 import typing
 import uuid
+import base64
 
 Command = str
+
+def json_serializer(obj):
+    if isinstance(obj, bytes):
+        return base64.b64encode(obj).decode('utf-8')
+    return str(obj)
 
 @dataclass
 class RouterRequest:
@@ -20,7 +26,8 @@ class RouterResponse:
             {
                 "code": self.code,
                 "result": self.result,
-            }
+            },
+            default=json_serializer
         ).encode()
 
     @classmethod

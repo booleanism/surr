@@ -2,6 +2,8 @@ package protocols
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -16,14 +18,35 @@ type (
 	HandlerFunc func(ctx context.Context, trackID uuid.UUID, req RouterRequest, rep ReplyFunc)
 
 	RouterResponse struct {
-		Result []byte `json:"result,omitempty,omitzero"`
-		Code   int    `json:"code,omitempty"`
+		Result json.RawMessage `json:"result,omitempty,omitzero"`
+		Code   int             `json:"code,omitempty"`
 	}
 
 	RouterRequest struct {
 		Payload []byte `json:"data"`
 	}
 )
+
+func (r RouterResponse) GetBytes() ([]byte, error) {
+	if len(r.Result) == 0 || string(r.Result) == "null" {
+		return nil, nil
+	}
+
+	if r.Result[0] == '"' {
+		var str string
+		if err := json.Unmarshal(r.Result, &str); err != nil {
+			return nil, err
+		}
+
+		if decoded, err := base64.StdEncoding.DecodeString(str); err == nil {
+			return decoded, nil
+		}
+
+		return []byte(str), nil
+	}
+
+	return r.Result, nil
+}
 
 type Router interface {
 	Send(ctx context.Context, command Command, payload []byte, siblingName SiblingName) (uuid.UUID, error)
