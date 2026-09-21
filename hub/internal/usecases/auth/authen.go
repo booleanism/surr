@@ -13,7 +13,7 @@ import (
 )
 
 type JwtClaims struct {
-	UserID string `json:"user_id"`
+	UserID uuid.UUID `json:"user_id"`
 	jwt.RegisteredClaims
 }
 
@@ -40,9 +40,10 @@ type authenticator struct {
 
 func NewAuthenticator(ur AuthenticatorUser, ar *argonHashing, s []byte, exp time.Duration) authenticator {
 	return authenticator{
-		ur: ur,
-		ar: ar,
-		s:  s,
+		ur:  ur,
+		ar:  ar,
+		s:   s,
+		exp: exp,
 	}
 }
 
@@ -63,7 +64,7 @@ func (a authenticator) VerifyCredentials(ctx context.Context, u UserAuth) (uuid.
 
 func (a authenticator) GenerateTokenPair(userID uuid.UUID) (TokenPair, error) {
 	claims := JwtClaims{
-		UserID: userID.String(),
+		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(a.exp)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -89,20 +90,21 @@ func (a authenticator) GenerateTokenPair(userID uuid.UUID) (TokenPair, error) {
 	}, nil
 }
 
-func (a authenticator) ValidateAccessToken(tokenString string) (string, error) {
+func (a authenticator) ValidateAccessToken(tokenString string) (uuid.UUID, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &JwtClaims{}, func(token *jwt.Token) (any, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing algorithm: %v", token.Header["alg"])
 		}
+
 		return a.s, nil
 	})
 	if err != nil {
-		return "", err
+		return uuid.Nil, err
 	}
 
 	claims, ok := token.Claims.(*JwtClaims)
 	if !ok || !token.Valid {
-		return "", fmt.Errorf("invalid or expired token")
+		return uuid.Nil, fmt.Errorf("invalid or expired token")
 	}
 
 	return claims.UserID, nil
