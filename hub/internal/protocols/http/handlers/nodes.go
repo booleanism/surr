@@ -21,21 +21,27 @@ type Analytics interface {
 	GetAnalytics(ctx context.Context, user models.User, node models.Node, filter rabbitmq.AnalyticsFilters, buf *[]byte) (int, error)
 }
 
-type nodeHandlers struct {
-	m *http.ServeMux
-	n Node
-	a Analytics
+type AuthHandlerFunc interface {
+	RequireAuthHandlerFunc(n http.HandlerFunc) http.HandlerFunc
 }
 
-func NewNode(mux *http.ServeMux, n Node, a Analytics) nodeHandlers {
+type nodeHandlers struct {
+	m    *http.ServeMux
+	n    Node
+	a    Analytics
+	auth AuthHandlerFunc
+}
+
+func NewNode(mux *http.ServeMux, n Node, a Analytics, auth AuthHandlerFunc) nodeHandlers {
 	h := nodeHandlers{
-		m: mux,
-		n: n,
-		a: a,
+		m:    mux,
+		n:    n,
+		a:    a,
+		auth: auth,
 	}
 
-	mux.HandleFunc("GET /availability", h.getAvailableNodeHandler)
-	mux.HandleFunc("GET /analytics", h.analyticsHandler)
+	mux.HandleFunc("GET /availability", auth.RequireAuthHandlerFunc(http.HandlerFunc(h.getAvailableNodeHandler)))
+	mux.HandleFunc("GET /analytics", auth.RequireAuthHandlerFunc(http.HandlerFunc(h.analyticsHandler)))
 	return h
 }
 
@@ -57,7 +63,7 @@ func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
 	nodeID, err := uuid.Parse(r.URL.Query().Get("node_id"))
 	if err != nil {
 		fmt.Printf("ERRO: parsing node id: %s\n", err.Error())
-		http.Error(w, "parsing node id", http.StatusBadRequest)
+		http.Error(w, "unable to parse node id", http.StatusBadRequest)
 		return
 	}
 
@@ -94,12 +100,12 @@ func (n nodeHandlers) getAvailableNodeHandler(w http.ResponseWriter, r *http.Req
 	nodes := pools.NodePool.Get().(*[]models.Node)
 	defer pools.NodePoolResetAndPut(nodes)
 
-	// _, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
-	// if err != nil {
-	//	fmt.Printf("ERRO: parsing user id: %s\n", err.Error())
-	// 	http.Error(w, "unable to parse user id", http.StatusBadRequest)
-	// 	return
-	// }
+	_, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
+	if err != nil {
+		fmt.Printf("ERRO: parsing user id: %s\n", err.Error())
+		http.Error(w, "unable to parse user id", http.StatusBadRequest)
+		return
+	}
 
 	nNodes, err := n.n.AvailableNodes(r.Context(), nodes)
 	if err != nil {

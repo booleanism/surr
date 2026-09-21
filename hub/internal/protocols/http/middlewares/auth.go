@@ -1,14 +1,17 @@
 package middlewares
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 const UserIDHeaderKey = "X-User-ID"
 
 type Auth interface {
-	ValidateAccessToken(tokenString string) (userID string, err error)
+	ValidateAccessToken(tokenString string) (userID uuid.UUID, err error)
 }
 
 type auth struct {
@@ -21,7 +24,7 @@ func NewAuth(a Auth) auth {
 	}
 }
 
-func (a auth) RequireAuth(next http.Handler) http.HandlerFunc {
+func (a auth) RequireAuthHandlerFunc(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
@@ -37,11 +40,16 @@ func (a auth) RequireAuth(next http.Handler) http.HandlerFunc {
 
 		userID, err := a.a.ValidateAccessToken(parts[1])
 		if err != nil {
+			fmt.Printf("ERRO: validate access token: %s\n", err.Error())
 			http.Error(w, "unauthorized access token", http.StatusUnauthorized)
 			return
 		}
 
-		r.Header.Set(UserIDHeaderKey, userID)
+		r.Header.Set(UserIDHeaderKey, userID.String())
 		next.ServeHTTP(w, r)
 	}
+}
+
+func (a auth) RequireAuth(next http.Handler) http.HandlerFunc {
+	return a.RequireAuthHandlerFunc(next.ServeHTTP)
 }

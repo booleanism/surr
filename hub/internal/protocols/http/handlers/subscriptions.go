@@ -18,19 +18,21 @@ type Subscription interface {
 }
 
 type subscriptionHandlers struct {
-	m *http.ServeMux
-	s Subscription
+	m    *http.ServeMux
+	s    Subscription
+	auth AuthHandlerFunc
 }
 
-func NewSubscription(mux *http.ServeMux, s Subscription) subscriptionHandlers {
+func NewSubscription(mux *http.ServeMux, s Subscription, auth AuthHandlerFunc) subscriptionHandlers {
 	h := subscriptionHandlers{
-		m: mux,
-		s: s,
+		m:    mux,
+		s:    s,
+		auth: auth,
 	}
 
-	mux.HandleFunc("POST /add", h.add)
-	mux.HandleFunc("POST /remove", h.remove)
-	mux.HandleFunc("GET /sinks", h.sinks)
+	mux.HandleFunc("POST /add", auth.RequireAuthHandlerFunc(h.add))
+	mux.HandleFunc("POST /remove", auth.RequireAuthHandlerFunc(h.remove))
+	mux.HandleFunc("GET /sinks", auth.RequireAuthHandlerFunc(h.sinks))
 	return h
 }
 
