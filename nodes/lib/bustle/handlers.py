@@ -76,12 +76,12 @@ class BustleHandlers:
                     start_time = datetime.now() - timedelta(weeks=5)
                     unit_time = "day"
 
-            summary_bar_chart = cls._coll.aggregate(summary_bar_chart_pipeline(cls._node_id, start_time))
-            detail_line_chart = cls._coll.aggregate(detail_line_chart_pipeline(cls._node_id, start_time, unit_time))
+            summary_bar_chart = list(cls._coll.aggregate(summary_bar_chart_pipeline(cls._node_id, start_time)))
+            detail_line_chart = list(cls._coll.aggregate(detail_line_chart_pipeline(cls._node_id, start_time, unit_time)))
 
-            await rep(handlers.RouterResponse(0, json.dumps([dict(summary_bar_chart), dict(detail_line_chart)]).encode()))
+            await rep(handlers.RouterResponse(0, json.dumps([summary_bar_chart, detail_line_chart], default=str).encode()))
         except Exception as e:
-            await rep(handlers.RouterResponse(-1, str(e)))
+            await rep(handlers.RouterResponse(-2, str(e)))
             raise
         return None
 

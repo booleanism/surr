@@ -69,8 +69,8 @@ def detail_line_chart_pipeline(node_id: uuid.UUID, start_time: datetime, unit_ti
         "$project": {
             "_id": 0,
             "name": "$_id",
-            "type": "line",
-            "showSymbol": False,
+            "type": {"$literal": "line"},
+            "showSymbol": {"$literal": False},
             "data": 1
         }
     }]
