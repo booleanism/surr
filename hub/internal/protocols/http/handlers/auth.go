@@ -82,7 +82,7 @@ func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    tokens.RefreshToken,
-		Path:     "/",
+		Path:     "/auth",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -122,7 +122,7 @@ func (h authHandlers) refreshAccessTokenHandler(w http.ResponseWriter, r *http.R
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    newTokens.RefreshToken,
-		Path:     "/",
+		Path:     "/auth",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -148,7 +148,7 @@ func (h authHandlers) logoutHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    "",
-		Path:     "/",
+		Path:     "/auth",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSite(http.SameSiteStrictMode),
