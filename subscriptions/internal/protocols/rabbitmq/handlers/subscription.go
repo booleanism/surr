@@ -54,7 +54,7 @@ func SetupSubscription(subs Subscriptions, h SetHandler) error {
 		return err
 	}
 
-	err = s.h.Set("subscriptions.nodes.by.user.get", s.getNodesIDByUserHandler)
+	err = s.h.Set("subscriptions.nodes.by.user.get", s.getNodeIDsByUserHandler)
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func (s subscriptions) getSubscribedNodesHandler(ctx context.Context, trackID uu
 	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: res})
 }
 
-func (s subscriptions) getNodesIDByUserHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
+func (s subscriptions) getNodeIDsByUserHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
 	nodes := pools.NodePool.Get().(*[]models.Node)
 	defer pools.NodePoolResetAndPut(nodes)
 
@@ -204,13 +204,14 @@ func (s subscriptions) getNodesIDByUserHandler(ctx context.Context, trackID uuid
 		return
 	}
 
-	_, err = s.s.GetNodeIDsByUser(ctx, user, nodes)
+	n, err := s.s.GetNodeIDsByUser(ctx, user, nodes)
 	if err != nil {
 		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
 		return
 	}
 
-	res, err := json.Marshal(nodes)
+	v := (*nodes)[:n]
+	res, err := json.Marshal(&v)
 	if err != nil {
 		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
 		return
