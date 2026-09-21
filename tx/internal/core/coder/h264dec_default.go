@@ -5,5 +5,5 @@ package coder
 import "github.com/go-gst/go-gst/pkg/gst"
 
 func decElement() gst.Element {
-	return gst.ElementFactoryMake("openh264enc", "openh264enc")
+	return gst.ElementFactoryMake("openh264dec", "openh264dec")
 }
