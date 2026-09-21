@@ -60,7 +60,13 @@ func main() {
 
 	switch cmdLine.SelectedCommand {
 	case "run":
-		run(ctx, cmdLine, beforeExit)
+		err = run(ctx, cmdLine, beforeExit)
+		if err != nil {
+			fmt.Printf("ERRO: run command: %s\n", err.Error())
+			cancel()
+		}
+
+		<-ctx.Done()
 		<-cleanupDone
 
 	default:
@@ -68,11 +74,10 @@ func main() {
 }
 
 //nolint:cyclop
-func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
+func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) error {
 	sqliteDB, ch, routerQueue, err := infraSetup(cmdLine, &beforeExit)
 	if err != nil {
-		fmt.Printf("ERRO: setup infra: %s\n", err.Error())
-		return
+		return err
 	}
 
 	txFactory := db.TXFactory(sqliteDB)
@@ -103,8 +108,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 
 	err = rabbitmqHandlers.SetupNode(nodeCase, routerHandlers)
 	if err != nil {
-		fmt.Printf("ERRO: setup rabbitmq node handler: %s\n", err.Error())
-		return
+		return fmt.Errorf("setup rabbitmq node handler: %w", err)
 	}
 
 	go func() {
@@ -172,28 +176,25 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 	_ = authMiddleware
 
 	subsMux := http.NewServeMux()
-	subsHandlers := httpHandlers.NewSubscription(subsMux, subsCase)
+	subsHandlers := httpHandlers.NewSubscription(subsMux, subsCase, authMiddleware)
 
 	userMux := http.NewServeMux()
 	userHandlers := httpHandlers.NewUser(userMux, userCase)
 
 	nodeMux := http.NewServeMux()
-	nodeHandlers := httpHandlers.NewNode(nodeMux, nodeCase, analCase)
+	nodeHandlers := httpHandlers.NewNode(nodeMux, nodeCase, analCase, authMiddleware)
 
 	authMux := http.NewServeMux()
 	authHandlers := httpHandlers.NewAuthHandlers(authMux, refreshToken, auth, JWTTTL)
 
-	v1Mux := http.NewServeMux()
-	v1Mux.Handle("/subscriptions/", http.StripPrefix("/subscriptions", subsHandlers))
-	v1Mux.Handle("/users/", http.StripPrefix("/users", userHandlers))
-	v1Mux.Handle("/nodes/", http.StripPrefix("/nodes", nodeHandlers))
-	v1Mux.Handle("/auth/", http.StripPrefix("/auth", authHandlers))
-
-	api := http.NewServeMux()
-	api.Handle("/api/v1/", http.StripPrefix("/api/v1", v1Mux))
+	apiMux := http.NewServeMux()
+	apiMux.Handle("/subscriptions/", http.StripPrefix("/subscriptions", subsHandlers))
+	apiMux.Handle("/users/", http.StripPrefix("/users", userHandlers))
+	apiMux.Handle("/nodes/", http.StripPrefix("/nodes", nodeHandlers))
+	apiMux.Handle("/auth/", http.StripPrefix("/auth", authHandlers))
 
 	mainMux := http.NewServeMux()
-	mainMux.Handle("/", api)
+	mainMux.Handle("/", apiMux)
 
 	httpSrv := http.Server{
 		Addr:              cmdLine.HTTPAddr,
@@ -224,7 +225,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 		}
 	}()
 
-	<-ctx.Done()
+	return nil
 }
 
 func infraSetup(cmdLine *CommandLine, beforeExit *[]func() error) (*sql.DB, *amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
@@ -232,7 +233,7 @@ func infraSetup(cmdLine *CommandLine, beforeExit *[]func() error) (*sql.DB, *amq
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("opening db: %w", err)
 	}
-	defer sqliteDB.Close() //nolint:errcheck
+	(*beforeExit) = append((*beforeExit), sqliteDB.Close)
 
 	mq, err := amqp091.Dial(cmdLine.RabbitMQAddr)
 	if err != nil {
