@@ -70,7 +70,7 @@ func (s subscription) SelectSubscribedNodes(ctx context.Context, sub models.Subs
 }
 
 func (s subscription) SelectAllSubscribedNodes(ctx context.Context, nodes *[]models.Node) (int, error) {
-	err := s.do(ctx, "subscriptions.nodes.get.all", nil, nodes)
+	err := s.do(ctx, "subscriptions.nodes.all.get", nil, nodes)
 	if err != nil {
 		return 0, err
 	}
