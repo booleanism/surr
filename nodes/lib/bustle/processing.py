@@ -16,6 +16,7 @@ async def normalizer(
     q: asyncio.Queue[dict[str, int]], 
     interval: float, 
     node_id: uuid.UUID, 
+    node_type: str,
     coll: collection.Collection
 ):
     ticker_gen = ticker.ticker(interval)
@@ -33,7 +34,7 @@ async def normalizer(
         res: dict[str, typing.Any] = {
             "node": {
                 "id": str(node_id),
-                "type": "bustle"
+                "type": node_type
             },
             "timestamp": datetime.now(),
             "counts": counts
