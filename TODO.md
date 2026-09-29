@@ -159,8 +159,8 @@ the DESIGN.md §13 policy exactly — logs must carry context values
         host), state changes, bus errors, DASH register/unregister
   - [x] Source URI may embed rtsp credentials — log scheme://host only
 - [x] C7. Remove all remaining fmt.Printf INFO:/ERRO:/WARN: prints across
-      mains and internals (verified with go build, go vet and gofumpt in
-      every module — golangci-lint itself is not installed here)
+      mains and internals — verified with go build, go vet, gofumpt and
+      golangci-lint (make lint: 0 issues in every module)
 - [x] C8. (folds into A2) bustle.py print()s → stdlib logging, matching the
       level semantics of core/ modules (Python side keeps stdlib logging)
 
@@ -174,9 +174,8 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       to return {categories, series: [{name, values}]} — consumers currently
       expecting the ECharts shape must adapt in the same change
 - [x] tx --recording flag wrote parsed specs into DownstreamSpecs instead of
-      RecordingSpecs (tx/cmd/tx/cmdline.go, recording flag Action) — fixed in
-      the working tree (assignments now target RecordingSpecs); remember to
-      commit it
+      RecordingSpecs (tx/cmd/tx/cmdline.go, recording flag Action) — fixed
+      and committed (e3ca2db)
 - [ ] Consider replacing the `restart = restart || !restart` idiom (always
       true after first pass; log wording only)
 - [ ] POST /subscriptions/remove returns 501 — implement HTTP path or remove
