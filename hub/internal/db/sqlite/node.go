@@ -29,10 +29,13 @@ func (r nodes) InsertNodes(ctx context.Context, nodes []models.Node) error {
 
 	for _, n := range nodes {
 		valueStrings = append(valueStrings, "(?, ?, ?, ?)")
-		valueArgs = append(valueArgs, n.ID, n.Bitrate, n.Width, n.Height)
+		valueArgs = append(valueArgs, n.ID[:], n.Bitrate, n.Width, n.Height)
 	}
 
-	stmt := fmt.Sprintf("INSERT INTO nodes (id, bitrate, width, height) VALUES %s", strings.Join(valueStrings, ", "))
+	stmt := fmt.Sprintf(
+		"INSERT INTO nodes (id, bitrate, width, height) VALUES %s ON CONFLICT(id) DO UPDATE SET bitrate=excluded.bitrate, width=excluded.width, height=excluded.height",
+		strings.Join(valueStrings, ", "),
+	)
 
 	_, err := r.DB.ExecContext(ctx, stmt, valueArgs...)
 	return err
@@ -48,7 +51,7 @@ func (r nodes) DeleteNodes(ctx context.Context, nodes []models.Node) error {
 
 	for i, n := range nodes {
 		placeholders[i] = "?"
-		nodeIDs[i] = n.ID
+		nodeIDs[i] = n.ID[:]
 	}
 
 	stmt := fmt.Sprintf("DELETE FROM nodes WHERE id IN (%s)", strings.Join(placeholders, ", "))
