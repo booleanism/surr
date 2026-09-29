@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import signal
 import typing
@@ -12,6 +13,7 @@ from pymongo import collection
 from ultralytics.models import YOLO
 
 from core import handlers as core_handlers
+from core import logging_setup
 from core import pipeline as core_pipeline
 from core import rpc as core_rpc
 from core import router as core_router
@@ -19,6 +21,8 @@ from core import siblings as core_siblings
 from core import ticker as core_ticker
 from lib.bustle import handlers as bustle_handlers
 from lib.bustle import processing as bustle_processing
+
+logger = logging.getLogger("bustle")
 
 import gi
 gi.require_version('Gst', '1.0')
@@ -47,6 +51,15 @@ def parse_classes(s: str) -> typing.List[int]:
         return [int(c) for c in s.split(",") if c != ""]
     except ValueError as e:
         raise argparse.ArgumentTypeError(f"invalid class list: {s!r}") from e
+
+
+def redact_url(raw: str) -> str:
+    """Reduce a credential-bearing URI to scheme://host (never-log rule)."""
+    if "://" not in raw:
+        return "unparseable-url"
+    scheme, rest = raw.split("://", 1)
+    host = rest.split("@", 1)[-1].split("/", 1)[0].split("?", 1)[0]
+    return f"{scheme}://{host}"
 
 
 def parse_args(argv: typing.Optional[typing.List[str]] = None) -> argparse.Namespace:
@@ -144,6 +157,12 @@ def parse_args(argv: typing.Optional[typing.List[str]] = None) -> argparse.Names
         default=DEFAULT_BITRATE,
         help="stream bitrate advertised to the hub on nodes.add",
     )
+    parser.add_argument(
+        "--log-level",
+        dest="log_level",
+        default="info",
+        help="log level (debug|info|warn|error)",
+    )
     return parser.parse_args(argv)
 
 
@@ -186,6 +205,17 @@ def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> collection.Col
 async def main():
     args = parse_args()
 
+    logging_setup.setup_logging(args.log_level, str(args.node_id))
+
+    logger.info(
+        "bustle node starting name=%s node_id=%s family=%s broker=%s node=%s",
+        args.node_name,
+        args.node_id,
+        args.family,
+        redact_url(args.broker),
+        args.node_type,
+    )
+
     Gst.init(None) # pyright: ignore[reportAttributeAccessIssue]
 
     try:
@@ -193,7 +223,7 @@ async def main():
             init_db, args.mongo_url, args.mongo_db, args.node_id
         )
     except Exception as e:
-        print(f"ERRO: error opening database connection: {e}")
+        logger.error("error opening database connection node_id=%s: %s", args.node_id, e)
         return
 
     handlers = core_handlers.Handlers()
@@ -244,7 +274,7 @@ async def main():
             timeout=DEFAULT_RPC_TIMEOUT,
             retry_interval=args.intro_interval,
         )
-        print("INFO: node registered via nodes.add")
+        logger.info("node registered command=nodes.add node_id=%s", args.node_id)
         registered_event.set()
 
     stop_event = asyncio.Event()
@@ -262,7 +292,7 @@ async def main():
             )
 
             listen_task = asyncio.create_task(router.listen())
-            print("INFO: starting router listen")
+            logger.info("starting router listen")
 
             intro_task = asyncio.create_task(
                 introduce(args.intro_interval, router.introduce)
@@ -277,10 +307,10 @@ async def main():
                     coll,
                 )
             )
-            print("INFO: starting normalizer")
+            logger.info("starting normalizer")
 
             register_task = asyncio.create_task(register(router))
-            print("INFO: starting registration")
+            logger.info("starting registration")
 
             stop_waiter = asyncio.create_task(stop_event.wait())
 
@@ -296,7 +326,7 @@ async def main():
             )
 
             if stop_waiter in done:
-                print("INFO: shutdown signal received, stopping bustle node...")
+                logger.info("shutdown signal received, stopping bustle node")
             else:
                 for task in done:
                     exc = task.exception()
@@ -304,7 +334,7 @@ async def main():
                         raise exc
 
         except asyncio.CancelledError:
-            print("INFO: shutting down bustle node...")
+            logger.info("shutting down bustle node")
         finally:
             streamer.stop()
 
@@ -337,9 +367,13 @@ async def main():
                         ),
                         timeout=DEFAULT_RPC_TIMEOUT,
                     )
-                    print("INFO: node deregistered via nodes.remove")
+                    logger.info("node deregistered command=nodes.remove node_id=%s", args.node_id)
                 except Exception as e:
-                    print(f"WARN: nodes.remove failed (stale row may remain in hub): {e}")
+                    logger.warning(
+                        "nodes.remove failed (stale row may remain in hub) node_id=%s: %s",
+                        args.node_id,
+                        e,
+                    )
 
                 listen_task.cancel()
                 await asyncio.gather(listen_task, return_exceptions=True)
@@ -352,4 +386,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("ERRO: process terminated by user.")
+        logging.getLogger("bustle").info("process terminated by user")
