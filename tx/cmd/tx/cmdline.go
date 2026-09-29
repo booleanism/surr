@@ -157,9 +157,9 @@ func (cl *CommandLine) parseCLI(ctx context.Context, args []string) error {
 								return err
 							}
 
-							cl.Run.DownstreamSpecs.Width = w
-							cl.Run.DownstreamSpecs.Height = h
-							cl.Run.DownstreamSpecs.Bitrate = b
+							cl.Run.RecordingSpecs.Width = w
+							cl.Run.RecordingSpecs.Height = h
+							cl.Run.RecordingSpecs.Bitrate = b
 							return nil
 						},
 					},
