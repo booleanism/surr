@@ -33,7 +33,7 @@ class RouterResponse:
     @classmethod
     def from_json(cls, data: bytes) -> "RouterResponse":
         obj = json.loads(data)
-        code = obj.get("code", 1)
+        code = obj.get("code", 0)
         return cls(code=code, result=obj.get("result"))
 
 ReplyFunc = typing.Callable[[RouterResponse], typing.Awaitable[None]]

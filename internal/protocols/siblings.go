@@ -5,7 +5,7 @@ import (
 )
 
 type Sibling struct {
-	Commands []Command
+	Commands []Command `json:"commands"`
 }
 
 type siblings struct {
