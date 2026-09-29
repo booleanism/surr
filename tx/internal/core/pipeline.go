@@ -12,7 +12,7 @@ import (
 type StreamSpecs struct {
 	Width   uint64 `json:"width"`
 	Height  uint64 `json:"height"`
-	Bitrate uint64 `json:"bitrate"`
+	Bitrate uint32 `json:"bitrate"`
 }
 
 // IsZero checks zero every fields. return false if every fields non-zero value.

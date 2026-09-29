@@ -13,8 +13,8 @@ import (
 )
 
 type JwtClaims struct {
-	UserID uuid.UUID `json:"user_id"`
 	jwt.RegisteredClaims
+	UserID uuid.UUID `json:"user_id"`
 }
 
 type TokenPair struct {

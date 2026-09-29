@@ -67,7 +67,7 @@ func main() {
 		<-ctx.Done()
 
 		for _, f := range beforeExit {
-			err := f()
+			err = f()
 			if err != nil {
 				log.Error().Err(err).Msg("before exit")
 			}
@@ -259,10 +259,10 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 		Str("sink", logging.RedactURL(cmdLine.Run.Sink)).
 		Uint64("downstream_width", cmdLine.Run.DownstreamSpecs.Width).
 		Uint64("downstream_height", cmdLine.Run.DownstreamSpecs.Height).
-		Uint64("downstream_bitrate", cmdLine.Run.DownstreamSpecs.Bitrate).
+		Uint32("downstream_bitrate", cmdLine.Run.DownstreamSpecs.Bitrate).
 		Uint64("recording_width", cmdLine.Run.RecordingSpecs.Width).
 		Uint64("recording_height", cmdLine.Run.RecordingSpecs.Height).
-		Uint64("recording_bitrate", cmdLine.Run.RecordingSpecs.Bitrate).
+		Uint32("recording_bitrate", cmdLine.Run.RecordingSpecs.Bitrate).
 		Msg("running transmitter")
 
 	pipeSetState(gst.StatePlaying)

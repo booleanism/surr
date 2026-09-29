@@ -28,12 +28,12 @@ func (c *Chunk) release() {
 }
 
 type broadcaster struct {
-	topic map[uuid.UUID]map[uuid.UUID]chan *Chunk
-	max   int64
-	log   zerolog.Logger
-
+	topic   map[uuid.UUID]map[uuid.UUID]chan *Chunk
 	dropped map[uuid.UUID]map[uuid.UUID]int64
-	dropMu  sync.Mutex
+	log     zerolog.Logger
+	max     int64
+
+	dropMu sync.Mutex
 
 	mu sync.RWMutex
 }
@@ -85,7 +85,7 @@ func (b *broadcaster) Unsubscribe(subID, nodeID uuid.UUID) {
 	}
 
 	b.dropMu.Lock()
-	if _, ok := b.dropped[subID]; ok {
+	if _, ok = b.dropped[subID]; ok {
 		delete(b.dropped[subID], nodeID)
 		if len(b.dropped[subID]) == 0 {
 			delete(b.dropped, subID)

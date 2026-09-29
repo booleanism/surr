@@ -8,7 +8,7 @@ func encElement() gst.Element {
 	return gst.ElementFactoryMake("openh264enc", "openh264enc")
 }
 
-func encElementWithOptions(bitrate uint64) gst.Element {
+func encElementWithOptions(bitrate uint32) gst.Element {
 	return gst.ElementFactoryMakeWithProperties("openh264enc", map[string]any{
 		"name":         "openh264enc",
 		"bitrate":      uint32(bitrate),

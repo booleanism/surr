@@ -95,7 +95,7 @@ func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Add("Content-Type", "application/json")
-	w.Write((*buf)[:nbuf])
+	_, _ = w.Write((*buf)[:nbuf])
 }
 
 func (n nodeHandlers) getAvailableNodeHandler(w http.ResponseWriter, r *http.Request) {

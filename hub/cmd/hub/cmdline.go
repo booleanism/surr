@@ -15,9 +15,9 @@ type CommandLine struct {
 	JWTSecret       string
 	RabbitMQAddr    string
 	SelectedCommand string
-	NGoroutinesPool uint32
 	LogLevel        string
 	LogFormat       string
+	NGoroutinesPool uint32
 }
 
 func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {

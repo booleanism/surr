@@ -43,7 +43,7 @@ func (s subscription) DeleteSubscriptions(ctx context.Context, subsNodes []model
 }
 
 func (s subscription) SelectNodeIDsByUser(ctx context.Context, user models.User, nodes *[]models.Node) (int, error) {
-	payload, err := json.Marshal(&user)
+	payload, err := json.Marshal(&user) //nolint:gosec
 	if err != nil {
 		return 0, err
 	}

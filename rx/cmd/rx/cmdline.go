@@ -23,12 +23,12 @@ type CommandLine struct {
 	SiblingName     string
 	Ingress         string
 	Egress          string
+	LogLevel        string
+	LogFormat       string
 	IngressHost     SRTHost
 	EgressHost      SRTHost
 	NGoroutinesPool uint32
 	NWorker         int64
-	LogLevel        string
-	LogFormat       string
 }
 
 func (c *CommandLine) srtHost(s string) (SRTHost, error) {

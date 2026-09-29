@@ -26,14 +26,14 @@ type CommandLine struct {
 	Version         string
 	RecordingDir    string
 	SelectedCommand string
-	Run             RunCmdLine
-	DashPort        uint16
 	LogLevel        string
 	LogFormat       string
+	Run             RunCmdLine
 	Serve           ServeCmdLine
+	DashPort        uint16
 }
 
-func (cl CommandLine) parseSpecs(s string) (uint64, uint64, uint64, error) {
+func (cl CommandLine) parseSpecs(s string) (uint64, uint64, uint32, error) {
 	ss := strings.Split(s, ",")
 	if len(ss) < 3 {
 		return 0, 0, 0, fmt.Errorf("unexpected format")
@@ -64,7 +64,7 @@ func (cl CommandLine) parseSpecs(s string) (uint64, uint64, uint64, error) {
 		return 0, 0, 0, err
 	}
 
-	b, err := safecast.Conv[uint64](bint)
+	b, err := safecast.Conv[uint32](bint)
 	if err != nil {
 		return 0, 0, 0, err
 	}
