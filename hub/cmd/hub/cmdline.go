@@ -16,6 +16,8 @@ type CommandLine struct {
 	RabbitMQAddr    string
 	SelectedCommand string
 	NGoroutinesPool uint32
+	LogLevel        string
+	LogFormat       string
 }
 
 func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
@@ -83,6 +85,18 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 						Usage:       "local http listen",
 						Value:       "127.0.0.1:9000",
 						Destination: &c.HTTPAddr,
+					},
+					&cli.StringFlag{
+						Name:        "log-level",
+						Usage:       "log level (debug|info|warn|error)",
+						Value:       "info",
+						Destination: &c.LogLevel,
+					},
+					&cli.StringFlag{
+						Name:        "log-format",
+						Usage:       "log output format (console|json)",
+						Value:       "console",
+						Destination: &c.LogFormat,
 					},
 				},
 				Action: func(ctx context.Context, cc *cli.Command) error {

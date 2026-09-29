@@ -8,6 +8,7 @@ import (
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type AnalyticsFilters struct {
@@ -66,6 +67,7 @@ func (n nodes) do(ctx context.Context, c protocols.Command, payload []byte, v an
 		}
 
 		if resp.Code != 0 {
+			zerolog.Ctx(ctx).Warn().Str("command", string(c)).Int("code", resp.Code).Msg("non-zero reply code")
 			return fmt.Errorf("unexpected response code: %d", resp.Code)
 		}
 
@@ -91,12 +93,15 @@ func (n nodes) call(ctx context.Context, command protocols.Command, payload []by
 
 	done := make(chan struct{})
 	err = n.t.Run(ctx, func() {
+		log := zerolog.Ctx(ctx)
+
 		err = n.r.Recv(ctx, trackID, &resp)
 		if err != nil {
-			fmt.Printf("ERRO: receiving response: %s\n", err.Error())
+			log.Error().Str("command", string(command)).Str("track_id", trackID.String()).Err(err).Msg("receiving response")
 			res <- err
 		}
 
+		log.Debug().Str("command", string(command)).Str("track_id", trackID.String()).Int("code", resp.Code).Msg("rpc round trip")
 		res <- nil
 		close(done)
 	})

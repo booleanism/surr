@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/booleanism/surr/hub/internal/adapter/rabbitmq"
@@ -11,6 +10,7 @@ import (
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type Node interface {
@@ -50,19 +50,21 @@ func (s nodeHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
+	log := zerolog.Ctx(r.Context())
+
 	buf := pools.BytesPool.Get().(*[]byte)
 	defer pools.BytesPoolResetAndPut(buf)
 
 	userID, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
 	if err != nil {
-		fmt.Printf("ERRO: parsing user id: %s\n", err.Error())
+		log.Error().Err(err).Msg("parsing user id")
 		http.Error(w, "unable to parse user id", http.StatusBadRequest)
 		return
 	}
 
 	nodeID, err := uuid.Parse(r.URL.Query().Get("node_id"))
 	if err != nil {
-		fmt.Printf("ERRO: parsing node id: %s\n", err.Error())
+		log.Error().Err(err).Msg("parsing node id")
 		http.Error(w, "unable to parse node id", http.StatusBadRequest)
 		return
 	}
@@ -87,7 +89,7 @@ func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
 	var nbuf int
 	nbuf, err = n.a.GetAnalytics(r.Context(), user, node, filter, buf)
 	if err != nil {
-		fmt.Printf("ERRO: get analytics: %s\n", err.Error())
+		log.Error().Str("user_id", userID.String()).Str("node_id", nodeID.String()).Err(err).Msg("get analytics")
 		http.Error(w, "unable to fetch analytics", http.StatusInternalServerError)
 		return
 	}
@@ -97,19 +99,21 @@ func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (n nodeHandlers) getAvailableNodeHandler(w http.ResponseWriter, r *http.Request) {
+	log := zerolog.Ctx(r.Context())
+
 	nodes := pools.NodePool.Get().(*[]models.Node)
 	defer pools.NodePoolResetAndPut(nodes)
 
 	_, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
 	if err != nil {
-		fmt.Printf("ERRO: parsing user id: %s\n", err.Error())
+		log.Error().Err(err).Msg("parsing user id")
 		http.Error(w, "unable to parse user id", http.StatusBadRequest)
 		return
 	}
 
 	nNodes, err := n.n.AvailableNodes(r.Context(), nodes)
 	if err != nil {
-		fmt.Printf("ERRO: available nodes: %s\n", err.Error())
+		log.Error().Err(err).Msg("available nodes")
 		http.Error(w, "could not list available node", http.StatusInternalServerError)
 		return
 	}

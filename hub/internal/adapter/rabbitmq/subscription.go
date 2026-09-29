@@ -9,6 +9,7 @@ import (
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
+	"github.com/rs/zerolog"
 )
 
 type RunTask interface {
@@ -114,6 +115,7 @@ func (s subscription) do(ctx context.Context, command protocols.Command, payload
 			}
 
 			if resp.Code != 0 {
+				zerolog.Ctx(ctx).Warn().Str("command", string(command)).Int("code", resp.Code).Msg("non-zero reply code")
 				errs = append(errs, fmt.Errorf("unexpeced response code: %d, %s", resp.Code, resp.Result))
 				continue
 			}
@@ -143,12 +145,15 @@ func (s subscription) call(ctx context.Context, command protocols.Command, paylo
 
 	done := make(chan struct{})
 	err = s.t.Run(ctx, func() {
+		log := zerolog.Ctx(ctx)
+
 		err = s.r.Recv(ctx, trackID, &resp)
 		if err != nil {
-			fmt.Printf("ERRO: receiving response: %s\n", err.Error())
+			log.Error().Str("command", string(command)).Str("track_id", trackID.String()).Err(err).Msg("receiving response")
 			res <- err
 		}
 
+		log.Debug().Str("command", string(command)).Str("track_id", trackID.String()).Int("code", resp.Code).Msg("rpc round trip")
 		res <- nil
 		close(done)
 	})

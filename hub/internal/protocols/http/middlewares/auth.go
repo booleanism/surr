@@ -1,11 +1,11 @@
 package middlewares
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 const UserIDHeaderKey = "X-User-ID"
@@ -40,7 +40,7 @@ func (a auth) RequireAuthHandlerFunc(next http.HandlerFunc) http.HandlerFunc {
 
 		userID, err := a.a.ValidateAccessToken(parts[1])
 		if err != nil {
-			fmt.Printf("ERRO: validate access token: %s\n", err.Error())
+			zerolog.Ctx(r.Context()).Error().Err(err).Msg("validate access token")
 			http.Error(w, "unauthorized access token", http.StatusUnauthorized)
 			return
 		}

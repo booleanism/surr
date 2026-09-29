@@ -3,12 +3,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type Subscription interface {
@@ -58,7 +58,7 @@ func (s subscriptionHandlers) sinks(w http.ResponseWriter, r *http.Request) {
 
 	n, err := s.s.GetNodes(r.Context(), subs, nb)
 	if err != nil {
-		fmt.Printf("ERRO: get nodes: %s\n", err.Error())
+		zerolog.Ctx(r.Context()).Error().Str("sub_id", subsID.String()).Err(err).Msg("get nodes")
 		http.Error(w, "unable to check subscription id", http.StatusInternalServerError)
 		return
 	}
@@ -90,7 +90,7 @@ func (s subscriptionHandlers) add(w http.ResponseWriter, r *http.Request) {
 	// subsNodes.User.ID = userID
 	subsID, err := s.s.AddSubscription(r.Context(), subsNodes)
 	if err != nil {
-		fmt.Printf("ERRO: add subscription: %s\n", err.Error())
+		zerolog.Ctx(r.Context()).Error().Err(err).Msg("add subscription")
 		http.Error(w, "unable to add subscription", http.StatusInternalServerError)
 		return
 	}

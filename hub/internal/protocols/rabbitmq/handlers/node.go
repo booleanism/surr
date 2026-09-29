@@ -8,6 +8,7 @@ import (
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type Node interface {
@@ -44,37 +45,50 @@ func SetupNode(nr Node, h SetHandler) error {
 }
 
 func (n node) nodesAdd(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
-	n.wrap(ctx, req, rep, func(ns []models.Node) error {
+	n.wrap(ctx, trackID, req, rep, "nodes.add", func(ns []models.Node) error {
 		return n.nr.AddNodes(ctx, ns)
 	})
 }
 
 func (n node) nodesRemove(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
-	n.wrap(ctx, req, rep, func(ns []models.Node) error {
+	n.wrap(ctx, trackID, req, rep, "nodes.remove", func(ns []models.Node) error {
 		return n.nr.RemoveNodes(ctx, ns)
 	})
 }
 
-func (n node) wrap(ctx context.Context, req protocols.RouterRequest, rep protocols.ReplyFunc, do func(ns []models.Node) error) {
+func (n node) wrap(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc, command string, do func(ns []models.Node) error) {
+	log := zerolog.Ctx(ctx).
+		With().
+		Str("command", command).
+		Str("track_id", trackID.String()).
+		Logger()
+
 	ns := pools.NodePool.Get().(*[]models.Node)
 	defer pools.NodePoolResetAndPut(ns)
 
 	err := json.Unmarshal(req.Payload, ns)
 	if err != nil {
+		log.Error().Err(err).Int("code", -1).Msg("handler failed")
 		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
 		return
 	}
 
+	log.Debug().Int("count", len(*ns)).Msg("handler invoked")
+
 	err = do(*ns)
 	if err != nil {
+		log.Error().Err(err).Int("code", -2).Msg("handler failed")
 		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
 		return
 	}
 
 	nodesByte, err := json.Marshal(ns)
 	if err != nil {
+		log.Error().Err(err).Int("code", -3).Msg("handler failed")
 		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
 	}
+
+	log.Info().Int("count", len(*ns)).Msg("nodes updated")
 
 	_ = rep(ctx, protocols.RouterResponse{
 		Code:   0,

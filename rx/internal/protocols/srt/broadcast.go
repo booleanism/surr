@@ -7,7 +7,13 @@ import (
 
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
+
+// dropSampleInterval controls how often a slow-consumer drop is logged:
+// the first drop plus every Nth drop carries a warn with the running
+// dropped count, so a stalled consumer cannot become a log flood.
+const dropSampleInterval = 1000
 
 type Chunk struct {
 	Buf  *[]byte
@@ -24,13 +30,20 @@ func (c *Chunk) release() {
 type broadcaster struct {
 	topic map[uuid.UUID]map[uuid.UUID]chan *Chunk
 	max   int64
-	mu    sync.RWMutex
+	log   zerolog.Logger
+
+	dropped map[uuid.UUID]map[uuid.UUID]int64
+	dropMu  sync.Mutex
+
+	mu sync.RWMutex
 }
 
-func NewBroadcaster(max int64) *broadcaster {
+func NewBroadcaster(max int64, log zerolog.Logger) *broadcaster {
 	return &broadcaster{
-		topic: make(map[uuid.UUID]map[uuid.UUID]chan *Chunk),
-		max:   max,
+		topic:   make(map[uuid.UUID]map[uuid.UUID]chan *Chunk),
+		max:     max,
+		log:     log,
+		dropped: make(map[uuid.UUID]map[uuid.UUID]int64),
 	}
 }
 
@@ -71,11 +84,42 @@ func (b *broadcaster) Unsubscribe(subID, nodeID uuid.UUID) {
 		delete(b.topic, subID)
 	}
 
+	b.dropMu.Lock()
+	if _, ok := b.dropped[subID]; ok {
+		delete(b.dropped[subID], nodeID)
+		if len(b.dropped[subID]) == 0 {
+			delete(b.dropped, subID)
+		}
+	}
+	b.dropMu.Unlock()
+
 	close(ch)
 	b.mu.Unlock()
 
 	for chunk := range ch {
 		chunk.release()
+	}
+}
+
+// drop records a slow-consumer chunk drop for (subID, nodeID). It runs only
+// on the drop path (never the healthy media path) and logs the first drop
+// plus every dropSampleInterval-th drop with the running count.
+func (b *broadcaster) drop(subID, nodeID uuid.UUID) {
+	b.dropMu.Lock()
+	defer b.dropMu.Unlock()
+
+	if b.dropped[subID] == nil {
+		b.dropped[subID] = make(map[uuid.UUID]int64)
+	}
+
+	b.dropped[subID][nodeID]++
+	n := b.dropped[subID][nodeID]
+	if n == 1 || n%dropSampleInterval == 0 {
+		b.log.Warn().
+			Str("sub_id", subID.String()).
+			Str("node_id", nodeID.String()).
+			Int64("dropped", n).
+			Msg("slow consumer drop")
 	}
 }
 
@@ -92,10 +136,11 @@ func (b *broadcaster) Publish(subID uuid.UUID, buf *[]byte, n int) {
 	}
 
 	chunk := &Chunk{Buf: buf, N: n, refs: int64(len(subs))}
-	for _, ch := range subs {
+	for nodeID, ch := range subs {
 		select {
 		case ch <- chunk:
 		default:
+			b.drop(subID, nodeID)
 			chunk.release()
 		}
 	}
@@ -107,6 +152,10 @@ func (b *broadcaster) Close(subID uuid.UUID) {
 	subs := b.topic[subID]
 	delete(b.topic, subID)
 	b.mu.Unlock()
+
+	b.dropMu.Lock()
+	delete(b.dropped, subID)
+	b.dropMu.Unlock()
 
 	for _, ch := range subs {
 		close(ch)

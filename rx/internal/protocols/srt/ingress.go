@@ -11,6 +11,7 @@ import (
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/google/uuid"
 	"github.com/haivision/srtgo"
+	"github.com/rs/zerolog"
 )
 
 type NodesSink interface {
@@ -70,10 +71,12 @@ func (i *ingress) extractSubscriptionID(streamID string) (uuid.UUID, error) {
 }
 
 func (i *ingress) Listen(ctx context.Context) error {
+	log := zerolog.Ctx(ctx)
+
 	i.SetListenCallback(func(socket *srtgo.SrtSocket, version int, addr *net.UDPAddr, streamid string) bool {
 		subID, err := i.extractSubscriptionID(streamid)
 		if err != nil {
-			fmt.Printf("ERRO: invalid streamid '%s': %v\n", streamid, err)
+			log.Warn().Str("peer", addr.String()).Str("streamid", streamid).Err(err).Msg("ingress rejected")
 			return false
 		}
 
@@ -82,12 +85,12 @@ func (i *ingress) Listen(ctx context.Context) error {
 
 		n, err := i.s.SelectSubscribedNodes(ctx, subID, nodesPtr)
 		if err != nil {
-			fmt.Printf("ERRO: SelectSubscribedNodes failed for %s: %v\n", subID, err)
+			log.Error().Str("peer", addr.String()).Str("streamid", streamid).Str("sub_id", subID.String()).Err(err).Msg("ingress rejected: subscription lookup failed")
 			return false
 		}
 
 		if len(*nodesPtr) < 1 {
-			fmt.Printf("ERRO: no active nodes found for subid %s\n", subID)
+			log.Warn().Str("peer", addr.String()).Str("streamid", streamid).Str("sub_id", subID.String()).Str("reason", "no subscribed nodes").Msg("ingress rejected")
 			return false
 		}
 
@@ -134,18 +137,31 @@ func (i *ingress) accept(ctx context.Context) error {
 		return nil
 	}
 
-	go i.handlePublisher(ctx, sock, p.subID, p.nodes)
+	zerolog.Ctx(ctx).Info().
+		Str("peer", addr.String()).
+		Str("sub_id", p.subID.String()).
+		Int("count", len(p.nodes)).
+		Msg("ingress accept")
+
+	go i.handlePublisher(ctx, sock, p.subID, p.nodes, addr.String())
 	return nil
 }
 
-func (i *ingress) handlePublisher(ctx context.Context, sock *srtgo.SrtSocket, subID uuid.UUID, nodes []models.Node) {
+func (i *ingress) handlePublisher(ctx context.Context, sock *srtgo.SrtSocket, subID uuid.UUID, nodes []models.Node, peer string) {
+	log := zerolog.Ctx(ctx)
+
 	defer sock.Close()
 	defer i.b.Close(subID)
+	defer func() {
+		log.Info().Str("sub_id", subID.String()).Str("peer", peer).Msg("publisher stopped")
+	}()
 
 	if err := i.n.StartSink(ctx, nodes, i.egressAddr); err != nil {
-		fmt.Printf("ERRO: start nodes sink: %s\n", err.Error())
+		log.Error().Str("sub_id", subID.String()).Str("peer", peer).Err(err).Msg("start nodes sink")
 		return
 	}
+
+	log.Info().Str("sub_id", subID.String()).Str("peer", peer).Int("count", len(nodes)).Msg("publisher started")
 
 	for {
 		select {
@@ -163,10 +179,10 @@ func (i *ingress) handlePublisher(ctx context.Context, sock *srtgo.SrtSocket, su
 			continue
 		}
 
-		fmt.Printf("ERRO: read socket: %s\n", err.Error())
+		log.Error().Str("sub_id", subID.String()).Str("peer", peer).Err(err).Msg("publisher read")
 		err = i.n.StopSink(ctx, nodes)
 		if err != nil {
-			fmt.Printf("ERRO: stop nodes sink: %s\n", err.Error())
+			log.Error().Str("sub_id", subID.String()).Str("peer", peer).Err(err).Msg("stop nodes sink")
 		}
 
 		pools.BytesPoolResetAndPut(buf)

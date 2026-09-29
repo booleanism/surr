@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/booleanism/surr/internal/logging"
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/booleanism/surr/internal/protocols/rabbitmq"
@@ -15,6 +16,7 @@ import (
 	"github.com/booleanism/surr/rx/internal/protocols/srt"
 	"github.com/haivision/srtgo"
 	"github.com/rabbitmq/amqp091-go"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -40,6 +42,8 @@ func main() {
 		return
 	}
 
+	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, cmdLine.LogLevel, cmdLine.LogFormat)
+
 	beforeExit := []func() error{}
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -48,7 +52,7 @@ func main() {
 
 		for _, f := range beforeExit {
 			if err = f(); err != nil {
-				fmt.Printf("ERRO: exiting: %s\n", err.Error())
+				log.Error().Err(err).Msg("beforeExit cleanup")
 			}
 		}
 	}()
@@ -62,9 +66,19 @@ func main() {
 }
 
 func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
+	log := zerolog.Ctx(ctx)
+
+	log.Info().
+		Str("broker", logging.RedactURL(cmdLine.RabbitMQAddr)).
+		Str("ingress", cmdLine.Ingress).
+		Str("egress", cmdLine.Egress).
+		Uint32("goroutines", cmdLine.NGoroutinesPool).
+		Int64("workers", cmdLine.NWorker).
+		Msg("rx starting")
+
 	ch, qSetup, err := infraSetup(cmdLine, &beforeExit)
 	if err != nil {
-		fmt.Printf("ERRO: setup infra: %s\n", err.Error())
+		log.Error().Err(err).Msg("setup infra")
 		return
 	}
 
@@ -79,12 +93,12 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 	options := map[string]string{"mode": "listener"}
 
 	ingressSock := srtgo.NewSrtSocket(cmdLine.IngressHost.Host, cmdLine.IngressHost.Port, options)
-	broadcaster := srt.NewBroadcaster(cmdLine.NWorker)
+	broadcaster := srt.NewBroadcaster(cmdLine.NWorker, *log)
 	egressAdrr := fmt.Sprintf("%s:%d", cmdLine.EgressHost.Host, cmdLine.EgressHost.Port)
 	ingress := srt.NewIngress(ingressSock, subsAdapter, nodesAdapter, broadcaster, egressAdrr)
 
 	egressSock := srtgo.NewSrtSocket(cmdLine.EgressHost.Host, cmdLine.EgressHost.Port, options)
-	egress := srt.NewEgress(egressSock, subsAdapter, broadcaster)
+	egress := srt.NewEgress(egressSock, subsAdapter, broadcaster, *log)
 
 	go func() {
 		ticker := time.NewTicker(IntroInterval)
@@ -97,7 +111,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 			case <-ticker.C:
 				err = router.Introduce(ctx)
 				if err != nil {
-					fmt.Printf("ERRO: introducing it self: %s\n", err.Error())
+					log.Error().Err(err).Msg("introducing it self")
 				}
 			}
 		}
@@ -138,6 +152,8 @@ type service interface {
 }
 
 func listen(ctx context.Context, goPool, router, ingress, egress service) {
+	log := zerolog.Ctx(ctx)
+
 	go func() {
 		goPoolListen(ctx, goPool)
 	}()
@@ -151,19 +167,19 @@ func listen(ctx context.Context, goPool, router, ingress, egress service) {
 	}()
 
 	var restart bool
-	fmt.Printf("INFO: starting egress listen...\n")
+	log.Info().Msg("starting egress listen")
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 			if restart {
-				fmt.Printf("INFO: restarting egress listen...\n")
+				log.Info().Msg("restarting egress listen")
 			}
 
 			err := egress.Listen(ctx)
 			if err != nil {
-				fmt.Printf("ERRO: egress listen: %s\n", err.Error())
+				log.Error().Err(err).Msg("egress listen")
 			}
 
 			restart = restart || !restart
@@ -172,20 +188,22 @@ func listen(ctx context.Context, goPool, router, ingress, egress service) {
 }
 
 func goPoolListen(ctx context.Context, goPool service) {
+	log := zerolog.Ctx(ctx)
+
 	var restart bool
-	fmt.Printf("INFO: starting gouroutines listen...\n")
+	log.Info().Msg("starting goroutines listen")
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 			if restart {
-				fmt.Printf("INFO: restarting gouroutines listen...\n")
+				log.Info().Msg("restarting goroutines listen")
 			}
 
 			err := goPool.Listen(ctx)
 			if err != nil {
-				fmt.Printf("ERRO: gouroutines listen: %s\n", err.Error())
+				log.Error().Err(err).Msg("goroutines listen")
 			}
 
 			restart = restart || !restart
@@ -194,20 +212,22 @@ func goPoolListen(ctx context.Context, goPool service) {
 }
 
 func routerListen(ctx context.Context, router service) {
+	log := zerolog.Ctx(ctx)
+
 	var restart bool
-	fmt.Printf("INFO: starting router listen...\n")
+	log.Info().Msg("starting router listen")
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 			if restart {
-				fmt.Printf("INFO: restarting router listen...\n")
+				log.Info().Msg("restarting router listen")
 			}
 
 			err := router.Listen(ctx)
 			if err != nil {
-				fmt.Printf("ERRO: router listen: %s\n", err.Error())
+				log.Error().Err(err).Msg("router listen")
 			}
 
 			restart = restart || !restart
@@ -216,20 +236,22 @@ func routerListen(ctx context.Context, router service) {
 }
 
 func ingressListen(ctx context.Context, ingress service) {
+	log := zerolog.Ctx(ctx)
+
 	var restart bool
-	fmt.Printf("INFO: starting ingress listen...\n")
+	log.Info().Msg("starting ingress listen")
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 			if restart {
-				fmt.Printf("INFO: restarting ingress listen...\n")
+				log.Info().Msg("restarting ingress listen")
 			}
 
 			err := ingress.Listen(ctx)
 			if err != nil {
-				fmt.Printf("ERRO: ingress listen: %s\n", err.Error())
+				log.Error().Err(err).Msg("ingress listen")
 			}
 
 			restart = restart || !restart

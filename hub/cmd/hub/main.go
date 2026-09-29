@@ -18,11 +18,13 @@ import (
 	"github.com/booleanism/surr/hub/internal/usecases"
 	"github.com/booleanism/surr/hub/internal/usecases/auth"
 	"github.com/booleanism/surr/internal/db"
+	"github.com/booleanism/surr/internal/logging"
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/booleanism/surr/internal/protocols/rabbitmq"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/rabbitmq/amqp091-go"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -45,6 +47,8 @@ func main() {
 		return
 	}
 
+	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, cmdLine.LogLevel, cmdLine.LogFormat)
+
 	beforeExit := []func() error{}
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -53,7 +57,7 @@ func main() {
 
 		for _, f := range beforeExit {
 			if err = f(); err != nil {
-				fmt.Printf("ERRO: exiting: %s\n", err.Error())
+				log.Error().Err(err).Msg("beforeExit cleanup")
 			}
 		}
 	}()
@@ -62,7 +66,7 @@ func main() {
 	case "run":
 		err = run(ctx, cmdLine, beforeExit)
 		if err != nil {
-			fmt.Printf("ERRO: run command: %s\n", err.Error())
+			log.Error().Err(err).Msg("run command")
 			cancel()
 		}
 
@@ -75,6 +79,15 @@ func main() {
 
 //nolint:cyclop
 func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) error {
+	log := zerolog.Ctx(ctx)
+
+	log.Info().
+		Str("broker", logging.RedactURL(cmdLine.RabbitMQAddr)).
+		Str("http", cmdLine.HTTPAddr).
+		Str("database", cmdLine.DSN).
+		Uint32("goroutines", cmdLine.NGoroutinesPool).
+		Msg("hub starting")
+
 	sqliteDB, ch, routerQueue, err := infraSetup(cmdLine, &beforeExit)
 	if err != nil {
 		return err
@@ -122,7 +135,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) e
 			case <-ticker.C:
 				err = router.Introduce(ctx)
 				if err != nil {
-					fmt.Printf("ERRO: introducing it self: %s\n", err.Error())
+					log.Error().Err(err).Msg("introducing it self")
 				}
 			}
 		}
@@ -130,18 +143,18 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) e
 
 	go func() {
 		var restart bool
-		fmt.Printf("INFO: starting router listen...\n")
+		log.Info().Msg("starting router listen")
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 				if restart {
-					fmt.Printf("INFO: restarting router listen...\n")
+					log.Info().Msg("restarting router listen")
 				}
 
 				if err = router.Listen(ctx); err != nil {
-					fmt.Printf("ERRO: router listen: %s\n", err.Error())
+					log.Error().Err(err).Msg("router listen")
 				}
 
 				restart = restart || !restart
@@ -151,18 +164,18 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) e
 
 	go func() {
 		var restart bool
-		fmt.Printf("INFO: starting goroutines pool...\n")
+		log.Info().Msg("starting goroutines pool")
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 				if restart {
-					fmt.Printf("INFO: restarting goroutine pool...\n")
+					log.Info().Msg("restarting goroutine pool")
 				}
 
 				if err = goPool.Listen(ctx); err != nil {
-					fmt.Printf("ERRO: goroutines pool listen: %s\n", err.Error())
+					log.Error().Err(err).Msg("goroutines pool listen")
 				}
 
 				restart = restart || !restart
@@ -198,7 +211,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) e
 
 	httpSrv := http.Server{
 		Addr:              cmdLine.HTTPAddr,
-		Handler:           mainMux,
+		Handler:           middlewares.NewRequestLogger(*log)(mainMux),
 		ReadHeaderTimeout: GeneralTimeout,
 	}
 
@@ -206,18 +219,18 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) e
 
 	go func() {
 		var restart bool
-		fmt.Printf("INFO: starting http listen...\n")
+		log.Info().Str("addr", cmdLine.HTTPAddr).Msg("starting http listen")
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 				if restart {
-					fmt.Printf("INFO: restarting http listen...\n")
+					log.Info().Str("addr", cmdLine.HTTPAddr).Msg("restarting http listen")
 				}
 
 				if err = httpSrv.ListenAndServe(); err != nil {
-					fmt.Printf("ERRO: http listen: %s\n", err.Error())
+					log.Error().Err(err).Msg("http listen")
 				}
 
 				restart = restart || !restart

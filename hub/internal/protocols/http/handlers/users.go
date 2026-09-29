@@ -3,11 +3,11 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/booleanism/surr/internal/models"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type User interface {
@@ -44,7 +44,7 @@ func (u userHandlers) signUpHandler(w http.ResponseWriter, r *http.Request) {
 
 	userID, err := u.u.AddNewUser(r.Context(), req)
 	if err != nil {
-		fmt.Printf("ERRO: signup handler: %s\n", err.Error())
+		zerolog.Ctx(r.Context()).Error().Err(err).Msg("signup handler")
 		http.Error(w, "unable to signup user", http.StatusInternalServerError)
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/booleanism/surr/internal/db"
+	"github.com/booleanism/surr/internal/logging"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/booleanism/surr/internal/protocols/rabbitmq"
 	"github.com/booleanism/surr/subscriptions/internal/db/sqlite"
@@ -17,6 +18,7 @@ import (
 	"github.com/booleanism/surr/subscriptions/internal/usecases"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/rabbitmq/amqp091-go"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -37,6 +39,8 @@ func main() {
 		return
 	}
 
+	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, cmdLine.LogLevel, cmdLine.LogFormat)
+
 	beforeExit := []func() error{}
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -45,7 +49,7 @@ func main() {
 
 		for _, f := range beforeExit {
 			if err = f(); err != nil {
-				fmt.Printf("ERRO: exiting: %s\n", err.Error())
+				log.Error().Err(err).Msg("beforeExit cleanup")
 			}
 		}
 	}()
@@ -61,9 +65,16 @@ func main() {
 
 // nolint:cyclop
 func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
+	log := zerolog.Ctx(ctx)
+
+	log.Info().
+		Str("broker", logging.RedactURL(cmdLine.RabbitMQAddr)).
+		Str("database", cmdLine.DSN).
+		Msg("subscriptions starting")
+
 	ch, routerQueue, err := infraSetup(cmdLine, &beforeExit)
 	if err != nil {
-		fmt.Printf("ERRO: infra setup: %s\n", err.Error())
+		log.Error().Err(err).Msg("infra setup")
 		return
 	}
 
@@ -73,7 +84,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 
 	sqliteDB, err := sql.Open("sqlite3", cmdLine.DSN)
 	if err != nil {
-		fmt.Printf("ERRO: opening database: %s\n", err.Error())
+		log.Error().Err(err).Msg("opening database")
 		return
 	}
 	defer sqliteDB.Close() //nolint:errcheck
@@ -84,7 +95,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 	subsCase := usecases.NewSubscription(subsRepo)
 	err = rabbitmqHandlers.SetupSubscription(subsCase, routerHandlers)
 	if err != nil {
-		fmt.Printf("ERRO: setup rabbitmq subscriptions handler: %s\n", err.Error())
+		log.Error().Err(err).Msg("setup rabbitmq subscriptions handler")
 		return
 	}
 
@@ -99,7 +110,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 			case <-ticker.C:
 				err = router.Introduce(ctx)
 				if err != nil {
-					fmt.Printf("ERRO: introducing it self: %s\n", err.Error())
+					log.Error().Err(err).Msg("introducing it self")
 				}
 			}
 		}
@@ -107,18 +118,18 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 
 	go func() {
 		var restart bool
-		fmt.Printf("INFO: starting router listen...\n")
+		log.Info().Msg("starting router listen")
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 				if restart {
-					fmt.Printf("INFO: restarting router listen...\n")
+					log.Info().Msg("restarting router listen")
 				}
 
 				if err = router.Listen(ctx); err != nil {
-					fmt.Printf("ERRO: router listen: %s\n", err.Error())
+					log.Error().Err(err).Msg("router listen")
 				}
 
 				restart = restart || !restart

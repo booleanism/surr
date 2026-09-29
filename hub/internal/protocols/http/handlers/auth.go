@@ -9,6 +9,7 @@ import (
 	"github.com/booleanism/surr/hub/internal/usecases/auth"
 	"github.com/booleanism/surr/internal/models"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 )
 
 type Authenticator interface {
@@ -53,6 +54,8 @@ func (h authHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close() //nolint:errcheck
 
+	log := zerolog.Ctx(r.Context())
+
 	var req models.User
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request payload", http.StatusBadRequest)
@@ -64,9 +67,12 @@ func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 		Passwd: req.Passwd,
 	})
 	if err != nil {
+		log.Warn().Str("email", req.Email).Msg("signin failed")
 		http.Error(w, "invalid email or password", http.StatusUnauthorized)
 		return
 	}
+
+	log.Info().Str("user_id", userID.String()).Msg("signin success")
 
 	tokens, err := h.a.GenerateTokenPair(userID)
 	if err != nil {
@@ -98,6 +104,8 @@ func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h authHandlers) refreshAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
+	log := zerolog.Ctx(r.Context())
+
 	cookie, err := r.Cookie("refresh_token")
 	if err != nil {
 		http.Error(w, "missing refresh token", http.StatusUnauthorized)
@@ -106,6 +114,7 @@ func (h authHandlers) refreshAccessTokenHandler(w http.ResponseWriter, r *http.R
 
 	userID, err := h.s.ValidateRefreshToken(cookie.Value)
 	if err != nil {
+		log.Warn().Msg("invalid or revoked refresh token")
 		http.Error(w, "invalid or revoked refresh token", http.StatusUnauthorized)
 		return
 	}
@@ -118,6 +127,8 @@ func (h authHandlers) refreshAccessTokenHandler(w http.ResponseWriter, r *http.R
 
 	_ = h.s.DeleteRefreshToken(cookie.Value, userID)
 	_ = h.s.SaveRefreshToken(newTokens.RefreshToken, userID)
+
+	log.Info().Str("user_id", userID.String()).Msg("refresh token rotated")
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
@@ -138,10 +149,13 @@ func (h authHandlers) refreshAccessTokenHandler(w http.ResponseWriter, r *http.R
 }
 
 func (h authHandlers) logoutHandler(w http.ResponseWriter, r *http.Request) {
+	log := zerolog.Ctx(r.Context())
+
 	cookie, err := r.Cookie("refresh_token")
 	if err == nil {
 		if userID, valErr := h.s.ValidateRefreshToken(cookie.Value); valErr == nil {
 			_ = h.s.DeleteRefreshToken(cookie.Value, userID)
+			log.Info().Str("user_id", userID.String()).Msg("logout")
 		}
 	}
 

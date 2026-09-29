@@ -13,6 +13,8 @@ type CommandLine struct {
 	FamilyName      string
 	RabbitMQAddr    string
 	SelectedCommand string
+	LogLevel        string
+	LogFormat       string
 }
 
 func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
@@ -58,6 +60,18 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 						Usage:       "service name. it's should unique each deployment instance",
 						Value:       "subs0",
 						Destination: &c.SiblingName,
+					},
+					&cli.StringFlag{
+						Name:        "log-level",
+						Usage:       "log level (debug|info|warn|error)",
+						Value:       "info",
+						Destination: &c.LogLevel,
+					},
+					&cli.StringFlag{
+						Name:        "log-format",
+						Usage:       "log output format (console|json)",
+						Value:       "console",
+						Destination: &c.LogFormat,
 					},
 				},
 				Action: func(ctx context.Context, cc *cli.Command) error {
