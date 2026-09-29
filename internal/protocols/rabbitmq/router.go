@@ -9,6 +9,7 @@ import (
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/google/uuid"
 	"github.com/rabbitmq/amqp091-go"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -92,6 +93,11 @@ func (r *router) Introduce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	zerolog.Ctx(ctx).Debug().
+		Str("sibling", r.directRoutingKey).
+		Int("count", len(commands)).
+		Msg("introduce broadcast")
 
 	return r.ch.PublishWithContext(ctx, r.exchName, BroadcastRoutingKey, false, false, amqp091.Publishing{
 		Type:    IntroduceCommand,
@@ -185,7 +191,7 @@ func (r *router) Listen(ctx context.Context) error {
 	}
 }
 
-func (r *router) handlerIntroCommand(repyTo string, body []byte) error {
+func (r *router) handlerIntroCommand(ctx context.Context, repyTo string, body []byte) error {
 	if repyTo == "" {
 		return fmt.Errorf("empty reply to")
 	}
@@ -201,14 +207,21 @@ func (r *router) handlerIntroCommand(repyTo string, body []byte) error {
 		return err
 	}
 
+	zerolog.Ctx(ctx).Debug().
+		Str("sibling", repyTo).
+		Int("count", len(sibling.Commands)).
+		Msg("sibling registry updated")
+
 	return nil
 }
 
 func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
+	log := zerolog.Ctx(ctx)
+
 	if msg.Type == IntroduceCommand {
-		err := r.handlerIntroCommand(msg.ReplyTo, msg.Body)
+		err := r.handlerIntroCommand(ctx, msg.ReplyTo, msg.Body)
 		if err != nil {
-			fmt.Printf("ERRO: intro handler: %s\n", err.Error())
+			log.Error().Str("sibling", msg.ReplyTo).Err(err).Msg("intro handler")
 			_ = msg.Nack(false, false)
 			return
 		}
@@ -219,7 +232,7 @@ func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
 
 	trackID, err := uuid.Parse(msg.CorrelationId)
 	if err != nil {
-		fmt.Printf("WARN: parsing trackID: %s\n", err.Error())
+		log.Warn().Str("reason", "malformed correlation id").Err(err).Msg("nack malformed message")
 		_ = msg.Nack(false, false)
 		return
 	}
@@ -229,9 +242,15 @@ func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
 	r.mu.Unlock()
 
 	if !ok {
+		log.Debug().
+			Str("command", msg.Type).
+			Str("track_id", msg.CorrelationId).
+			Str("reply_to", msg.ReplyTo).
+			Msg("inbound request")
+
 		err = r.handleInbound(ctx, protocols.Command(msg.Type), msg.ReplyTo, trackID, msg.Body)
 		if err != nil {
-			fmt.Printf("ERRO: handle inbound: %s\n", err.Error())
+			log.Error().Str("command", msg.Type).Err(err).Msg("handle inbound")
 			_ = msg.Nack(false, false)
 			return
 		}
@@ -241,7 +260,7 @@ func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
 	}
 
 	if msg.ContentType != "application/json" {
-		fmt.Printf("WARN: unexpected content type for reply: %s\n", msg.ContentType)
+		log.Warn().Str("reason", "unexpected content type").Str("content_type", msg.ContentType).Str("track_id", msg.CorrelationId).Msg("nack reply")
 		_ = msg.Nack(false, false)
 		return
 	}
@@ -249,10 +268,12 @@ func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
 	resp := protocols.RouterResponse{}
 	err = json.Unmarshal(msg.Body, &resp)
 	if err != nil {
-		fmt.Printf("WARN: unmarshal response: %s\n", err.Error())
+		log.Warn().Str("reason", "unmarshal response").Str("track_id", msg.CorrelationId).Err(err).Msg("nack reply")
 		_ = msg.Nack(false, false)
 		return
 	}
+
+	log.Debug().Str("track_id", msg.CorrelationId).Int("code", resp.Code).Msg("reply matched")
 
 	select {
 	case c <- resp:
@@ -265,7 +286,7 @@ func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
 func (r *router) handleInbound(ctx context.Context, command protocols.Command, replyTo string, trackID uuid.UUID, body []byte) error {
 	h, err := r.gh.Get(command)
 	if err != nil {
-		fmt.Printf("ERRO: get handler: %s\n", command)
+		zerolog.Ctx(ctx).Error().Str("command", string(command)).Err(err).Msg("get handler")
 		return err
 	}
 
