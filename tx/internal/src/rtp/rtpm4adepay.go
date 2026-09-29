@@ -2,17 +2,19 @@ package rtp
 
 import (
 	"github.com/go-gst/go-gst/pkg/gst"
+	"github.com/rs/zerolog"
 )
 
 type rtpmp4adepay struct {
 	*depayloader
 }
 
-func NewRTPMP4ADepay(pipe gst.Pipeline) (*gst.Caps, *rtpmp4adepay) {
+func NewRTPMP4ADepay(pipe gst.Pipeline, log zerolog.Logger) (*gst.Caps, *rtpmp4adepay) {
 	r := &rtpmp4adepay{
 		depayloader: &depayloader{
 			Bin:  gst.NewBin("rtpmp4adepay").(gst.Bin),
 			pipe: pipe,
+			log:  log,
 		},
 	}
 

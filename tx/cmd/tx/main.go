@@ -13,6 +13,7 @@ import (
 
 	"github.com/booleanism/surr/tx/internal/core"
 	"github.com/booleanism/surr/tx/internal/core/coder"
+	"github.com/booleanism/surr/tx/internal/logging"
 	"github.com/booleanism/surr/tx/internal/server/dash"
 	"github.com/booleanism/surr/tx/internal/sink"
 	"github.com/booleanism/surr/tx/internal/src"
@@ -20,6 +21,7 @@ import (
 	"github.com/booleanism/surr/tx/internal/streaming"
 	"github.com/go-gst/go-glib/pkg/glib/v2"
 	"github.com/go-gst/go-gst/pkg/gst"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -45,20 +47,6 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	beforeExit := []func() error{}
-	cleanupDone := make(chan struct{})
-	go func() {
-		defer close(cleanupDone)
-		<-ctx.Done()
-
-		for _, f := range beforeExit {
-			err := f()
-			if err != nil {
-				fmt.Printf("ERRO: before exit: %s\n", err.Error())
-			}
-		}
-	}()
-
 	cmdLine := &CommandLine{
 		Version: Version,
 		Run: RunCmdLine{
@@ -70,12 +58,28 @@ func main() {
 		return
 	}
 
+	ctx, log := logging.Setup(ctx, "tx", cmdLine.LogLevel, cmdLine.LogFormat)
+
+	beforeExit := []func() error{}
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		<-ctx.Done()
+
+		for _, f := range beforeExit {
+			err := f()
+			if err != nil {
+				log.Error().Err(err).Msg("before exit")
+			}
+		}
+	}()
+
 	switch cmdLine.SelectedCommand {
 	case "serve":
 		go func() {
 			err = serveCommand(ctx, cmdLine, &beforeExit)
 			if err != nil {
-				fmt.Printf("ERRO: serve command: %s\n", err.Error())
+				log.Error().Err(err).Msg("serve command")
 				return
 			}
 		}()
@@ -95,7 +99,7 @@ func main() {
 		go func() {
 			err = runCommand(ctxRun, cancelWrap, cmdLine, &beforeExit)
 			if err != nil {
-				fmt.Printf("ERRO: run command: %s\n", err.Error())
+				log.Error().Err(err).Msg("run command")
 				cancelWrap(err)
 				return
 			}
@@ -109,6 +113,8 @@ func main() {
 }
 
 func serveCommand(ctx context.Context, cmdLine *CommandLine, beforeExit *[]func() error) error {
+	log := zerolog.Ctx(ctx)
+
 	dashStream := streaming.NewDash(streaming.StreamDeps{
 		OpenInRoot: func(s1, s2 string) (streaming.WriterToCloser, error) {
 			return os.OpenInRoot(s1, s2)
@@ -116,12 +122,12 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, beforeExit *[]func(
 	}, cmdLine.RecordingDir, ManifestFileName)
 
 	tmpl := template.New("tmpl")
-	dash := dash.NewDashServer(tmpl, dashStream)
+	dash := dash.NewDashServer(tmpl, dashStream, *log)
 
 	var srv *http.Server
-	srv, err := setupDashServer(fmt.Sprintf("%s:%d", "127.0.0.1", cmdLine.DashPort), ManifestFileName, dash)
+	srv, err := setupDashServer(fmt.Sprintf("%s:%d", "127.0.0.1", cmdLine.DashPort), ManifestFileName, dash, *log)
 	if err != nil {
-		fmt.Printf("ERRO: setup dash server: %s\n", err.Error())
+		log.Error().Err(err).Msg("setup dash server")
 		return err
 	}
 
@@ -139,10 +145,10 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, beforeExit *[]func(
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			fmt.Printf("INFO: starting DASH server on port %d (dir: %s)\n", cmdLine.DashPort, cmdLine.RecordingDir)
+			log.Info().Int("port", int(cmdLine.DashPort)).Str("dir", cmdLine.RecordingDir).Msg("starting DASH server")
 			err = srv.ListenAndServe()
 			if err != nil {
-				fmt.Printf("ERRO: dash server listen: %s\n", err.Error())
+				log.Error().Err(err).Msg("dash server listen")
 				return err
 			}
 		}
@@ -150,6 +156,8 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, beforeExit *[]func(
 }
 
 func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *CommandLine, beforeExit *[]func() error) error {
+	log := zerolog.Ctx(ctx)
+
 	dashURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", cmdLine.DashPort))
 	streamName := dash.StreamName{
 		Name: cmdLine.Run.StreamName,
@@ -188,7 +196,7 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 	vidSink := sink.NewInterSink(VidProdName)
 	prodPipe.Add(vidSink)
 
-	rtph264caps, rtph264depay := rtp.NewRTPH264Depay(prodPipe)
+	rtph264caps, rtph264depay := rtp.NewRTPH264Depay(prodPipe, *log)
 	prodH264dec := coder.NewH264Dec()
 	cbData[rtph264caps] = rtph264depay.OnPadAdded(prodH264dec.LinkChain(prodPipe, func(srcpad gst.Pad) gst.PadLinkReturn {
 		return srcpad.Link(vidSink.GetStaticPad("sink"))
@@ -203,10 +211,10 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 	}
 
 	aacdec := coder.NewAACDec()
-	rtpmp4acaps, rtpmp4adepay := rtp.NewRTPMP4ADepay(prodPipe)
+	rtpmp4acaps, rtpmp4adepay := rtp.NewRTPMP4ADepay(prodPipe, *log)
 	cbData[rtpmp4acaps] = rtpmp4adepay.OnPadAdded(aacdec.LinkChain(prodPipe, audlink))
 
-	rtpmp4gcaps, rtpmp4gdepay := rtp.NewRTPMP4GDepay(prodPipe)
+	rtpmp4gcaps, rtpmp4gdepay := rtp.NewRTPMP4GDepay(prodPipe, *log)
 	cbData[rtpmp4gcaps] = rtpmp4gdepay.OnPadAdded(aacdec.LinkChain(prodPipe, audlink))
 
 	// setting up upstream
@@ -245,7 +253,18 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 		return nil
 	})
 
-	fmt.Printf("INFO: running transmitter for %s\n", cmdLine.Run.StreamName)
+	log.Info().
+		Str("stream", cmdLine.Run.StreamName).
+		Str("src", logging.RedactURL(cmdLine.Run.Source)).
+		Str("sink", logging.RedactURL(cmdLine.Run.Sink)).
+		Uint64("downstream_width", cmdLine.Run.DownstreamSpecs.Width).
+		Uint64("downstream_height", cmdLine.Run.DownstreamSpecs.Height).
+		Uint64("downstream_bitrate", cmdLine.Run.DownstreamSpecs.Bitrate).
+		Uint64("recording_width", cmdLine.Run.RecordingSpecs.Width).
+		Uint64("recording_height", cmdLine.Run.RecordingSpecs.Height).
+		Uint64("recording_bitrate", cmdLine.Run.RecordingSpecs.Bitrate).
+		Msg("running transmitter")
+
 	pipeSetState(gst.StatePlaying)
 
 	loop.Run()

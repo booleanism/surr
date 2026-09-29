@@ -28,6 +28,8 @@ type CommandLine struct {
 	SelectedCommand string
 	Run             RunCmdLine
 	DashPort        uint16
+	LogLevel        string
+	LogFormat       string
 	Serve           ServeCmdLine
 }
 
@@ -93,6 +95,18 @@ func (cl *CommandLine) parseCLI(ctx context.Context, args []string) error {
 				Usage:       "local dash server port",
 				Value:       8000,
 				Destination: &cl.DashPort,
+			},
+			&cli.StringFlag{
+				Name:        "log-level",
+				Usage:       "log level (debug|info|warn|error)",
+				Value:       "info",
+				Destination: &cl.LogLevel,
+			},
+			&cli.StringFlag{
+				Name:        "log-format",
+				Usage:       "log output format (console|json)",
+				Value:       "console",
+				Destination: &cl.LogFormat,
 			},
 		},
 		Commands: []*cli.Command{

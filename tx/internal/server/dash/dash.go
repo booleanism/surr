@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/booleanism/surr/tx/internal/streaming"
+	"github.com/rs/zerolog"
 )
 
 const indexTemplate = `
@@ -55,14 +56,16 @@ type DashStream interface {
 }
 
 type DashServer struct {
-	t *template.Template
-	d DashStream
+	t   *template.Template
+	d   DashStream
+	log zerolog.Logger
 }
 
-func NewDashServer(tmpl *template.Template, dash DashStream) *DashServer {
+func NewDashServer(tmpl *template.Template, dash DashStream, log zerolog.Logger) *DashServer {
 	return &DashServer{
-		t: tmpl,
-		d: dash,
+		t:   tmpl,
+		d:   dash,
+		log: log,
 	}
 }
 
@@ -90,7 +93,7 @@ func (d *DashServer) Index(notfound *http.ServeMux) (string, http.HandlerFunc, e
 
 		err = t.Execute(w, data)
 		if err != nil {
-			fmt.Printf("ERRO: rendering template: %s\n", err.Error())
+			d.log.Error().Err(err).Msg("rendering template")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -109,7 +112,7 @@ func (d *DashServer) PlayStream(manifestFileName string) (string, http.HandlerFu
 			mpdurl := fmt.Sprintf("/stream/%s/%s", name, manifestFileName)
 			err = t.Execute(w, mpdurl)
 			if err != nil {
-				fmt.Printf("ERRO: unable to render play: %s\n", err.Error())
+				d.log.Error().Str("stream", name).Err(err).Msg("unable to render play")
 				return http.StatusInternalServerError
 			}
 
@@ -125,7 +128,7 @@ func (d *DashServer) StreamManifest(manifestFileName string) (string, http.Handl
 
 			err := d.d.OpenManifest(name, w)
 			if err != nil {
-				fmt.Printf("ERRO: unable to open manifest: %s\n", err.Error())
+				d.log.Error().Str("stream", name).Err(err).Msg("unable to open manifest")
 				return http.StatusInternalServerError
 			}
 
@@ -146,7 +149,7 @@ func (d *DashServer) isStreamExist(r *http.Request, onExist func(name string) in
 	}
 
 	return func(w http.ResponseWriter) {
-		fmt.Printf("%s\n", r.URL.String())
+		d.log.Debug().Str("method", r.Method).Str("path", r.URL.String()).Msg("dash request")
 		ret := onExist(name)
 		if ret > 0 {
 			w.WriteHeader(ret)
@@ -162,7 +165,7 @@ func (d *DashServer) StreamSegment() (string, http.HandlerFunc) {
 			w.Header().Set("Content-Type", "video/mp4")
 			err := d.d.OpenSegment(filepath.Join(name, seg), w)
 			if err != nil {
-				fmt.Printf("ERRO: unable to open segment: %s\n", err.Error())
+				d.log.Error().Str("stream", name).Str("segment", seg).Err(err).Msg("unable to open segment")
 				return http.StatusInternalServerError
 			}
 
@@ -179,7 +182,7 @@ func (d *DashServer) AddStream() (string, http.HandlerFunc) {
 		d.decodeStreamBody(r.Body, &sn, func() int {
 			err := d.d.AddStream(sn.Name)
 			if err != nil {
-				fmt.Printf("ERRO: unable to add stream: %s\n", err.Error())
+				d.log.Error().Str("stream", sn.Name).Err(err).Msg("unable to add stream")
 				return http.StatusInternalServerError
 			}
 
@@ -199,7 +202,7 @@ func (d *DashServer) decodeStreamBody(body io.ReadCloser, jsonable any, f func()
 		}
 	}
 
-	fmt.Printf("ERRO: unable to decode request: %s\n", err.Error())
+	d.log.Error().Err(err).Msg("unable to decode request")
 	return func(w http.ResponseWriter) {
 		w.WriteHeader(http.StatusBadRequest)
 	}
@@ -213,7 +216,7 @@ func (d *DashServer) DeleteStream() (string, http.HandlerFunc) {
 		d.decodeStreamBody(r.Body, &sn, func() int {
 			err := d.d.RemoveStream(sn.Name)
 			if err != nil {
-				fmt.Printf("ERRO: unable to remove stream: %s\n", err.Error())
+				d.log.Error().Str("stream", sn.Name).Err(err).Msg("unable to remove stream")
 				return http.StatusInternalServerError
 			}
 

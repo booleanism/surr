@@ -1,15 +1,15 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/booleanism/surr/tx/internal/server/dash"
+	"github.com/rs/zerolog"
 )
 
-func httpLogger(mux *http.ServeMux) http.HandlerFunc {
+func httpLogger(log zerolog.Logger, mux *http.ServeMux) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Printf("INFO: dash: %s %s\n", r.Method, r.RequestURI)
+		log.Debug().Str("method", r.Method).Str("path", r.RequestURI).Msg("dash request")
 		mux.ServeHTTP(w, r)
 	}
 }
@@ -43,7 +43,7 @@ func setupMuxDashServer(manifestFileName string, dash *dash.DashServer) (*http.S
 	return mux, nil
 }
 
-func setupDashServer(addr, manifestFileName string, dash *dash.DashServer) (*http.Server, error) {
+func setupDashServer(addr, manifestFileName string, dash *dash.DashServer, log zerolog.Logger) (*http.Server, error) {
 	mux, err := setupMuxDashServer(manifestFileName, dash)
 	if err != nil {
 		return nil, err
@@ -51,7 +51,7 @@ func setupDashServer(addr, manifestFileName string, dash *dash.DashServer) (*htt
 
 	s := &http.Server{
 		Addr:              addr,
-		Handler:           httpLogger(mux),
+		Handler:           httpLogger(log, mux),
 		ReadHeaderTimeout: GeneralTimeout,
 	}
 

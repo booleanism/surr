@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/go-gst/go-gst/pkg/gst"
+	"github.com/rs/zerolog"
 )
 
 type StreamSpecs struct {
@@ -44,11 +45,11 @@ func (p *Pipeline) WatchBus(ctx context.Context) error {
 		case gst.MessageWarning:
 			gerr, err := msg.ParseWarning()
 			if err != nil {
-				fmt.Printf("WARN: %s bus watch: %s: %s\n", p.GetName(), strings.ReplaceAll(gerr, "\n", "\\n"), strings.ReplaceAll(err.Error(), "\n", "\\n"))
+				zerolog.Ctx(ctx).Warn().Str("pipeline", p.n).Str("gst_err", strings.ReplaceAll(gerr, "\n", "\\n")).Err(err).Msg("bus watch warning")
 				continue
 			}
 
-			fmt.Printf("WARN: %s bus watch: %s\n", p.GetName(), strings.ReplaceAll(gerr, "\n", "\\n"))
+			zerolog.Ctx(ctx).Warn().Str("pipeline", p.n).Str("gst_err", strings.ReplaceAll(gerr, "\n", "\\n")).Msg("bus watch warning")
 		}
 	}
 

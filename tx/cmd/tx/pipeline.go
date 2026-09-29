@@ -11,6 +11,7 @@ import (
 	"github.com/booleanism/surr/tx/internal/sink"
 	"github.com/booleanism/surr/tx/internal/src"
 	"github.com/go-gst/go-gst/pkg/gst"
+	"github.com/rs/zerolog"
 )
 
 type PipelinesConfig struct {
@@ -44,7 +45,7 @@ func setupPipelines(ctx context.Context, cancel context.CancelCauseFunc, cfg Pip
 	go func() {
 		err = producer.WatchBus(ctx)
 		if err != nil {
-			fmt.Printf("ERRO: %s bus watch: %s\n", producer.GetName(), err.Error())
+			zerolog.Ctx(ctx).Error().Str("pipeline", producer.GetName()).Err(err).Msg("bus watch")
 			cancel(err)
 		}
 	}()
@@ -52,7 +53,7 @@ func setupPipelines(ctx context.Context, cancel context.CancelCauseFunc, cfg Pip
 	go func() {
 		err = downstream.WatchBus(ctx)
 		if err != nil {
-			fmt.Printf("ERRO: %s bus watch: %s\n", downstream.GetName(), err.Error())
+			zerolog.Ctx(ctx).Error().Str("pipeline", downstream.GetName()).Err(err).Msg("bus watch")
 			cancel(err)
 		}
 	}()
@@ -60,7 +61,7 @@ func setupPipelines(ctx context.Context, cancel context.CancelCauseFunc, cfg Pip
 	go func() {
 		err = recording.WatchBus(ctx)
 		if err != nil {
-			fmt.Printf("ERRO: %s bus watch: %s\n", recording.GetName(), err.Error())
+			zerolog.Ctx(ctx).Error().Str("pipeline", recording.GetName()).Err(err).Msg("bus watch")
 			cancel(err)
 		}
 	}()

@@ -1,9 +1,8 @@
 package rtp
 
 import (
-	"fmt"
-
 	"github.com/go-gst/go-gst/pkg/gst"
+	"github.com/rs/zerolog"
 )
 
 type depayloader struct {
@@ -14,6 +13,7 @@ type depayloader struct {
 
 	linkFunc func(srcpad gst.Pad) gst.PadLinkReturn
 	pipe     gst.Pipeline
+	log      zerolog.Logger
 }
 
 func (r *depayloader) linkChain(linkFunc func(src gst.Pad) gst.PadLinkReturn) {
@@ -39,7 +39,7 @@ func (r *depayloader) OnPadAdded(linkFunc func(src gst.Pad) gst.PadLinkReturn) f
 		if r.linkFunc != nil {
 			ret := r.linkFunc(pad)
 			if ret != gst.PadLinkOK {
-				fmt.Printf("WARN: unable to link pad: %s\n", ret.String())
+				r.log.Warn().Str("reason", ret.String()).Msg("unable to link pad")
 				return false
 			}
 		}
