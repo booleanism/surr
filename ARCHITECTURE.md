@@ -33,10 +33,11 @@ SRT ("data plane"). Analytics land in MongoDB; control state lives in SQLite.
 | subscriptions | Go  | `subscriptions/`  | SQLite-backed subscription registry answering node-membership queries |
 | nodes    | Python  | `nodes/`          | AI workers; `bustle.py` is the YOLO object counter |
 
-There is **no go.work**; each Go module is self-contained. `hub`, `rx` and
-`subscriptions` reach the shared root packages via
-`replace github.com/booleanism/surr => ../`. `tx` does **not** depend on the
-shared module — it is a standalone GStreamer binary with no broker connection.
+There is **no go.work**; each Go module is self-contained. All four service
+modules (`hub`, `rx`, `subscriptions`, `tx`) reach the shared root packages
+via `replace github.com/booleanism/surr => ../`. `tx` never joins the broker —
+it remains broker-free at runtime, but does import shared root packages
+(`internal/logging`) at build time.
 
 ## End-to-end data flow
 
@@ -348,9 +349,11 @@ gains the `analytics.declare` post-registration hook as part of this work.
 ### 3. Structured logging (zerolog)
 
 All Go services replace ad-hoc `fmt.Printf("INFO:/ERRO:")` output with
-zerolog: a shared `internal/logging` package (tx carries its own dependency
-as a standalone module), context-propagated loggers, a documented level and
+zerolog: a shared `internal/logging` package (imported by all four service
+modules including tx), context-propagated loggers, a documented level and
 field policy, and a strict never-log list (credentials, tokens,
-credential-bearing URIs, full payloads). Python nodes keep stdlib `logging`;
+credential-bearing URIs, full payloads). `internal/logging` also provides
+`Cleanups`, the mutex-guarded beforeExit replacement that removed the
+shutdown data races. Python nodes keep stdlib `logging`;
 `bustle.py`'s prints migrate during the nodes refactor. See DESIGN.md §13
 and TODO.md section C.

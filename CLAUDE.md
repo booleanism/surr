@@ -27,7 +27,7 @@ cd hub && go run ./cmd/hub run --help
 python bustle.py --help
 ```
 
-There is no go.work file; each Go module is self-contained. hub/rx/subscriptions reach the shared root packages via `replace github.com/booleanism/surr => ../` in their go.mod. tx does NOT depend on the shared module — it is a standalone GStreamer binary. There are no Go tests in the repo yet; lint is the only automated check (golangci-lint with strict settings: cyclop max 10, govet enable-all with strict shadowing — run `make lint` before committing).
+There is no go.work file; each Go module is self-contained. All four service modules (hub, rx, subscriptions, tx) reach the shared root packages via `replace github.com/booleanism/surr => ../` in their go.mod. tx never joins the broker at runtime, but does import shared root packages (`internal/logging`) at build time. There are no Go tests in the repo yet; lint is the only automated check (golangci-lint with strict settings: cyclop max 10, govet enable-all with strict shadowing — run `make lint` before committing).
 
 ## Architecture
 

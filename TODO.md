@@ -176,8 +176,15 @@ the DESIGN.md §13 policy exactly — logs must carry context values
 - [x] tx --recording flag wrote parsed specs into DownstreamSpecs instead of
       RecordingSpecs (tx/cmd/tx/cmdline.go, recording flag Action) — fixed
       and committed (e3ca2db)
-- [ ] Consider replacing the `restart = restart || !restart` idiom (always
-      true after first pass; log wording only)
+- [ ] Replace the `restart = restart || !restart` idiom — it always
+      evaluates to true after the first pass, i.e. it is an obfuscated
+      `restart = true` (rx/cmd/rx/main.go:185,209,233,257;
+      hub/cmd/hub/main.go:160,181,236;
+      subscriptions/cmd/subscriptions/main.go:135). Keep the behavior
+      (log "restarting <loop> listen" on every re-entry after the first,
+      since any re-entry follows an error), just make it readable:
+      `restart = true` after the first iteration, or track a `first`
+      flag and log when `!first`. No semantic change.
 - [ ] POST /subscriptions/remove returns 501 — implement HTTP path or remove
       the route
 - [ ] Go test suite (make lint is the only gate today)
