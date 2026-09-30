@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -11,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/booleanism/surr/internal/logging"
 	"github.com/booleanism/surr/tx/internal/core"
 	"github.com/booleanism/surr/tx/internal/core/coder"
-	"github.com/booleanism/surr/tx/internal/logging"
 	"github.com/booleanism/surr/tx/internal/server/dash"
 	"github.com/booleanism/surr/tx/internal/sink"
 	"github.com/booleanism/surr/tx/internal/src"
@@ -58,28 +59,24 @@ func main() {
 		return
 	}
 
-	ctx, log := logging.Setup(ctx, "tx", cmdLine.LogLevel, cmdLine.LogFormat)
+	ctx, log := logging.Setup(ctx, "tx", "", cmdLine.LogLevel, cmdLine.LogFormat)
 
-	beforeExit := []func() error{}
+	cleanups := &logging.Cleanups{}
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
 		<-ctx.Done()
 
-		for _, f := range beforeExit {
-			err = f()
-			if err != nil {
-				log.Error().Err(err).Msg("before exit")
-			}
+		for _, cleanupErr := range cleanups.Run() {
+			log.Error().Err(cleanupErr).Msg("before exit")
 		}
 	}()
 
 	switch cmdLine.SelectedCommand {
 	case "serve":
 		go func() {
-			err = serveCommand(ctx, cmdLine, &beforeExit)
-			if err != nil {
-				log.Error().Err(err).Msg("serve command")
+			if serveErr := serveCommand(ctx, cmdLine, cleanups); serveErr != nil {
+				log.Error().Err(serveErr).Msg("serve command")
 				return
 			}
 		}()
@@ -97,10 +94,9 @@ func main() {
 		defer cancelWrap(context.DeadlineExceeded)
 
 		go func() {
-			err = runCommand(ctxRun, cancelWrap, cmdLine, &beforeExit)
-			if err != nil {
-				log.Error().Err(err).Msg("run command")
-				cancelWrap(err)
+			if runErr := runCommand(ctxRun, cancelWrap, cmdLine, cleanups); runErr != nil {
+				log.Error().Err(runErr).Msg("run command")
+				cancelWrap(runErr)
 				return
 			}
 		}()
@@ -112,7 +108,7 @@ func main() {
 	}
 }
 
-func serveCommand(ctx context.Context, cmdLine *CommandLine, beforeExit *[]func() error) error {
+func serveCommand(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) error {
 	log := zerolog.Ctx(ctx)
 
 	dashStream := streaming.NewDash(streaming.StreamDeps{
@@ -131,10 +127,9 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, beforeExit *[]func(
 		return err
 	}
 
-	(*beforeExit) = append((*beforeExit), func() error {
-		err = srv.Close()
-		if err != nil {
-			return fmt.Errorf("closing dash server: %w", err)
+	cleanups.Register(func() error {
+		if closeErr := srv.Close(); closeErr != nil {
+			return fmt.Errorf("closing dash server: %w", closeErr)
 		}
 
 		return nil
@@ -143,19 +138,23 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, beforeExit *[]func(
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.Canceled) {
+				return ctxErr
+			}
+
+			return nil
 		default:
 			log.Info().Int("port", int(cmdLine.DashPort)).Str("dir", cmdLine.RecordingDir).Msg("starting DASH server")
-			err = srv.ListenAndServe()
-			if err != nil {
-				log.Error().Err(err).Msg("dash server listen")
-				return err
+			listenErr := srv.ListenAndServe()
+			if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+				log.Error().Err(listenErr).Msg("dash server listen")
+				return listenErr
 			}
 		}
 	}
 }
 
-func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *CommandLine, beforeExit *[]func() error) error {
+func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *CommandLine, cleanups *logging.Cleanups) error {
 	log := zerolog.Ctx(ctx)
 
 	dashURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", cmdLine.DashPort))
@@ -221,7 +220,7 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 	rtspSrc := src.NewRTSPSrc(cmdLine.Run.Source, cbData)
 	prodPipe.Add(rtspSrc)
 
-	(*beforeExit) = append((*beforeExit), func() error {
+	cleanups.Register(func() error {
 		if os.Getenv("GST_DEBUG_DUMP_DOT_DIR") != "" {
 			gst.DebugBinToDotFile(prodPipe, gst.DebugGraphShowAll, ProducerPipelineName)
 			gst.DebugBinToDotFile(dsPipe, gst.DebugGraphShowAll, DownstreamPipelineName)
@@ -244,10 +243,9 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 		return fmt.Errorf("unable to regist stream: %w", err)
 	}
 
-	(*beforeExit) = append((*beforeExit), func() error {
-		err = dashManager.UnregStream(streamName)
-		if err != nil {
-			return fmt.Errorf("unable to unregister stream: %w", err)
+	cleanups.Register(func() error {
+		if unregErr := dashManager.UnregStream(streamName); unregErr != nil {
+			return fmt.Errorf("unable to unregister stream: %w", unregErr)
 		}
 
 		return nil

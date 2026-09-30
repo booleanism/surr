@@ -41,22 +41,20 @@ func main() {
 
 	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, cmdLine.LogLevel, cmdLine.LogFormat)
 
-	beforeExit := []func() error{}
+	cleanups := &logging.Cleanups{}
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
 		<-ctx.Done()
 
-		for _, f := range beforeExit {
-			if err = f(); err != nil {
-				log.Error().Err(err).Msg("beforeExit cleanup")
-			}
+		for _, cleanupErr := range cleanups.Run() {
+			log.Error().Err(cleanupErr).Msg("beforeExit cleanup")
 		}
 	}()
 
 	switch cmdLine.SelectedCommand {
 	case "run":
-		run(ctx, cmdLine, beforeExit)
+		run(ctx, cmdLine, cleanups)
 		<-cleanupDone
 
 	default:
@@ -64,7 +62,7 @@ func main() {
 }
 
 // nolint:cyclop
-func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
+func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) {
 	log := zerolog.Ctx(ctx)
 
 	log.Info().
@@ -72,7 +70,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 		Str("database", cmdLine.DSN).
 		Msg("subscriptions starting")
 
-	ch, routerQueue, err := infraSetup(cmdLine, &beforeExit)
+	ch, routerQueue, err := infraSetup(cmdLine, cleanups)
 	if err != nil {
 		log.Error().Err(err).Msg("infra setup")
 		return
@@ -108,9 +106,8 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				err = router.Introduce(ctx)
-				if err != nil {
-					log.Error().Err(err).Msg("introducing it self")
+				if introErr := router.Introduce(ctx); introErr != nil {
+					log.Error().Err(introErr).Msg("introducing it self")
 				}
 			}
 		}
@@ -128,8 +125,8 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 					log.Info().Msg("restarting router listen")
 				}
 
-				if err = router.Listen(ctx); err != nil {
-					log.Error().Err(err).Msg("router listen")
+				if routerErr := router.Listen(ctx); routerErr != nil {
+					log.Error().Err(routerErr).Msg("router listen")
 				}
 
 				restart = restart || !restart
@@ -140,20 +137,20 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 	<-ctx.Done()
 }
 
-func infraSetup(cmdLine *CommandLine, beforeExit *[]func() error) (*amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
+func infraSetup(cmdLine *CommandLine, cleanups *logging.Cleanups) (*amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
 	mq, err := amqp091.Dial(cmdLine.RabbitMQAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("rabbitmq dial: %w", err)
 	}
 
-	(*beforeExit) = append((*beforeExit), mq.Close)
+	cleanups.Register(mq.Close)
 
 	ch, err := mq.Channel()
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening rabbitmq channel: %w", err)
 	}
 
-	(*beforeExit) = append((*beforeExit), ch.Close)
+	cleanups.Register(ch.Close)
 
 	routerQueue, err := rabbitmq.SetupRouter(ch, cmdLine.SiblingName, cmdLine.FamilyName)
 	if err != nil {

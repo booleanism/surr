@@ -44,28 +44,26 @@ func main() {
 
 	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, cmdLine.LogLevel, cmdLine.LogFormat)
 
-	beforeExit := []func() error{}
+	cleanups := &logging.Cleanups{}
 	cleanupDone := make(chan struct{})
 	go func() {
 		defer close(cleanupDone)
 		<-ctx.Done()
 
-		for _, f := range beforeExit {
-			if err = f(); err != nil {
-				log.Error().Err(err).Msg("beforeExit cleanup")
-			}
+		for _, cleanupErr := range cleanups.Run() {
+			log.Error().Err(cleanupErr).Msg("beforeExit cleanup")
 		}
 	}()
 
 	switch cmdLine.SelectedCommand {
 	case "run":
-		run(ctx, cmdLine, beforeExit)
+		run(ctx, cmdLine, cleanups)
 		<-cleanupDone
 	default:
 	}
 }
 
-func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
+func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) {
 	log := zerolog.Ctx(ctx)
 
 	log.Info().
@@ -76,7 +74,7 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 		Int64("workers", cmdLine.NWorker).
 		Msg("rx starting")
 
-	ch, qSetup, err := infraSetup(cmdLine, &beforeExit)
+	ch, qSetup, err := infraSetup(cmdLine, cleanups)
 	if err != nil {
 		log.Error().Err(err).Msg("setup infra")
 		return
@@ -109,9 +107,8 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				err = router.Introduce(ctx)
-				if err != nil {
-					log.Error().Err(err).Msg("introducing it self")
+				if introErr := router.Introduce(ctx); introErr != nil {
+					log.Error().Err(introErr).Msg("introducing it self")
 				}
 			}
 		}
@@ -124,20 +121,20 @@ func run(ctx context.Context, cmdLine *CommandLine, beforeExit []func() error) {
 	<-ctx.Done()
 }
 
-func infraSetup(cmdLine *CommandLine, beforeExit *[]func() error) (*amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
+func infraSetup(cmdLine *CommandLine, cleanups *logging.Cleanups) (*amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
 	mq, err := amqp091.Dial(cmdLine.RabbitMQAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("rabbitmq dial: %w", err)
 	}
 
-	(*beforeExit) = append((*beforeExit), mq.Close)
+	cleanups.Register(mq.Close)
 
 	ch, err := mq.Channel()
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening rabbitmq channel: %w", err)
 	}
 
-	(*beforeExit) = append((*beforeExit), ch.Close)
+	cleanups.Register(ch.Close)
 
 	qSetup, err := rabbitmq.SetupRouter(ch, cmdLine.SiblingName, cmdLine.FamilyName)
 	if err != nil {

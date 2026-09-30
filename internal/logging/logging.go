@@ -52,9 +52,12 @@ func Setup(ctx context.Context, name, family, level, format string) (context.Con
 
 	out = out.With().
 		Str("service", name).
-		Str("family", family).
 		Logger().
 		Level(ParseLevel(level))
+
+	if family != "" {
+		out = out.With().Str("family", family).Logger()
+	}
 
 	return out.WithContext(ctx), out
 }
