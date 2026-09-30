@@ -112,7 +112,7 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 		KeyLength:   32,
 	})
 
-	subsCase := usecases.NewSubscription(subsAdapter, usersRepo, nodesRepo)
+	subsCase := usecases.NewSubscription(subsAdapter, usersRepo)
 	userCase := usecases.NewUser(usersRepo, argon)
 	nodeCase := usecases.NewNode(nodesRepo, subsAdapter)
 	analCase := usecases.NewAnalytics(subsAdapter, nodesAdapter)

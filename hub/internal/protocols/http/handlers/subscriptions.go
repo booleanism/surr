@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
 	"github.com/booleanism/surr/internal/models"
-	"github.com/booleanism/surr/internal/pools"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
@@ -14,7 +14,6 @@ import (
 type Subscription interface {
 	AddSubscription(ctx context.Context, subsNodes models.SubscribedNodes) (uuid.UUID, error)
 	RemoveSubscription(ctx context.Context, subsNodes models.SubscribedNodes) (uuid.UUID, error)
-	GetNodes(ctx context.Context, subs models.Subscription, sinks *[]models.Node) (int, error)
 }
 
 type subscriptionHandlers struct {
@@ -32,7 +31,6 @@ func NewSubscription(mux *http.ServeMux, s Subscription, auth AuthHandlerFunc) s
 
 	mux.HandleFunc("POST /add", auth.RequireAuthHandlerFunc(h.add))
 	mux.HandleFunc("POST /remove", auth.RequireAuthHandlerFunc(h.remove))
-	mux.HandleFunc("GET /sinks", auth.RequireAuthHandlerFunc(h.sinks))
 	return h
 }
 
@@ -40,57 +38,30 @@ func (s subscriptionHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	s.m.ServeHTTP(w, r)
 }
 
-func (s subscriptionHandlers) sinks(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close() //nolint:errcheck
-
-	subsID, err := uuid.Parse(r.URL.Query().Get("id"))
-	if err != nil {
-		http.Error(w, "invalid subscription id", http.StatusForbidden)
-		return
-	}
-
-	nb := pools.NodePool.Get().(*[]models.Node)
-	defer pools.NodePoolResetAndPut(nb)
-
-	subs := models.Subscription{
-		ID: subsID,
-	}
-
-	n, err := s.s.GetNodes(r.Context(), subs, nb)
-	if err != nil {
-		zerolog.Ctx(r.Context()).Error().Str("sub_id", subsID.String()).Err(err).Msg("get nodes")
-		http.Error(w, "unable to check subscription id", http.StatusInternalServerError)
-		return
-	}
-
-	if n == 0 {
-		http.Error(w, "no sinks available", http.StatusNoContent)
-		return
-	}
-
-	_ = json.NewEncoder(w).Encode((*nb)[:n])
-}
-
 func (s subscriptionHandlers) add(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close() //nolint:errcheck
 
+	log := zerolog.Ctx(r.Context())
 	subsNodes := models.SubscribedNodes{}
+
 	err := json.NewDecoder(r.Body).Decode(&subsNodes)
 	if err != nil {
-		http.Error(w, "unable to decode request", http.StatusBadRequest)
+		log.Warn().Err(err).Msg("decoding request")
+		http.Error(w, "decoding request", http.StatusBadRequest)
 		return
 	}
 
-	// userID, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
-	// if err != nil {
-	// 	http.Error(w, "unable to parse userID", http.StatusBadRequest)
-	// 	return
-	// }
+	uid, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
+	if err != nil {
+		log.Warn().Err(err).Msg("parsing userID")
+		http.Error(w, "parsing userID", http.StatusBadRequest)
+		return
+	}
 
-	// subsNodes.User.ID = userID
+	subsNodes.User.ID = uid
 	subsID, err := s.s.AddSubscription(r.Context(), subsNodes)
 	if err != nil {
-		zerolog.Ctx(r.Context()).Error().Err(err).Msg("add subscription")
+		log.Error().Err(err).Msg("add subscription")
 		http.Error(w, "unable to add subscription", http.StatusInternalServerError)
 		return
 	}
@@ -102,5 +73,41 @@ func (s subscriptionHandlers) add(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s subscriptionHandlers) remove(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
+	defer r.Body.Close() //nolint:errcheck
+
+	log := zerolog.Ctx(r.Context())
+	subsNodes := models.SubscribedNodes{}
+
+	err := json.NewDecoder(r.Body).Decode(&subsNodes)
+	if err != nil {
+		log.Warn().Err(err).Msg("decoding request")
+		http.Error(w, "decoding request", http.StatusBadRequest)
+		return
+	}
+
+	if subsNodes.Subscription.ID == uuid.Nil {
+		log.Warn().Msg("unexpected subscription_id")
+		http.Error(w, "unexpected subscription_id", http.StatusBadRequest)
+		return
+	}
+
+	uid, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
+	if err != nil {
+		log.Warn().Err(err).Msg("parsing userID")
+		http.Error(w, "parsing userID", http.StatusBadRequest)
+		return
+	}
+
+	subsNodes.User.ID = uid
+	subsID, err := s.s.RemoveSubscription(r.Context(), subsNodes)
+	if err != nil {
+		log.Error().Err(err).Msg("remove subscription")
+		http.Error(w, "unable to remove subscription", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"subscription_id": subsID,
+	})
 }

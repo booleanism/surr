@@ -2,13 +2,15 @@ package usecases
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/booleanism/surr/internal/models"
+	"github.com/booleanism/surr/internal/pools"
 	"github.com/google/uuid"
 )
 
 type Subscription interface {
-	DeleteSubscriptions(ctx context.Context, subsNodeList []models.Subscription) error
+	DeleteSubscriptions(ctx context.Context, subs []models.Subscription) error
 	InsertSubscriptions(ctx context.Context, subsNodesList []models.SubscribedNodes) error
 	SelectAllSubscribedNodes(ctx context.Context, nodes *[]models.Node) (int, error)
 	SelectSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error)
@@ -31,8 +33,19 @@ func (s subscription) AddSubscriptions(ctx context.Context, subsNodes []models.S
 	return s.s.InsertSubscriptions(ctx, subsNodes)
 }
 
-func (s subscription) RemoveSubscriptions(ctx context.Context, subsNodes []models.Subscription) error {
-	return s.s.DeleteSubscriptions(ctx, subsNodes)
+func (s subscription) RemoveSubscriptions(ctx context.Context, subsNodes []models.SubscribedNodes) error {
+	subs := pools.SubscriptionsPool.Get().(*[]models.Subscription)
+	defer pools.SubscriptionPoolResetAndPut(subs)
+
+	for _, sub := range subsNodes {
+		(*subs) = append((*subs), sub.Subscription)
+	}
+
+	if len(*subs) == 0 {
+		return fmt.Errorf("expected > 0 subscribed nodes")
+	}
+
+	return s.s.DeleteSubscriptions(ctx, (*subs))
 }
 
 func (s subscription) GetSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error) {

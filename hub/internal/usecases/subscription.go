@@ -2,7 +2,6 @@ package usecases
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/booleanism/surr/internal/models"
 	"github.com/google/uuid"
@@ -14,10 +13,6 @@ type Subscriptions interface {
 	SelectSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error)
 }
 
-type NodesSelectByID interface {
-	SelectAllNodesByID(ctx context.Context, nodes *[]models.Node) (int, error)
-}
-
 type GetUser interface {
 	GetUserByID(ctx context.Context, user *models.User) error
 }
@@ -25,14 +20,12 @@ type GetUser interface {
 type subscription struct {
 	sa Subscriptions
 	ur GetUser
-	n  NodesSelectByID
 }
 
-func NewSubscription(s Subscriptions, ur GetUser, n NodesSelectByID) subscription {
+func NewSubscription(s Subscriptions, ur GetUser) subscription {
 	return subscription{
 		sa: s,
 		ur: ur,
-		n:  n,
 	}
 }
 
@@ -68,17 +61,4 @@ func (s subscription) RemoveSubscription(ctx context.Context, subNodes models.Su
 	}
 
 	return subNodes.Subscription.ID, nil
-}
-
-func (s subscription) GetNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error) {
-	n, err := s.sa.SelectSubscribedNodes(ctx, sub, nodes)
-	if err != nil {
-		return 0, err
-	}
-
-	if n < 1 {
-		return 0, fmt.Errorf("expect one or more subscribed nodes")
-	}
-
-	return s.n.SelectAllNodesByID(ctx, nodes)
 }

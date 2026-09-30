@@ -13,7 +13,7 @@ import (
 
 type Subscriptions interface {
 	AddSubscriptions(ctx context.Context, subsNodesList []models.SubscribedNodes) error
-	RemoveSubscriptions(ctx context.Context, subsNodesList []models.Subscription) error
+	RemoveSubscriptions(ctx context.Context, subsNodesList []models.SubscribedNodes) error
 	GetSubscribedNodes(ctx context.Context, sub models.Subscription, nodes *[]models.Node) (int, error)
 	GetAllSubscribedNodes(ctx context.Context, nodes *[]models.Node) (int, error)
 	GetSubscriptionByNode(ctx context.Context, node models.Node, subs *[]models.Subscription) error
@@ -142,17 +142,17 @@ func (s subscriptions) removeHandler(ctx context.Context, trackID uuid.UUID, req
 
 	zerolog.Ctx(ctx).Debug().Str("command", command).Str("track_id", trackID.String()).Msg("handler invoked")
 
-	subsb := pools.SubscriptionsPool.Get().(*[]models.Subscription)
-	defer pools.SubscriptionPoolResetAndPut(subsb)
+	subsNodes := pools.SubscribedNodesPool.Get().(*[]models.SubscribedNodes)
+	defer pools.SubscribedNodesPoolResetAndPut(subsNodes)
 
-	err := json.Unmarshal(req.Payload, subsb)
+	err := json.Unmarshal(req.Payload, subsNodes)
 	if err != nil {
 		s.logFail(ctx, command, -1, err)
 		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
 		return
 	}
 
-	err = s.s.RemoveSubscriptions(ctx, *subsb)
+	err = s.s.RemoveSubscriptions(ctx, *subsNodes)
 	if err != nil {
 		s.logFail(ctx, command, -2, err)
 		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
@@ -160,8 +160,8 @@ func (s subscriptions) removeHandler(ctx context.Context, trackID uuid.UUID, req
 	}
 
 	res := []uuid.UUID{}
-	for _, s := range *subsb {
-		res = append(res, s.ID)
+	for _, s := range *subsNodes {
+		res = append(res, s.Subscription.ID)
 	}
 
 	resByte, err := json.Marshal(&res)

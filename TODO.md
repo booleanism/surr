@@ -185,8 +185,10 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       since any re-entry follows an error), just make it readable:
       `restart = true` after the first iteration, or track a `first`
       flag and log when `!first`. No semantic change.
-- [ ] POST /subscriptions/remove returns 501 — implement HTTP path or remove
-      the route
+- [x] POST /subscriptions/remove returns 501 — implemented (handler decodes
+      the subscription id from the auth'd user, calls the remove usecase
+      over the broker; 400 on nil id). Note: subscription ownership is not
+      enforced yet — any authenticated user can remove any subscription.
 - [ ] Go test suite (make lint is the only gate today)
 - [ ] PostgreSQL support (README TODO)
 - [ ] Analytics presentation layer (README TODO)

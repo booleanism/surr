@@ -224,7 +224,7 @@ SRT sockets, the broadcaster, and two outbound adapters
   - `POST /auth/signin|refresh|logout` — JWT access token (HS256, 24h) +
     opaque refresh token (32 random bytes, 7-day TTL) stored server-side in an
     in-memory token store; refresh cookie is HttpOnly/Secure/Lax on `/auth`.
-  - `POST /subscriptions/add`, `GET /subscriptions/sinks` (auth-protected).
+  - `POST /subscriptions/add`, `POST /subscriptions/remove` (auth-protected).
   - user and node handlers (node analytics proxied over the broker).
 
 Layering: `cmd/<svc>` → `internal/protocols/{http,rabbitmq}` (transport) →
