@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -138,15 +137,14 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, cleanups *logging.C
 	for {
 		select {
 		case <-ctx.Done():
-			if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(ctxErr, context.Canceled) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
 
 			return nil
 		default:
 			log.Info().Int("port", int(cmdLine.DashPort)).Str("dir", cmdLine.RecordingDir).Msg("starting DASH server")
-			listenErr := srv.ListenAndServe()
-			if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+			if listenErr := srv.ListenAndServe(); listenErr != nil {
 				log.Error().Err(listenErr).Msg("dash server listen")
 				return listenErr
 			}

@@ -115,7 +115,25 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	}()
 
 	go func() {
-		listen(ctx, goPool, router, ingress, egress)
+		routines := []routine{
+			{
+				name: "go-pool",
+				f:    goPool.Listen,
+			},
+			{
+				name: "router",
+				f:    router.Listen,
+			},
+			{
+				name: "ingres",
+				f:    ingress.Listen,
+			},
+			{
+				name: "egress",
+				f:    egress.Listen,
+			},
+		}
+		startRoutines(ctx, routines)
 	}()
 
 	<-ctx.Done()
@@ -144,111 +162,37 @@ func infraSetup(cmdLine *CommandLine, cleanups *logging.Cleanups) (*amqp091.Chan
 	return ch, qSetup, nil
 }
 
-type service interface {
-	Listen(context.Context) error
+type routine struct {
+	f    func(ctx context.Context) error
+	name string
 }
 
-func listen(ctx context.Context, goPool, router, ingress, egress service) {
-	log := zerolog.Ctx(ctx)
-
-	go func() {
-		goPoolListen(ctx, goPool)
-	}()
-
-	go func() {
-		routerListen(ctx, router)
-	}()
-
-	go func() {
-		ingressListen(ctx, ingress)
-	}()
-
-	var restart bool
-	log.Info().Msg("starting egress listen")
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if restart {
-				log.Info().Msg("restarting egress listen")
-			}
-
-			err := egress.Listen(ctx)
-			if err != nil {
-				log.Error().Err(err).Msg("egress listen")
-			}
-
-			restart = restart || !restart
-		}
+func startRoutines(ctx context.Context, routines []routine) {
+	for _, s := range routines[:len(routines)-1] {
+		go func() {
+			listen(ctx, s.name, s.f)
+		}()
 	}
+
+	last := routines[len(routines)-1]
+	listen(ctx, last.name, last.f)
 }
 
-func goPoolListen(ctx context.Context, goPool service) {
-	log := zerolog.Ctx(ctx)
-
+func listen(ctx context.Context, name string, listen func(context.Context) error) {
+	log := zerolog.Ctx(ctx).With().Str("routine", name).Logger()
+	log.Info().Msg("listening")
 	var restart bool
-	log.Info().Msg("starting goroutines listen")
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 			if restart {
-				log.Info().Msg("restarting goroutines listen")
+				log.Info().Msg("restart listening")
 			}
 
-			err := goPool.Listen(ctx)
-			if err != nil {
-				log.Error().Err(err).Msg("goroutines listen")
-			}
-
-			restart = restart || !restart
-		}
-	}
-}
-
-func routerListen(ctx context.Context, router service) {
-	log := zerolog.Ctx(ctx)
-
-	var restart bool
-	log.Info().Msg("starting router listen")
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if restart {
-				log.Info().Msg("restarting router listen")
-			}
-
-			err := router.Listen(ctx)
-			if err != nil {
-				log.Error().Err(err).Msg("router listen")
-			}
-
-			restart = restart || !restart
-		}
-	}
-}
-
-func ingressListen(ctx context.Context, ingress service) {
-	log := zerolog.Ctx(ctx)
-
-	var restart bool
-	log.Info().Msg("starting ingress listen")
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if restart {
-				log.Info().Msg("restarting ingress listen")
-			}
-
-			err := ingress.Listen(ctx)
-			if err != nil {
-				log.Error().Err(err).Msg("ingress listen")
+			if err := listen(ctx); err != nil {
+				log.Error().Err(err).Msg("listening error")
 			}
 
 			restart = restart || !restart
