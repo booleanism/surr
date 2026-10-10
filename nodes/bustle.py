@@ -312,6 +312,25 @@ async def main():
             register_task = asyncio.create_task(register(router))
             logger.info("starting registration")
 
+            def on_register_done(task: asyncio.Task) -> None:
+                """Report a registration that gave up.
+
+                register_task is excluded from the wait set below because it
+                completing successfully must not stop the node; without this
+                callback its failure would only surface (if at all) at
+                shutdown, as a node that quietly stopped being reachable.
+                """
+                if task.cancelled():
+                    return
+
+                exc = task.exception()
+                if exc is not None:
+                    logger.error(
+                        "node registration failed node_id=%s: %s", args.node_id, exc
+                    )
+
+            register_task.add_done_callback(on_register_done)
+
             stop_waiter = asyncio.create_task(stop_event.wait())
 
             tasks.extend([listen_task, intro_task, normalizer_task, register_task])
@@ -346,7 +365,15 @@ async def main():
                     task.cancel()
 
             if background:
-                await asyncio.gather(*background, return_exceptions=True)
+                # return_exceptions=True keeps one failure from hiding the
+                # others, but it also discards them: report each one instead
+                # of letting a crashed task vanish.
+                for result in await asyncio.gather(*background, return_exceptions=True):
+                    if isinstance(result, asyncio.CancelledError):
+                        continue
+
+                    if isinstance(result, BaseException):
+                        logger.error("background task failed: %s", result, exc_info=result)
 
             if (
                 registered_event.is_set()
@@ -375,6 +402,10 @@ async def main():
                         e,
                     )
 
+            # Stop the consumer even when registration never completed:
+            # otherwise it stays parked on its future while `async with
+            # connection` closes the channel underneath it.
+            if listen_task is not None and not listen_task.done():
                 listen_task.cancel()
                 await asyncio.gather(listen_task, return_exceptions=True)
 
