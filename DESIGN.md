@@ -6,8 +6,7 @@ Rationale, patterns and trade-offs behind the architecture described in
 > Sections 1–10 describe decisions that are **implemented on `main`**. Sections
 > 11–12 are **designed but not built on `main`**. Section 13 is **implemented**.
 > The "Known limitations" section at the end records the defects found in the
-> 2026-10 review: E0–E6, E8, E9 and E10 are fixed and committed, E7/E11 are
-> open. TODO.md section E tracks each one with its status.
+> 2026-10 review; TODO.md section E tracks each one and its status.
 
 ## Goals
 
@@ -443,9 +442,8 @@ covers "hub/rx/subscriptions" only, although tx imports it too.
 
 ### A. Correctness defects (found in the 2026-10 review)
 
-The review pass reproduced every item below from the source. **E0–E6, E8, E9
-and E10 are fixed and committed (`beaa467`..`4181761`); E7 and E11 (MEDIUM/LOW)
-are still open.** TODO.md section E tracks each one with its status.
+The review pass reproduced every item below from the source. TODO.md section E
+is the tracker for these findings and their status.
 
 #### Fixed (E0–E6, E8, E9, E10)
 
@@ -571,7 +569,7 @@ are still open.** TODO.md section E tracks each one with its status.
 ### B. Operational / robustness gaps
 
 1. **Tests are still thin.** The Python `nodes/core` runtime now has a suite
-   (`nodes/tests/`, 100 tests, run by `make test-nodes` and wired into
+   (`nodes/tests/`, run by `make test-nodes` and wired into
    `make test`), and the Go tests cover the RPC reply layer
    (`internal/protocols/handlers_test.go`, the `hub` and `subscriptions`
    `handlers` packages) and `internal/backoff`. The two `handlers` packages

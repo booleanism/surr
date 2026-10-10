@@ -9,17 +9,13 @@ zero-copy fan-out; the control plane is a set of small services that discover
 each other over a RabbitMQ topic exchange — there is no service registry and no
 central orchestrator.
 
-> **Project status: the control plane runs, and every defect found in the last
-> review pass down to HIGH severity is fixed and committed.** E0–E6, E8 and E9
-> in [TODO.md](TODO.md) — the SQLite UUID storage-class mismatch that made `rx`
-> reject every publisher, the RPC error replies that were never published, the
-> RPC plumbing races, shutdown/lifecycle, the restart loops, the storage
-> defects, tx/DASH, the Python node runtime and the security gaps — are fixed
-> (`beaa467`..`4181761`). E7 and E11 (the rx data plane and minor loose edges)
-> are still open. Tests cover the RPC reply layer, the restart backoff and the
-> `nodes/core` runtime, and `make typecheck` gates the Python side with pyright;
-> the SRT data plane, the SQLite layer and the tx pipelines are exercised by
-> hand.
+> **Project status: the control plane runs, and every defect found in the 2026-10
+> review down to HIGH severity is fixed.** [TODO.md](TODO.md) section E is the
+> tracker for the review findings and their status — what is fixed, and what is
+> still open — so it is the only place that records it. Tests cover the RPC reply
+> layer, the restart backoff and the `nodes/core` runtime, and `make typecheck`
+> gates the Python side with pyright; the SRT data plane, the SQLite layer and
+> the tx pipelines are exercised by hand.
 
 ## How it fits together
 

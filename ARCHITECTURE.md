@@ -76,10 +76,10 @@ it remains broker-free at runtime, but does import shared root packages
    **Planned replacement:** this read path moves to a dedicated analytics
    service — see "Planned evolution" below and DESIGN.md §11.
 
-> ⚠️ Steps 3–5 depend on `subscriptions.nodes.get` / `subscriptions.by.nodeid.get`,
-> which returned **zero rows** until the E0 fix because `subscriptions.add` wrote
-> UUIDs as TEXT while the lookup queries bound BLOBs. That is fixed and
-> committed (`beaa467`); see "Known defects" below.
+> ⚠️ Steps 3–5 depend on `subscriptions.nodes.get` / `subscriptions.by.nodeid.get`.
+> `subscriptions.add` must write UUIDs in the storage class the lookups bind —
+> BLOB, via `id[:]`. Binding TEXT against a BLOB lookup matches zero rows
+> silently, which made rx reject every publisher. See "Known defects" below.
 
 ## Control plane: the sibling discovery protocol
 
@@ -353,8 +353,7 @@ Same layering as hub minus HTTP.
 
 These are recorded in full in DESIGN.md ("Known limitations") and TODO.md
 section E. The 2026-10 review pass reproduced every one of them from the
-source; E0–E6, E8, E9 and E10 have since been fixed and committed
-(`beaa467`..`4181761`). E7 and E11 are still open.
+source; TODO.md section E is the tracker for their status.
 
 ### Fixed (E0–E6, E8, E9, E10) — do not reintroduce
 
@@ -421,7 +420,7 @@ source; E0–E6, E8, E9 and E10 have since been fixed and committed
   automated checks for everything else. The two `handlers` tests enumerate the
   commands the service advertises (`AvailableCommand`) and fail when one has no
   case, so registering a handler without covering its reply breaks the build.
-- The Python node is covered by `nodes/tests/` (100 tests over `nodes/core`: the
+- The Python node is covered by `nodes/tests/` (over `nodes/core`: the
   wire shapes, the router's delivery/ack/abandoned-trackID paths, the RPC retry
   ladder, the ticker, logging setup and the GStreamer frame path) and type
   checked by `make typecheck`.
