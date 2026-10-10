@@ -6,7 +6,7 @@ Rationale, patterns and trade-offs behind the architecture described in
 > Sections 1–10 describe decisions that are **implemented on `main`**. Sections
 > 11–12 are **designed but not built on `main`**. Section 13 is **implemented**.
 > The "Known limitations" section at the end records the defects found in the
-> 2026-10 review: E0–E5 are fixed in the working tree but uncommitted, E6–E11 are
+> 2026-10 review: E0–E6, E8, E9 and E10 are fixed and committed, E7/E11 are
 > open. TODO.md section E tracks each one with its status.
 
 ## Goals
@@ -443,12 +443,11 @@ covers "hub/rx/subscriptions" only, although tx imports it too.
 
 ### A. Correctness defects (found in the 2026-10 review)
 
-The review pass reproduced every item below from the source. **E0–E6, E8 and
-E9 are fixed in the working tree (uncommitted, on top of `dc83aad`); E7, E10
-and E11 (MEDIUM/LOW) are still open.** TODO.md section E tracks each one with
-its status.
+The review pass reproduced every item below from the source. **E0–E6, E8, E9
+and E10 are fixed and committed (`beaa467`..`4181761`); E7 and E11 (MEDIUM/LOW)
+are still open.** TODO.md section E tracks each one with its status.
 
-#### Fixed (E0–E6, E8, E9)
+#### Fixed (E0–E6, E8, E9, E10)
 
 0. **Subscriptions UUID storage-class mismatch — the data plane was dead.**
    `subscriptions/internal/db/sqlite/subscription.go` inserted `uuid.UUID`
@@ -532,7 +531,24 @@ its status.
    hub answers 403); and the DASH control routes require a `X-Dash-Token`
    (loopback-only when no token is configured).
 
-#### Still open (E7, E10, E11)
+9. **Python typing / packaging (E10, MEDIUM)**: the runtime had no
+   `pyproject.toml`/`setup.py` and no type-checker configuration, and
+   `requirements.txt` was a `pip freeze` dump that had already drifted from the
+   installed venv (it pinned `aio-pika==10.0.1`/`pymongo==4.18.1` against
+   10.1.0/4.18.2). `nodes/pyproject.toml` now declares the direct dependencies
+   and configures Pyright (`typeCheckingMode = "standard"`, `venvPath`/`venv`
+   pinned to `nodes/.venv`, `reportMissingModuleSource = "none"` for the
+   compiled `gi.repository` bindings), `requirements.txt` pins what the code
+   imports, and `make typecheck` runs the gate (0 errors). The typing fixes it
+   required were real: a `RouterLike` Protocol so `core/rpc.py` no longer
+   depends on the concrete `Router`, a `None` guard on
+   `GstVideo.VideoInfo.new_from_caps` in `_frame_view`, and type arguments on
+   the `queue.Queue`/`pymongo.Collection` attributes. The one landmine: the
+   PyPI package `gst-python-stubs` ships an overrides-only `Gst.pyi` at the same
+   path as the real PyGObject-stubs file and silently clobbers it, which turns
+   every GStreamer enum and constructor into an unknown-attribute error.
+
+#### Still open (E7, E11)
 
 9. **ECharts-shaped analytics output**: both pipelines in
    `nodes/lib/bustle/analytics.py` end in a `$project` emitting ECharts option
@@ -546,10 +562,7 @@ its status.
     subscriber's `sock.Write` has no deadline; ctx cancellation does not stop a
     blocked `sock.Read`; ingress never sets a rejection reason; and
     `StartSink`/`StopSink` log per-node failures but always return nil.
-11. **Python typing / packaging (E10, MEDIUM)**: Pyright is not installed in
-    `nodes/.venv` and there is no `pyrightconfig.json`; there is no
-    `pyproject.toml`/`setup.py`, so `requirements.txt` is a venv dump.
-12. **Minor items (E11, LOW)**: `GetBytes` accepts any JSON string with no
+11. **Minor items (E11, LOW)**: `GetBytes` accepts any JSON string with no
     shape validation, an empty `ReplyTo` is rejected silently, `models.User`
     carries a JSON-serializable `Passwd`, duplicate signup email surfaces as
     500 rather than 409, `rx` cannot bind an IPv6 listen address, and two local
@@ -557,13 +570,17 @@ its status.
 
 ### B. Operational / robustness gaps
 
-1. **Tests are still thin.** There is no Python test suite, and the Go tests
-   cover only the RPC reply layer (`internal/protocols/handlers_test.go`, the
-   `hub` and `subscriptions` `handlers` packages) and `internal/backoff`. For
-   everything else `make lint` and `make test` are the only automated gates —
-   the two `handlers` packages enumerate the commands they advertise and fail
-   when one has no case, so the reply layer cannot regress silently, but
-   nothing else in the tree is executed by a test.
+1. **Tests are still thin.** The Python `nodes/core` runtime now has a suite
+   (`nodes/tests/`, 100 tests, run by `make test-nodes` and wired into
+   `make test`), and the Go tests cover the RPC reply layer
+   (`internal/protocols/handlers_test.go`, the `hub` and `subscriptions`
+   `handlers` packages) and `internal/backoff`. The two `handlers` packages
+   enumerate the commands they advertise and fail when one has no case, so the
+   reply layer cannot regress silently. The Python side is also type checked by
+   `make typecheck` (pyright, `standard`, over `bustle.py`, `core/`, `lib/` and
+   `tests/`). Nothing else in the tree — the SRT data plane, the SQLite layer,
+   the tx pipelines — is executed by a test, and for those `make lint` and
+   `make test` are the only automated gates.
 2. **Restart loops could not recover and spun hot** (fixed, E4): no backoff, a
    one-shot `amqp091.Dial` with no `NotifyClose`, and the always-true
    `restart = restart || !restart` idiom. Routines now run inside
@@ -624,10 +641,10 @@ its status.
    plain-HTTP `127.0.0.1:9000` deployment can opt out, and one `refreshCookie`
    helper builds signin, refresh and logout cookies alike with
    `SameSite=Lax`.
-9. **Python typing/packaging**: `requirements.txt` is a full venv dump (already
-   divergent from the installed venv), there is no `pyproject.toml` and no
-   `pyrightconfig.json`, and Pyright is not installed — the documented
-   type-check gate does not run (TODO.md A0).
+9. **Python typing/packaging** (fixed, E10): `nodes/pyproject.toml` declares
+   the dependencies and configures Pyright (`standard`, venv-pinned) and
+   `requirements.txt` pins the direct dependencies of the working venv instead
+   of dumping it; `make typecheck` is the gate.
 10. **`BustleHandlers` is a class-attribute singleton** (`setup()` classmethod):
     one node instance per process, global mutable state. Resolved by the
     planned nodes refactor — see §12 and TODO.md.

@@ -78,8 +78,8 @@ it remains broker-free at runtime, but does import shared root packages
 
 > ⚠️ Steps 3–5 depend on `subscriptions.nodes.get` / `subscriptions.by.nodeid.get`,
 > which returned **zero rows** until the E0 fix because `subscriptions.add` wrote
-> UUIDs as TEXT while the lookup queries bound BLOBs. That is fixed in the working
-> tree (uncommitted); see "Known defects" below.
+> UUIDs as TEXT while the lookup queries bound BLOBs. That is fixed and
+> committed (`beaa467`); see "Known defects" below.
 
 ## Control plane: the sibling discovery protocol
 
@@ -322,8 +322,15 @@ Same layering as hub minus HTTP.
   emit-signals=true max-buffers=1 drop=true`, connected with
   `srt://<addr>?mode=caller&streamid=subscribe:<node-id>`.
 - Environment: `nodes/.venv` (PyGObject/GStreamer, ultralytics YOLO, pymongo,
-  aio-pika, torch). Pyright is *not* installed there and there is no
-  `pyrightconfig.json`; see TODO.md A0.
+  aio-pika, torch). `nodes/requirements.txt` pins those direct dependencies
+  (plus `lap`, which ultralytics does not declare but `model.track()` needs) and
+  `nodes/pyproject.toml` carries the same set as abstract lower bounds. There is
+  no packaging step: the code runs from `nodes/` as the project root, so imports
+  are `from core import ...` / `from lib.bustle import ...`.
+- Tests: `nodes/tests/` (stdlib `unittest`, no pytest) covers the `nodes/core`
+  runtime; run it with `make test-nodes`, or from `nodes/` with
+  `.venv/bin/python -m unittest discover -s tests -t .`. Classes that need the
+  GStreamer bindings skip themselves where those are absent.
 
 ## Shared root packages (`internal/`, imported by hub/rx/subscriptions/tx)
 
@@ -346,10 +353,10 @@ Same layering as hub minus HTTP.
 
 These are recorded in full in DESIGN.md ("Known limitations") and TODO.md
 section E. The 2026-10 review pass reproduced every one of them from the
-source; E0–E6, E8 and E9 have since been fixed **in the working tree,
-uncommitted** on top of `dc83aad`. E7, E10 and E11 are still open.
+source; E0–E6, E8, E9 and E10 have since been fixed and committed
+(`beaa467`..`4181761`). E7 and E11 are still open.
 
-### Fixed (E0–E6, E8, E9) — do not reintroduce
+### Fixed (E0–E6, E8, E9, E10) — do not reintroduce
 
 | Defect | Effect | Fix |
 |---|---|---|
@@ -374,9 +381,11 @@ uncommitted** on top of `dc83aad`. E7, E10 and E11 are still open.
 | audio pad probe emitted EOS per buffer; three `go func()` closures shared the named `err` | recording could be EOS'd early; racy lost errors | probe is buffer-only and returns per-link results; each closure uses a local error |
 | `h264enc` lacked `videoconvert`/`format=I420`/`config-interval`; `srtsink` had `auto-reconnect:false` | non-I420 sources failed to negotiate, late SRT joiners missed SPS/PPS, an rx restart killed tx | `videoconvert` + pinned I420 + `config-interval=-1`; `auto-reconnect:true` |
 | Python node: dropped `await rep(...)`, blocking GStreamer/pymongo calls on the loop, 100% CPU frame loop, unsynchronized pipeline start/stop, unhandled `insert_one`/`model.track` failures, late replies mis-dispatched as requests, naive timestamps | a caller blocked forever; a transient error silently killed counting or persistence | awaited reply + `Coroutine`-typed `ReplyFunc`; `asyncio.to_thread` for blocking calls; blocking `get_frame(timeout=...)`; a lock around the pipeline; logged failures; an abandoned-trackID set; UTC timestamps |
+| frame path: `reshape((height, width, 3))` assumed tightly packed rows, and `get_frame()` lost its non-blocking default when it moved to `get(timeout=...)` | any `video/x-raw` width whose row was not 4-byte aligned (e.g. 1279) raised `ValueError` on the GStreamer streaming thread; an argument-less `get_frame()` blocked the caller forever | `_frame_view` strides rows from `GstVideo.VideoInfo.new_from_caps`, falls back to packed rows and returns `None` when the layout does not fit; the redundant full-frame `.copy()` is gone; `get_frame(timeout=None)` is non-blocking again |
 | hub security: committed JWT secret, any-HMAC validation, no signin rate limit, email logged, no ownership check on removal, unbounded bodies, only `ReadHeaderTimeout`, `Secure:true` cookies, unauthenticated DASH control routes | token forgery, brute force, cross-user deletion, slowloris, broken local dev, unauthenticated stream deletion | ephemeral secret + warning, pinned HS256 and issuer, 10/min per-address limiter, ownership enforced inside the `DELETE`, 1 MiB `MaxBytesReader` + Read/Write/Idle timeouts, `--cookie-secure`, `requireDashToken` (loopback-only without a token) |
+| Python typing/packaging: no `pyproject.toml`, no type-checker config, `requirements.txt` a `pip freeze` dump already divergent from the venv; missing type args on `queue.Queue`/`pymongo.Collection`, untyped `json_serializer(obj)`, an unused `Pipeline` Protocol | the documented type-check gate did not run, so the `None`-returning `GstVideo.VideoInfo.new_from_caps` was unguarded and a fresh venv could resolve different dependency versions | `nodes/pyproject.toml` (deps + `typeCheckingMode = "standard"`, `venvPath`/`venv` pinned) and a real pinned `requirements.txt`; `make typecheck` (0 errors); `_frame_view` guards `None`; `RouterLike` Protocol in `core/rpc.py`; the type args and the dead Protocol are gone. Never install `gst-python-stubs` — it clobbers the real `Gst.pyi` |
 
-### Open (E7, E10, E11)
+### Open (E7, E11)
 
 | Area | Defect | Effect |
 |---|---|---|
@@ -384,7 +393,6 @@ uncommitted** on top of `dc83aad`. E7, E10 and E11 are still open.
 | rx data plane | blocking broker RPC inside the SRT listen callback; no `Read`/`Write` deadline | a slow peer wedges accept or a writer |
 | Minor | `tx/cmd/tx/main.go` and `tx/internal/server/dash/client.go` shadow the `dash`/`url` package names | confusing, not breaking |
 | Minor | `internal/protocols/handlers.go` `GetBytes` accepts any JSON string with no shape validation; `models.User.Passwd` is JSON-serializable; duplicate signup email surfaces as 500; `rx` cannot bind an IPv6 address | loose edges, none breaking |
-| Python packaging | no `pyproject.toml`/`setup.py` (`requirements.txt` is a venv dump), no `pyrightconfig.json`, Pyright not installed | the documented type-check gate does not run |
 
 ## Build & tooling
 
@@ -393,17 +401,30 @@ uncommitted** on top of `dc83aad`. E7, E10 and E11 are still open.
 - `make test` — `go test ./...` in every module, plus `make test-<module>` for
   one. `TESTFLAGS` is appended (e.g. `TESTFLAGS=-race`); `make test TAGS=va`
   also compiles the `vah264enc` variant, which `make lint`/`make build` skip.
+  It then runs the Python suite in `nodes/tests`; `make test-nodes` runs that
+  alone, `PYTHON=...` picks another interpreter and `NODESTESTFLAGS=-v` adds
+  per-test output.
+- `make typecheck` — pyright over `nodes/`, configured by `nodes/pyproject.toml`
+  (`typeCheckingMode = "standard"`, `venvPath`/`venv` pinned to `nodes/.venv`
+  so the third-party imports and the `gi.repository` stubs resolve). It needs
+  `pyright` and `PyGObject-stubs` in that venv and must not have
+  `gst-python-stubs`, which ships an overrides-only `Gst.pyi` at the same path
+  and silently clobbers the real stubs. `PYRIGHT=` and `TYPECHECKFLAGS`
+  override the command and its arguments.
 - `make build` — builds every `cmd/` entrypoint into `bin/surr-<name>`;
   `make build-tx` (also build-rx/hub/subscriptions) for one;
   `RELEASE_TYPE=release` strips and trimpaths.
-- `make` runs lint, test and build in that order.
+- `make` runs lint, test, typecheck and build in that order.
 - Go tests exist for the RPC reply layer and the restart backoff only
   (`internal/protocols/handlers_test.go`, the two `handlers` packages'
   tests, `internal/backoff/backoff_test.go`); lint and those tests are the only
   automated checks for everything else. The two `handlers` tests enumerate the
   commands the service advertises (`AvailableCommand`) and fail when one has no
   case, so registering a handler without covering its reply breaks the build.
-- The Python node has no test suite and no working type-checker configuration.
+- The Python node is covered by `nodes/tests/` (100 tests over `nodes/core`: the
+  wire shapes, the router's delivery/ack/abandoned-trackID paths, the RPC retry
+  ladder, the ticker, logging setup and the GStreamer frame path) and type
+  checked by `make typecheck`.
 
 ## Planned evolution (not yet implemented on `main`)
 

@@ -18,25 +18,26 @@ Treat both as prior art to review, not as landed code.
 **Section E is different**: it tracks defects found by reading the code during
 a full review pass, then re-checked against the working tree. Its checkboxes
 are **fix status** (`[x]` = fixed), not "verified" — every item, fixed or not,
-was reproduced from the source. **E0–E6, E8 and E9 are now fixed**; E7, E10 and
-E11 (all MEDIUM or below) are open. These fixes are **uncommitted** on top of
-`dc83aad`; line numbers inside `[x]` items refer to the revision they were
-found in, not to the fixed tree.
+was reproduced from the source. **E0–E6, E8, E9 and E10 are now fixed and
+committed** (`beaa467`..`4181761`); E7 and E11 (MEDIUM and LOW) are still open.
+Line
+numbers inside `[x]` items refer to the revision they were found in, not to the
+fixed tree.
 
 ## A. Nodes refactor (type-agnostic runtime) — DESIGN.md §12
 
 Ordered stages; each lands independently and is wire-compatible.
 
-- [ ] A0. Safety net (before touching anything)
-  - [ ] nodes/pyproject.toml: pyright config (strict-ish, exclude .venv),
-        proper dependency pins (requirements.txt is a venv dump)
-  - [ ] Unit tests for nodes/core (pure python, fakes, no broker):
-    - [ ] handlers: RouterResponse to_json/from_json round-trip incl.
+- [x] A0. Safety net (before touching anything)
+  - [x] nodes/pyproject.toml: pyright config (standard, exclude .venv),
+        proper dependency pins (requirements.txt was a venv dump)
+  - [x] Unit tests for nodes/core (pure python, fakes, no broker):
+    - [x] handlers: RouterResponse to_json/from_json round-trip incl.
           base64-bytes convention (guards the Go wire contract)
-    - [ ] siblings: get_name returns all candidates / None
-    - [ ] rpc: retry-until-success; try-every-candidate on stale entries
-    - [ ] ticker: spacing holds under simulated delay
-  - [ ] Golden-file test: one captured to_json() output asserted byte-for-byte
+    - [x] siblings: get_name returns all candidates / None
+    - [x] rpc: retry-until-success; try-every-candidate on stale entries
+    - [x] ticker: spacing holds under simulated delay
+  - [x] Golden-file test: one captured to_json() output asserted byte-for-byte
         so accidental wire changes fail CI
 - [ ] A1. De-singleton BustleHandlers (lib/bustle/handlers.py)
   - [ ] Class attributes + setup() classmethod → `__init__` instance deps
@@ -126,7 +127,7 @@ declare step).
         versions
 
 Sequencing: land A0–A2 first (Node runtime must exist to host the declare
-step), then B1–B4 (purely additive, runs side by side with sink.analytics
+step) — A0 is done; then B1–B4 (purely additive, runs side by side with sink.analytics
 indefinitely), then B5 in one window. Nothing before B5 breaks anything.
 Logging (C) is Go-only and independent of A — it can proceed in parallel,
 but must land before B1 so the analytics service is born with structured
@@ -219,8 +220,11 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       (`internal/protocols/handlers_test.go`, the `hub` and `subscriptions`
       `handlers` packages) plus `internal/backoff`; the two `handlers` tests
       enumerate the commands their service advertises and fail when one has no
-      case. Everything else in the tree — the SRT data plane, the SQLite
-      layer, the tx pipelines, the whole `nodes/` runtime — has no test at all.
+      case. The Python side is covered as well: `nodes/tests/` (100 tests, stdlib
+      `unittest`) exercises the `nodes/core` runtime and runs from
+      `make test-nodes`, wired into `make test`, and `make typecheck` gates it
+      with pyright. Still untested: the SRT data plane, the SQLite layer and the
+      tx pipelines.
 - [ ] PostgreSQL support (README TODO)
 - [ ] Analytics presentation layer (README TODO)
 
@@ -246,13 +250,13 @@ whole error-reporting path respectively.
       `subscriptions/cmd/subscriptions/main.go:87`). `go build ./...` is now
       clean in all five modules.
 
-**Status of the E0–E5 fixes**: E0–E5 are fixed. The only release blocker left
-is that none of this is committed. The E1 regression tests
-(`internal/protocols/handlers_test.go`, the two handler-package tests,
-`internal/backoff/backoff_test.go`) are the only coverage — E2–E5 have none.
-The two handler-package tests enumerate the commands each service advertises
-and fail when one is untested, so the reply layer cannot regress silently; the
-rest of the codebase still has no test.
+**Status of the E0–E5 fixes**: E0–E5 are fixed and committed. The E1
+regression tests (`internal/protocols/handlers_test.go`, the two
+handler-package tests, `internal/backoff/backoff_test.go`) are the Go-side
+coverage, and `nodes/tests/` covers the Python mirror of the RPC plumbing plus
+the whole E8 runtime. The two handler-package tests enumerate the commands each
+service advertises and fail when one is untested, so the reply layer cannot
+regress silently; the Go-side storage, data-plane and tx paths have no test.
 
 ### E0. Subscriptions UUID storage-class mismatch — data plane dead (CRITICAL) — fixed
 
@@ -685,18 +689,54 @@ rest of the codebase still has no test.
 
 ### E10. Python typing / packaging (MEDIUM)
 
-- [ ] Pyright is not installed in `nodes/.venv` and there is no
+**Fixed.** `nodes/pyproject.toml` now carries the dependency list and the
+pyright configuration, `nodes/requirements.txt` pins the direct dependencies of
+the working venv, and `make typecheck` runs the gate — `0 errors, 0 warnings` in
+`standard` mode over `bustle.py`, `core/`, `lib/` and `tests/`.
+
+- [x] Pyright is not installed in `nodes/.venv` and there is no
       `pyrightconfig.json`; default mode reports 7 errors + 1 warning (all
       PyGObject stub attribute issues in `nodes/core/pipeline.py`), strict mode
       111. Either add the config + dependency (TODO A0) or drop the claim.
-- [ ] `nodes/requirements.txt` is a full venv dump and already diverges from
+      **Fixed**: `pyright` and `PyGObject-stubs` are in the venv and the config
+      lives in `nodes/pyproject.toml` rather than a `pyrightconfig.json`
+      (`include`, `exclude`, `venvPath = "."`, `venv = ".venv"`,
+      `pythonVersion = "3.14"`, `typeCheckingMode = "standard"`,
+      `reportMissingModuleSource = "none"` for the compiled `gi.repository`
+      bindings). `venvPath`/`venv` matter: pyright does not resolve the venv
+      just because it was launched from the venv's own `bin/`, so without them
+      every third-party import reports `reportMissingImports`. Two traps found
+      on the way: (a) the PyPI package `gst-python-stubs` ships an
+      overrides-only 3.6 KB `gi-stubs/repository/Gst.pyi` at the same path as
+      PyGObject-stubs' real 228 KB file and silently clobbers it, which is what
+      produced the original `"FlowReturn" is not a known attribute` errors —
+      it must not be installed; (b) the fix was not only annotations:
+      `GstVideo.VideoInfo.new_from_caps` returns `Optional[VideoInfo]` in the
+      stubs, so `_frame_view` now guards the `None` case instead of reading
+      `.stride` off it.
+- [x] `nodes/requirements.txt` is a full venv dump and already diverges from
       the installed venv (pins `aio-pika==10.0.1`/`pymongo==4.18.1`; venv has
       10.1.0/4.18.2). Replace with a real dependency list + `pyproject.toml`.
-- [ ] Lint hygiene: unused `import threading` (`nodes/core/pipeline.py:1`),
-      missing type args (`Queue`, `Task`, `Collection`), untyped `obj` params
-      (`nodes/core/handlers.py:9,12,30`), unused `Pipeline` Protocol
-      (`nodes/lib/bustle/handlers.py`), `cls._coll`/`cls._node_id` never
-      declared as class attributes.
+      **Fixed**: `requirements.txt` lists what the code imports
+      (`PyGObject`, `aio-pika`, `pymongo`, `numpy`, `pandas`, `torch`,
+      `ultralytics`) plus `lap`, which ultralytics does not declare but
+      `model.track()` needs, pinned to the venv's versions; the type-check
+      dependencies are in the same file under a separate comment.
+      `pyproject.toml` carries the same packages as abstract lower bounds.
+- [x] Lint hygiene (re-checked against the current tree): missing type args on
+      `queue.Queue` (`nodes/core/pipeline.py:19`) and `collection.Collection`
+      (`nodes/lib/bustle/handlers.py:35,48`,
+      `nodes/lib/bustle/processing.py:28`); an untyped `obj` parameter
+      (`nodes/core/handlers.py:9`); the unused `Pipeline` Protocol
+      (`nodes/lib/bustle/handlers.py:15`, declared and never referenced). Two
+      earlier claims were wrong and are dropped: `import threading` *is* used
+      (`nodes/core/pipeline.py:2`), and `_coll`/`_node_id` *are* declared as
+      class attributes (`nodes/lib/bustle/handlers.py:35-36`).
+      **Fixed**: `queue.Queue[numpy.ndarray]`,
+      `collection.Collection[dict[str, typing.Any]]` (both files),
+      `def json_serializer(obj: typing.Any) -> str`, and the `Pipeline`
+      Protocol is deleted — its only occurrence in the tree was its own
+      definition.
 
 ### E11. Minor (LOW)
 

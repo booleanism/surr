@@ -9,14 +9,17 @@ zero-copy fan-out; the control plane is a set of small services that discover
 each other over a RabbitMQ topic exchange — there is no service registry and no
 central orchestrator.
 
-> **Project status: the control plane runs and the media-path defects found in
-> the last review pass are fixed, but the fixes are uncommitted and barely
-> tested.** E0–E5 in [TODO.md](TODO.md) — the SQLite UUID storage-class
-> mismatch that made `rx` reject every publisher, the RPC error replies that
-> were never published, the RPC plumbing races, shutdown/lifecycle, the restart
-> loops and the storage defects — are fixed in the working tree on top of
-> `dc83aad`. E6–E11 (tx/DASH, the rx data plane, the Python runtime, security)
-> are still open. Only the RPC reply layer has regression tests.
+> **Project status: the control plane runs, and every defect found in the last
+> review pass down to HIGH severity is fixed and committed.** E0–E6, E8 and E9
+> in [TODO.md](TODO.md) — the SQLite UUID storage-class mismatch that made `rx`
+> reject every publisher, the RPC error replies that were never published, the
+> RPC plumbing races, shutdown/lifecycle, the restart loops, the storage
+> defects, tx/DASH, the Python node runtime and the security gaps — are fixed
+> (`beaa467`..`4181761`). E7 and E11 (the rx data plane and minor loose edges)
+> are still open. Tests cover the RPC reply layer, the restart backoff and the
+> `nodes/core` runtime, and `make typecheck` gates the Python side with pyright;
+> the SRT data plane, the SQLite layer and the tx pipelines are exercised by
+> hand.
 
 ## How it fits together
 
@@ -57,16 +60,19 @@ nodes. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
   to run the Python nodes.
 - **MongoDB** — analytics storage for nodes.
 - **Python 3** with GObject/GStreamer bindings, `ultralytics` (YOLO), `pymongo`
-  and `aio-pika` — for the nodes runtime. `nodes/requirements.txt` is a
-  `pip freeze` dump of a working environment, not a minimal pin set.
+  and `aio-pika` — for the nodes runtime. `nodes/requirements.txt` pins the
+  direct dependencies of a working venv; `nodes/pyproject.toml` carries the same
+  packages as abstract lower bounds and configures the type checker.
 
 ## Build
 
 ```sh
-make            # lint + test + build everything
+make            # lint + test + typecheck + build everything
 make build      # build only (no lint, no test)
 make lint       # golangci-lint, every module
-make test       # go test ./..., every module
+make test       # go test ./..., every module, then the nodes/ python suite
+make test-nodes # python tests for nodes/core (nodes/tests)
+make typecheck  # pyright over nodes/ (nodes/pyproject.toml)
 make clean      # remove .cache/ and bin/
 ```
 
@@ -78,13 +84,25 @@ Likewise `make test-hub`, `make test-rx`, `make test-subscriptions`,
 
 Knobs: `RELEASE_TYPE=release` adds `-s -w -trimpath`; `TAGS` passes build tags;
 `GOFLAGS` / `LDFLAGS` are appended; `TESTFLAGS` is appended to `go test` (e.g.
-`make test TESTFLAGS=-race`).
+`make test TESTFLAGS=-race`). `make test-nodes` runs with `nodes/.venv/bin/python`
+when it exists and `PYTHON=<interpreter>` overrides that; `NODESTESTFLAGS=-v`
+gives per-test output. `make typecheck` runs pyright from inside `nodes/` against
+`nodes/pyproject.toml` (`PYRIGHT=<path>` and `TYPECHECKFLAGS` override the
+command and its arguments). It needs `pyright` and `PyGObject-stubs` in
+`nodes/.venv`, and must **not** have `gst-python-stubs` installed — that package
+writes an overrides-only `Gst.pyi` over the real stubs and makes every
+GStreamer enum and constructor an unknown-attribute error.
 
-There is no Python test suite. The Go tests cover the RPC reply layer and the
-backoff used by the restart loops; everything else is exercised by hand, and
-`make lint` / `make test` are the only automated gates for it. The two handler
-tests enumerate the commands their service advertises and fail when one has no
-case, so registering a handler without a test breaks `make test`.
+The Go tests cover the RPC reply layer and the backoff used by the restart loops.
+The Python suite in `nodes/tests` covers the `nodes/core` runtime — the wire
+shapes, the router's ack/abandoned-trackID paths, the RPC retry ladder, the
+ticker, logging setup and the GStreamer frame path — and the classes that need
+the GStreamer bindings skip themselves where those are missing. `make typecheck`
+adds pyright in `standard` mode over `nodes/bustle.py`, `nodes/core/`,
+`nodes/lib/` and `nodes/tests/`. Everything else (the SRT data plane, the SQLite
+layer, the tx pipelines) is exercised by hand. The two handler tests enumerate
+the commands their service advertises and fail when one has no case, so
+registering a handler without a test breaks `make test`.
 
 Note that neither `make lint` nor `make build` passes build tags: check the
 `vah264enc` variant of tx explicitly with `make test TAGS=va`.
