@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/google/uuid"
 	"github.com/rabbitmq/amqp091-go"
@@ -31,6 +32,10 @@ type GetHandler interface {
 type Siblings interface {
 	Get(sn protocols.SiblingName, ss *protocols.Sibling) (ok bool)
 	Set(sn protocols.SiblingName, k protocols.Sibling) error
+}
+
+type RunTask interface {
+	Run(ctx context.Context, t pools.TaskFunc) error
 }
 
 func SetupRouter(ch *amqp091.Channel, name, exchangeName string) (QueueSetupReturnFunc, error) {
@@ -62,25 +67,59 @@ func SetupRouter(ch *amqp091.Channel, name, exchangeName string) (QueueSetupRetu
 type router struct {
 	gh               GetHandler
 	siblings         Siblings
-	ch               *amqp091.Channel
+	run              RunTask
 	knownTrackID     map[uuid.UUID]chan protocols.RouterResponse
 	exchName         string
 	directRoutingKey string
-	q                amqp091.Queue
 	mu               sync.Mutex
+
+	// chMu guards the broker channel and queue. The reconnect supervisor swaps
+	// them after the broker restarts, so every publish and every Listen call
+	// reads them through channel()/queue() instead of caching a copy.
+	chMu sync.RWMutex
+	ch   *amqp091.Channel
+	q    amqp091.Queue
 }
 
-func NewRouter(ch *amqp091.Channel, q QueueSetupReturnFunc, gh GetHandler, sibs Siblings) *router {
+func NewRouter(ch *amqp091.Channel, q QueueSetupReturnFunc, gh GetHandler, sibs Siblings, run RunTask) *router {
 	que, exchName, name := q()
 	return &router{
 		ch:               ch,
 		q:                que,
+		run:              run,
 		directRoutingKey: name,
 		exchName:         exchName,
 		gh:               gh,
 		siblings:         sibs,
 		knownTrackID:     make(map[uuid.UUID]chan protocols.RouterResponse),
 	}
+}
+
+// channel returns the current broker channel.
+func (r *router) channel() *amqp091.Channel {
+	r.chMu.RLock()
+	defer r.chMu.RUnlock()
+
+	return r.ch
+}
+
+// queue returns the queue declared on the current broker connection.
+func (r *router) queue() amqp091.Queue {
+	r.chMu.RLock()
+	defer r.chMu.RUnlock()
+
+	return r.q
+}
+
+// ReplaceChannel installs the channel and queue of a freshly established broker
+// connection after the previous one was closed. A Listen already running on the
+// dead channel returns, and the restart loop re-enters it against the new one,
+// so a broker restart recovers instead of leaving the service subscribed to
+// nothing.
+func (r *router) ReplaceChannel(ch *amqp091.Channel, q amqp091.Queue) {
+	r.chMu.Lock()
+	r.ch, r.q = ch, q
+	r.chMu.Unlock()
 }
 
 func (r *router) Introduce(ctx context.Context) error {
@@ -99,7 +138,7 @@ func (r *router) Introduce(ctx context.Context) error {
 		Int("count", len(commands)).
 		Msg("introduce broadcast")
 
-	return r.ch.PublishWithContext(ctx, r.exchName, BroadcastRoutingKey, false, false, amqp091.Publishing{
+	return r.channel().PublishWithContext(ctx, r.exchName, BroadcastRoutingKey, false, false, amqp091.Publishing{
 		Type:    IntroduceCommand,
 		ReplyTo: r.directRoutingKey,
 		Body:    siblingByte,
@@ -114,16 +153,17 @@ func (r *router) Send(ctx context.Context, command protocols.Command, payload []
 
 	sibling := protocols.Sibling{}
 	ok := r.siblings.Get(siblingName, &sibling)
-	if ok {
-		r.mu.Lock()
-		r.knownTrackID[trackID] = make(chan protocols.RouterResponse)
-		r.mu.Unlock()
-	}
 	if !ok {
 		return uuid.Nil, fmt.Errorf("no such sibling: %s", siblingName)
 	}
 
-	err = r.ch.PublishWithContext(ctx, r.exchName, string(siblingName), false, false, amqp091.Publishing{
+	r.mu.Lock()
+	// Buffered, so a reply is handed over without a receiver: the caller may
+	// already have given up, and handleDelivery must never block on it.
+	r.knownTrackID[trackID] = make(chan protocols.RouterResponse, 1)
+	r.mu.Unlock()
+
+	err = r.channel().PublishWithContext(ctx, r.exchName, string(siblingName), false, false, amqp091.Publishing{
 		CorrelationId: trackID.String(),
 		ContentType:   "application/json",
 		ReplyTo:       r.directRoutingKey,
@@ -131,13 +171,20 @@ func (r *router) Send(ctx context.Context, command protocols.Command, payload []
 		Body:          payload,
 	})
 	if err != nil {
-		r.mu.Lock()
-		delete(r.knownTrackID, trackID)
-		r.mu.Unlock()
+		r.Forget(trackID)
 		return uuid.Nil, err
 	}
 
 	return trackID, nil
+}
+
+// Forget releases a pending track. Callers that abandon a reply (timeout,
+// cancellation, an exhausted sibling list) must call it, otherwise the map
+// grows one entry per RPC for the lifetime of the process.
+func (r *router) Forget(trackID uuid.UUID) {
+	r.mu.Lock()
+	delete(r.knownTrackID, trackID)
+	r.mu.Unlock()
 }
 
 func (r *router) Recv(ctx context.Context, trackID uuid.UUID, resp *protocols.RouterResponse) error {
@@ -147,11 +194,11 @@ func (r *router) Recv(ctx context.Context, trackID uuid.UUID, resp *protocols.Ro
 	if !ok {
 		return fmt.Errorf("unknown trackID")
 	}
-	defer func() {
-		r.mu.Lock()
-		delete(r.knownTrackID, trackID)
-		r.mu.Unlock()
-	}()
+
+	// Release the entry on every exit path, the way nodes/core/router.py pops
+	// it in its finally block. A reply that never arrives, or arrives after the
+	// caller stopped waiting, must not leave a pending track behind.
+	defer r.Forget(trackID)
 
 	select {
 	case res := <-c:
@@ -163,9 +210,9 @@ func (r *router) Recv(ctx context.Context, trackID uuid.UUID, resp *protocols.Ro
 }
 
 func (r *router) Listen(ctx context.Context) error {
-	msgs, err := r.ch.ConsumeWithContext(
+	msgs, err := r.channel().ConsumeWithContext(
 		ctx,
-		r.q.Name,
+		r.queue().Name,
 		r.directRoutingKey,
 		false,
 		true,
@@ -186,7 +233,12 @@ func (r *router) Listen(ctx context.Context) error {
 				return fmt.Errorf("delivery channel closed")
 			}
 
-			go r.handleDelivery(ctx, msg)
+			err := r.run.Run(ctx, func() {
+				r.handleDelivery(ctx, msg)
+			})
+			if err != nil {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("handle delivery on goroutines pool")
+			}
 		}
 	}
 }
@@ -238,10 +290,10 @@ func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
 	}
 
 	r.mu.Lock()
-	c, ok := r.knownTrackID[trackID]
+	c := r.knownTrackID[trackID]
 	r.mu.Unlock()
 
-	if !ok {
+	if c == nil {
 		log.Debug().
 			Str("command", msg.Type).
 			Str("track_id", msg.CorrelationId).
@@ -275,11 +327,18 @@ func (r *router) handleDelivery(ctx context.Context, msg amqp091.Delivery) {
 
 	log.Debug().Str("track_id", msg.CorrelationId).Int("code", resp.Code).Msg("reply matched")
 
+	// The reply channel is buffered, so the hand-off never blocks: a caller
+	// that already gave up (or a duplicate reply for the same track) is
+	// nacked without stalling the delivery goroutine.
 	select {
 	case c <- resp:
 		_ = msg.Ack(false)
-	case <-ctx.Done():
-		_ = msg.Nack(false, true)
+	default:
+		log.Warn().
+			Str("reason", "reply arrived after the caller gave up").
+			Str("track_id", msg.CorrelationId).
+			Msg("nack stale reply")
+		_ = msg.Nack(false, false)
 	}
 }
 
@@ -300,7 +359,7 @@ func (r *router) handleInbound(ctx context.Context, command protocols.Command, r
 			return fmt.Errorf("marshal reply: %w", err)
 		}
 
-		return r.ch.PublishWithContext(ctx, r.exchName, replyTo, false, false, amqp091.Publishing{
+		return r.channel().PublishWithContext(ctx, r.exchName, replyTo, false, false, amqp091.Publishing{
 			CorrelationId: trackID.String(),
 			ContentType:   "application/json",
 			Body:          body,

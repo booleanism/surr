@@ -92,7 +92,6 @@ func (s subscription) do(ctx context.Context, command protocols.Command, payload
 	taskCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
-	res := make(chan error, 1)
 	siblingNames := pools.SiblingNamePool.Get().(*[]protocols.SiblingName)
 	defer pools.SiblingNamePoolResetAndPut(siblingNames)
 
@@ -103,68 +102,80 @@ func (s subscription) do(ctx context.Context, command protocols.Command, payload
 
 	var errs []error
 	for _, sn := range *siblingNames {
-		resp, err := s.call(taskCtx, command, payload, sn, res)
+		log := zerolog.Ctx(ctx).With().Str("sibling_name", string(sn)).Str("command", string(command)).Logger()
+
+		resp, err := s.call(taskCtx, command, payload, sn)
 		if err != nil {
-			return err
+			// A stale registry entry must not abandon the remaining
+			// candidates: record the failure and try the next sibling.
+			log.Warn().Err(err).Msg("rpc call")
+			errs = append(errs, fmt.Errorf("%s: %w", sn, err))
+
+			continue
 		}
 
-		select {
-		case err = <-res:
-			if err != nil {
-				return err
-			}
+		if resp.Code != 0 {
+			msg := resp.ErrorMessage()
+			log.Info().Int("code", resp.Code).Msg("non-zero reply code")
+			errs = append(errs, fmt.Errorf("%s: unexpected response code %d: %s", sn, resp.Code, msg))
 
-			if resp.Code != 0 {
-				zerolog.Ctx(ctx).Warn().Str("command", string(command)).Int("code", resp.Code).Msg("non-zero reply code")
-				errs = append(errs, fmt.Errorf("unexpeced response code: %d, %s", resp.Code, resp.Result))
+			continue
+		}
+
+		if v != nil {
+			err = json.Unmarshal(resp.Result, v)
+			if err != nil {
+				log.Warn().Err(err).Msg("unmarshal reply")
+				errs = append(errs, fmt.Errorf("%s: %w", sn, err))
+
 				continue
 			}
-
-			if v != nil {
-				err = json.Unmarshal(resp.Result, v)
-				if err != nil {
-					return err
-				}
-			}
-
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
 		}
+
+		return nil
 	}
 
 	return errors.Join(errs...)
 }
 
-func (s subscription) call(ctx context.Context, command protocols.Command, payload []byte, sn protocols.SiblingName, res chan error) (protocols.RouterResponse, error) {
+// call performs one RPC round trip against sn. The reply is received on the
+// shared goroutines pool so the caller's goroutine stays free, and the result
+// is delivered over a buffered channel so a Receive that finishes after the
+// caller gave up can never block a pool worker.
+func (s subscription) call(ctx context.Context, command protocols.Command, payload []byte, sn protocols.SiblingName) (protocols.RouterResponse, error) {
 	resp := protocols.RouterResponse{}
+
 	trackID, err := s.r.Send(ctx, command, payload, sn)
 	if err != nil {
 		return resp, err
 	}
 
-	done := make(chan struct{})
+	// Released on every path, including the timeout below, so an unanswered
+	// request cannot leak a pending entry in the router's track map.
+	defer s.r.Forget(trackID)
+
+	recvErr := make(chan error, 1)
+
 	err = s.t.Run(ctx, func() {
 		log := zerolog.Ctx(ctx)
 
-		err = s.r.Recv(ctx, trackID, &resp)
+		err := s.r.Recv(ctx, trackID, &resp)
 		if err != nil {
 			log.Error().Str("command", string(command)).Str("track_id", trackID.String()).Err(err).Msg("receiving response")
-			res <- err
+		} else {
+			log.Debug().Str("command", string(command)).Str("track_id", trackID.String()).Int("code", resp.Code).Msg("rpc round trip")
 		}
 
-		log.Debug().Str("command", string(command)).Str("track_id", trackID.String()).Int("code", resp.Code).Msg("rpc round trip")
-		res <- nil
-		close(done)
+		recvErr <- err
 	})
 	if err != nil {
 		return resp, err
 	}
 
 	select {
+	case err := <-recvErr:
+		return resp, err
 	case <-ctx.Done():
 		return resp, ctx.Err()
-	case <-done:
-		return resp, nil
 	}
 }

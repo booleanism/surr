@@ -165,7 +165,7 @@ func (h authHandlers) logoutHandler(w http.ResponseWriter, r *http.Request) {
 		Path:     "/auth",
 		HttpOnly: true,
 		Secure:   true,
-		SameSite: http.SameSite(http.SameSiteStrictMode),
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
 

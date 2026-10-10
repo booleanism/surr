@@ -78,26 +78,26 @@ func (s subscriptions) getByNodeID(ctx context.Context, trackID uuid.UUID, req p
 	node := models.Node{}
 	err := json.Unmarshal(req.Payload, &node)
 	if err != nil {
-		s.logFail(ctx, command, -1, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDecodePayload, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDecodePayload, err))
 		return
 	}
 
 	err = s.s.GetSubscriptionByNode(ctx, node, subs)
 	if err != nil {
-		s.logFail(ctx, command, -2, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDomain, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
 		return
 	}
 
 	respByte, err := json.Marshal(subs)
 	if err != nil {
-		s.logFail(ctx, command, -3, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeMarshalReply, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))
 		return
 	}
 
-	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: respByte})
+	_ = rep(ctx, protocols.ResultResponse(respByte))
 }
 
 func (s subscriptions) addHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
@@ -110,15 +110,15 @@ func (s subscriptions) addHandler(ctx context.Context, trackID uuid.UUID, req pr
 
 	err := json.Unmarshal(req.Payload, subed)
 	if err != nil {
-		s.logFail(ctx, command, -1, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDecodePayload, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDecodePayload, err))
 		return
 	}
 
 	err = s.s.AddSubscriptions(ctx, *subed)
 	if err != nil {
-		s.logFail(ctx, command, -2, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDomain, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
 		return
 	}
 
@@ -129,12 +129,12 @@ func (s subscriptions) addHandler(ctx context.Context, trackID uuid.UUID, req pr
 
 	resByte, err := json.Marshal(&res)
 	if err != nil {
-		s.logFail(ctx, command, -3, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeMarshalReply, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))
 		return
 	}
 
-	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: resByte})
+	_ = rep(ctx, protocols.ResultResponse(resByte))
 }
 
 func (s subscriptions) removeHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
@@ -147,15 +147,15 @@ func (s subscriptions) removeHandler(ctx context.Context, trackID uuid.UUID, req
 
 	err := json.Unmarshal(req.Payload, subsNodes)
 	if err != nil {
-		s.logFail(ctx, command, -1, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDecodePayload, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDecodePayload, err))
 		return
 	}
 
 	err = s.s.RemoveSubscriptions(ctx, *subsNodes)
 	if err != nil {
-		s.logFail(ctx, command, -2, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDomain, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
 		return
 	}
 
@@ -166,12 +166,12 @@ func (s subscriptions) removeHandler(ctx context.Context, trackID uuid.UUID, req
 
 	resByte, err := json.Marshal(&res)
 	if err != nil {
-		s.logFail(ctx, command, -3, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeMarshalReply, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))
 		return
 	}
 
-	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: resByte})
+	_ = rep(ctx, protocols.ResultResponse(resByte))
 }
 
 func (s subscriptions) getAllSubscribedNodesHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
@@ -184,19 +184,19 @@ func (s subscriptions) getAllSubscribedNodesHandler(ctx context.Context, trackID
 
 	_, err := s.s.GetAllSubscribedNodes(ctx, nodes)
 	if err != nil {
-		s.logFail(ctx, command, -2, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDomain, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
 		return
 	}
 
 	res, err := json.Marshal(nodes)
 	if err != nil {
-		s.logFail(ctx, command, -3, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeMarshalReply, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))
 		return
 	}
 
-	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: res})
+	_ = rep(ctx, protocols.ResultResponse(res))
 }
 
 func (s subscriptions) getSubscribedNodesHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
@@ -210,26 +210,26 @@ func (s subscriptions) getSubscribedNodesHandler(ctx context.Context, trackID uu
 	subs := models.Subscription{}
 	err := json.Unmarshal(req.Payload, &subs)
 	if err != nil {
-		s.logFail(ctx, command, -1, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDecodePayload, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDecodePayload, err))
 		return
 	}
 
 	_, err = s.s.GetSubscribedNodes(ctx, subs, nodes)
 	if err != nil {
-		s.logFail(ctx, command, -2, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDomain, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
 		return
 	}
 
 	res, err := json.Marshal(nodes)
 	if err != nil {
-		s.logFail(ctx, command, -3, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeMarshalReply, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))
 		return
 	}
 
-	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: res})
+	_ = rep(ctx, protocols.ResultResponse(res))
 }
 
 func (s subscriptions) getNodeIDsByUserHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
@@ -243,25 +243,25 @@ func (s subscriptions) getNodeIDsByUserHandler(ctx context.Context, trackID uuid
 	user := models.User{}
 	err := json.Unmarshal(req.Payload, &user)
 	if err != nil {
-		s.logFail(ctx, command, -1, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDecodePayload, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDecodePayload, err))
 		return
 	}
 
 	n, err := s.s.GetNodeIDsByUser(ctx, user, nodes)
 	if err != nil {
-		s.logFail(ctx, command, -2, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeDomain, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
 		return
 	}
 
 	v := (*nodes)[:n]
 	res, err := json.Marshal(&v)
 	if err != nil {
-		s.logFail(ctx, command, -3, err)
-		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		s.logFail(ctx, command, protocols.CodeMarshalReply, err)
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))
 		return
 	}
 
-	_ = rep(ctx, protocols.RouterResponse{Code: 0, Result: res})
+	_ = rep(ctx, protocols.ResultResponse(res))
 }

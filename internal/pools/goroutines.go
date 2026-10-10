@@ -4,6 +4,8 @@ import (
 	"context"
 )
 
+const DefaultNGoroutinesPool = 24
+
 type TaskFunc func()
 
 type goroutinesPool struct {
@@ -29,6 +31,10 @@ func (p goroutinesPool) Run(ctx context.Context, t TaskFunc) error {
 }
 
 func (p goroutinesPool) Listen(ctx context.Context) error {
+	if p.n == 0 {
+		p.n = DefaultNGoroutinesPool
+	}
+
 	for range p.n - 1 {
 		go func() {
 			for {

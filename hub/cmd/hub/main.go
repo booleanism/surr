@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/booleanism/surr/internal/protocols/rabbitmq"
+	"github.com/booleanism/surr/internal/restart"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/rabbitmq/amqp091-go"
 	"github.com/rs/zerolog"
@@ -33,6 +35,10 @@ const (
 	GeneralTimeout = 5 * time.Second
 	JWTTTL         = 24 * time.Hour
 	RefreshTTL     = JWTTTL * 7
+
+	// MigrationsPath is where this service's SQL migrations live. It is only
+	// used to tell an operator what to run when the database is unmigrated.
+	MigrationsPath = "hub/internal/migrations/sqlite"
 )
 
 func main() {
@@ -86,8 +92,12 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 		Uint32("goroutines", cmdLine.NGoroutinesPool).
 		Msg("hub starting")
 
-	sqliteDB, ch, routerQueue, err := infraSetup(cmdLine, cleanups)
+	sqliteDB, mq, ch, routerQueue, err := infraSetup(cmdLine, cleanups)
 	if err != nil {
+		return err
+	}
+
+	if err := db.VerifySchema(ctx, sqliteDB, MigrationsPath, "schema_migrations", "nodes", "users"); err != nil {
 		return err
 	}
 
@@ -99,8 +109,11 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	routerHandlers := protocols.NewHandlers()
 	siblings := protocols.NewSiblings()
 
-	router := rabbitmq.NewRouter(ch, routerQueue, routerHandlers, siblings)
 	goPool := pools.NewGoroutinesPool(cmdLine.NGoroutinesPool)
+	router := rabbitmq.NewRouter(ch, routerQueue, routerHandlers, siblings, goPool)
+	supervisor := rabbitmq.NewSupervisor(cmdLine.RabbitMQAddr, cmdLine.SiblingName, cmdLine.FamilyName, router, mq, *log)
+	cleanups.Register(supervisor.Close)
+
 	subsAdapter := rabbitmqAdapter.NewSubscription(router, goPool, siblings)
 	nodesAdapter := rabbitmqAdapter.NewNodes(router, siblings, goPool)
 
@@ -138,47 +151,10 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 		}
 	}()
 
-	go func() {
-		var restart bool
-		log.Info().Msg("starting router listen")
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if restart {
-					log.Info().Msg("restarting router listen")
-				}
+	go supervisor.Watch(ctx)
 
-				if routerErr := router.Listen(ctx); routerErr != nil {
-					log.Error().Err(routerErr).Msg("router listen")
-				}
-
-				restart = restart || !restart
-			}
-		}
-	}()
-
-	go func() {
-		var restart bool
-		log.Info().Msg("starting goroutines pool")
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if restart {
-					log.Info().Msg("restarting goroutine pool")
-				}
-
-				if poolErr := goPool.Listen(ctx); poolErr != nil {
-					log.Error().Err(poolErr).Msg("goroutines pool listen")
-				}
-
-				restart = restart || !restart
-			}
-		}
-	}()
+	go restart.Loop(ctx, "router-listen", router.Listen)
+	go restart.Loop(ctx, "goroutines-pool", goPool.Listen)
 
 	refreshToken := auth.NewRefreshTokenStore(RefreshTTL)
 	auth := auth.NewAuthenticator(usersRepo, argon, []byte(cmdLine.JWTSecret), JWTTTL)
@@ -214,55 +190,43 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 
 	cleanups.Register(httpSrv.Close)
 
-	go func() {
-		var restart bool
-		log.Info().Str("addr", cmdLine.HTTPAddr).Msg("starting http listen")
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if restart {
-					log.Info().Str("addr", cmdLine.HTTPAddr).Msg("restarting http listen")
-				}
-
-				if httpErr := httpSrv.ListenAndServe(); httpErr != nil {
-					log.Error().Err(httpErr).Msg("http listen")
-				}
-
-				restart = restart || !restart
-			}
+	go restart.Loop(ctx, "http-listen", func(ctx context.Context) error {
+		err := httpSrv.ListenAndServe()
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
 		}
-	}()
+
+		return err
+	})
 
 	return nil
 }
 
-func infraSetup(cmdLine *CommandLine, cleanups *logging.Cleanups) (*sql.DB, *amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
+func infraSetup(cmdLine *CommandLine, cleanups *logging.Cleanups) (*sql.DB, *amqp091.Connection, *amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
 	sqliteDB, err := sql.Open("sqlite3", cmdLine.DSN)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("opening db: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("opening db: %w", err)
 	}
 	cleanups.Register(sqliteDB.Close)
 
 	mq, err := amqp091.Dial(cmdLine.RabbitMQAddr)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("rabbitmq dial: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("rabbitmq dial: %w", err)
 	}
 
 	cleanups.Register(mq.Close)
 
 	ch, err := mq.Channel()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("opening rabbitmq channel: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("opening rabbitmq channel: %w", err)
 	}
 
 	cleanups.Register(ch.Close)
 
 	routerQueue, err := rabbitmq.SetupRouter(ch, cmdLine.SiblingName, cmdLine.FamilyName)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("setup router queue: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("setup router queue: %w", err)
 	}
 
-	return sqliteDB, ch, routerQueue, nil
+	return sqliteDB, mq, ch, routerQueue, nil
 }

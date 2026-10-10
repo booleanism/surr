@@ -119,22 +119,7 @@ func (s *egress) listenCallback(ctx context.Context) func(socket *srtgo.SrtSocke
 func (s *egress) Listen(ctx context.Context) error {
 	s.SetListenCallback(s.listenCallback(ctx))
 
-	err := s.SrtSocket.Listen(10)
-	if err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			err = s.accept()
-			if err != nil {
-				return err
-			}
-		}
-	}
+	return listen(ctx, s.SrtSocket, 10, s.accept)
 }
 
 func (s *egress) accept() error {

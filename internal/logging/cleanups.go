@@ -29,6 +29,12 @@ func (c *Cleanups) Run() []error {
 	var errs []error
 
 	c.once.Do(func() {
+		defer func() {
+			c.mu.Lock()
+			c.pending = nil
+			c.mu.Unlock()
+		}()
+
 		c.mu.Lock()
 		hooks := c.pending
 		c.pending = nil

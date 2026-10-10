@@ -103,22 +103,9 @@ func (i *ingress) Listen(ctx context.Context) error {
 		return true
 	})
 
-	err := i.SrtSocket.Listen(int(i.b.max))
-	if err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			err = i.accept(ctx)
-			if err != nil {
-				return err
-			}
-		}
-	}
+	return listen(ctx, i.SrtSocket, int(i.b.max), func() error {
+		return i.accept(ctx)
+	})
 }
 
 func (i *ingress) accept(ctx context.Context) error {

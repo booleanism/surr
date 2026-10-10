@@ -15,6 +15,7 @@ type CommandLine struct {
 	SelectedCommand string
 	LogLevel        string
 	LogFormat       string
+	NGoroutinesPool uint32
 }
 
 func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
@@ -31,6 +32,13 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 				Name:  "run",
 				Usage: "launch subscriptions service",
 				Flags: []cli.Flag{
+					&cli.Uint32Flag{
+						Name:        "goroutines",
+						Aliases:     []string{"g"},
+						Usage:       "number of goroutines pool",
+						Value:       18,
+						Destination: &c.NGoroutinesPool,
+					},
 					&cli.StringFlag{
 						Name:        "database",
 						Aliases:     []string{"d"},

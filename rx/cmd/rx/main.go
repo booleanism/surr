@@ -12,6 +12,7 @@ import (
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
 	"github.com/booleanism/surr/internal/protocols/rabbitmq"
+	"github.com/booleanism/surr/internal/restart"
 	rabbitmqAdapter "github.com/booleanism/surr/rx/internal/adapter/rabbitmq"
 	"github.com/booleanism/surr/rx/internal/protocols/srt"
 	"github.com/haivision/srtgo"
@@ -38,7 +39,6 @@ func main() {
 	}
 	err := cmdLine.parseCLI(ctx, os.Args)
 	if err != nil {
-		fmt.Println(err.Error())
 		return
 	}
 
@@ -57,13 +57,19 @@ func main() {
 
 	switch cmdLine.SelectedCommand {
 	case "run":
-		run(ctx, cmdLine, cleanups)
+		err = run(ctx, cmdLine, cleanups)
+		if err != nil {
+			log.Error().Err(err).Msg("run command")
+			cancel()
+		}
+
+		<-ctx.Done()
 		<-cleanupDone
 	default:
 	}
 }
 
-func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) {
+func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) error {
 	log := zerolog.Ctx(ctx)
 
 	log.Info().
@@ -74,28 +80,39 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 		Int64("workers", cmdLine.NWorker).
 		Msg("rx starting")
 
-	ch, qSetup, err := infraSetup(cmdLine, cleanups)
+	mq, ch, qSetup, err := infraSetup(cmdLine, cleanups)
 	if err != nil {
-		log.Error().Err(err).Msg("setup infra")
-		return
+		return err
 	}
 
 	mqHandlers := protocols.NewHandlers()
 	siblings := protocols.NewSiblings()
-	router := rabbitmq.NewRouter(ch, qSetup, mqHandlers, siblings)
-
 	goPool := pools.NewGoroutinesPool(cmdLine.NGoroutinesPool)
+	router := rabbitmq.NewRouter(ch, qSetup, mqHandlers, siblings, goPool)
+	supervisor := rabbitmq.NewSupervisor(cmdLine.RabbitMQAddr, cmdLine.SiblingName, cmdLine.FamilyName, router, mq, *log)
+	cleanups.Register(supervisor.Close)
+
 	nodesAdapter := rabbitmqAdapter.NewNodes(router, siblings, goPool)
 	subsAdapter := rabbitmqAdapter.NewSubscriptions(router, siblings, goPool)
 
 	options := map[string]string{"mode": "listener"}
 
 	ingressSock := srtgo.NewSrtSocket(cmdLine.IngressHost.Host, cmdLine.IngressHost.Port, options)
+	cleanups.Register(func() error {
+		ingressSock.Close()
+		return nil
+	})
+
 	broadcaster := srt.NewBroadcaster(cmdLine.NWorker, *log)
 	egressAdrr := fmt.Sprintf("%s:%d", cmdLine.EgressHost.Host, cmdLine.EgressHost.Port)
 	ingress := srt.NewIngress(ingressSock, subsAdapter, nodesAdapter, broadcaster, egressAdrr)
 
 	egressSock := srtgo.NewSrtSocket(cmdLine.EgressHost.Host, cmdLine.EgressHost.Port, options)
+	cleanups.Register(func() error {
+		egressSock.Close()
+		return nil
+	})
+
 	egress := srt.NewEgress(egressSock, subsAdapter, broadcaster, *log)
 
 	go func() {
@@ -114,88 +131,35 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 		}
 	}()
 
-	go func() {
-		routines := []routine{
-			{
-				name: "go-pool",
-				f:    goPool.Listen,
-			},
-			{
-				name: "router",
-				f:    router.Listen,
-			},
-			{
-				name: "ingres",
-				f:    ingress.Listen,
-			},
-			{
-				name: "egress",
-				f:    egress.Listen,
-			},
-		}
-		startRoutines(ctx, routines)
-	}()
+	go supervisor.Watch(ctx)
 
-	<-ctx.Done()
+	go restart.Loop(ctx, "go-pool", goPool.Listen)
+	go restart.Loop(ctx, "router", router.Listen)
+	go restart.Loop(ctx, "ingress", ingress.Listen)
+	go restart.Loop(ctx, "egress", egress.Listen)
+
+	return nil
 }
 
-func infraSetup(cmdLine *CommandLine, cleanups *logging.Cleanups) (*amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
+func infraSetup(cmdLine *CommandLine, cleanups *logging.Cleanups) (*amqp091.Connection, *amqp091.Channel, rabbitmq.QueueSetupReturnFunc, error) {
 	mq, err := amqp091.Dial(cmdLine.RabbitMQAddr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("rabbitmq dial: %w", err)
+		return nil, nil, nil, fmt.Errorf("rabbitmq dial: %w", err)
 	}
 
 	cleanups.Register(mq.Close)
 
 	ch, err := mq.Channel()
 	if err != nil {
-		return nil, nil, fmt.Errorf("opening rabbitmq channel: %w", err)
+		return nil, nil, nil, fmt.Errorf("opening rabbitmq channel: %w", err)
 	}
 
 	cleanups.Register(ch.Close)
 
 	qSetup, err := rabbitmq.SetupRouter(ch, cmdLine.SiblingName, cmdLine.FamilyName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("setup router: %w", err)
+		return nil, nil, nil, fmt.Errorf("setup router: %w", err)
 	}
 
-	return ch, qSetup, nil
-}
-
-type routine struct {
-	f    func(ctx context.Context) error
-	name string
-}
-
-func startRoutines(ctx context.Context, routines []routine) {
-	for _, s := range routines[:len(routines)-1] {
-		go func() {
-			listen(ctx, s.name, s.f)
-		}()
-	}
-
-	last := routines[len(routines)-1]
-	listen(ctx, last.name, last.f)
-}
-
-func listen(ctx context.Context, name string, listen func(context.Context) error) {
-	log := zerolog.Ctx(ctx).With().Str("routine", name).Logger()
-	log.Info().Msg("listening")
-	var restart bool
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if restart {
-				log.Info().Msg("restart listening")
-			}
-
-			if err := listen(ctx); err != nil {
-				log.Error().Err(err).Msg("listening error")
-			}
-
-			restart = restart || !restart
-		}
-	}
+	return mq, ch, qSetup, nil
 }

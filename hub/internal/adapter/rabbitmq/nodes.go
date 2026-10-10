@@ -54,65 +54,67 @@ func (n nodes) do(ctx context.Context, c protocols.Command, payload []byte, v an
 	}
 
 	sibling := (*sns)[0]
-	res := make(chan error, 1)
-	resp, err := n.call(ctx, c, payload, sibling, res)
+
+	resp, err := n.call(ctx, c, payload, sibling)
 	if err != nil {
 		return err
 	}
 
-	select {
-	case err = <-res:
+	if resp.Code != 0 {
+		msg := resp.ErrorMessage()
+		zerolog.Ctx(ctx).Warn().Str("command", string(c)).Int("code", resp.Code).Msg("non-zero reply code")
+
+		return fmt.Errorf("unexpected response code %d: %s", resp.Code, msg)
+	}
+
+	if v != nil {
+		err = json.Unmarshal(resp.Result, v)
 		if err != nil {
 			return err
 		}
-
-		if resp.Code != 0 {
-			zerolog.Ctx(ctx).Warn().Str("command", string(c)).Int("code", resp.Code).Msg("non-zero reply code")
-			return fmt.Errorf("unexpected response code: %d", resp.Code)
-		}
-
-		if v != nil {
-			err = json.Unmarshal(resp.Result, v)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
+
+	return nil
 }
 
-func (n nodes) call(ctx context.Context, command protocols.Command, payload []byte, sn protocols.SiblingName, res chan error) (protocols.RouterResponse, error) {
+// call performs one RPC round trip against sn. The reply is received on the
+// shared goroutines pool so the caller's goroutine stays free, and the result
+// is delivered over a buffered channel so a Receive that finishes after the
+// caller gave up can never block a pool worker.
+func (n nodes) call(ctx context.Context, command protocols.Command, payload []byte, sn protocols.SiblingName) (protocols.RouterResponse, error) {
 	resp := protocols.RouterResponse{}
+
 	trackID, err := n.r.Send(ctx, command, payload, sn)
 	if err != nil {
 		return resp, err
 	}
 
-	done := make(chan struct{})
+	// Released on every path, including the timeout below, so an unanswered
+	// request cannot leak a pending entry in the router's track map.
+	defer n.r.Forget(trackID)
+
+	recvErr := make(chan error, 1)
+
 	err = n.t.Run(ctx, func() {
 		log := zerolog.Ctx(ctx)
 
-		err = n.r.Recv(ctx, trackID, &resp)
+		err := n.r.Recv(ctx, trackID, &resp)
 		if err != nil {
 			log.Error().Str("command", string(command)).Str("track_id", trackID.String()).Err(err).Msg("receiving response")
-			res <- err
+		} else {
+			log.Debug().Str("command", string(command)).Str("track_id", trackID.String()).Int("code", resp.Code).Msg("rpc round trip")
 		}
 
-		log.Debug().Str("command", string(command)).Str("track_id", trackID.String()).Int("code", resp.Code).Msg("rpc round trip")
-		res <- nil
-		close(done)
+		recvErr <- err
 	})
 	if err != nil {
 		return resp, err
 	}
 
 	select {
+	case err := <-recvErr:
+		return resp, err
 	case <-ctx.Done():
 		return resp, ctx.Err()
-	case <-done:
-		return resp, nil
 	}
 }

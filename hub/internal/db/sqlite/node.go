@@ -60,41 +60,6 @@ func (r nodes) DeleteNodes(ctx context.Context, nodes []models.Node) error {
 	return err
 }
 
-func (r nodes) SelectAllNodesByID(ctx context.Context, nodes *[]models.Node) (int, error) {
-	idPlaceholder := ""
-	idsArgs := []any{}
-	for _, n := range (*nodes)[:len(*nodes)-1] {
-		idPlaceholder = fmt.Sprintf("%s?, ", idPlaceholder)
-		idsArgs = append(idsArgs, n.ID)
-	}
-
-	idsArgs = append(idsArgs, (*nodes)[len(*nodes)-1].ID)
-	stmt := fmt.Sprintf("SELECT id, bitrate, width, height FROM nodes WHERE id IN (%s ?)", idPlaceholder)
-	rws, err := r.DB.QueryContext(ctx, stmt, idsArgs...)
-	if err != nil {
-		return 0, err
-	}
-	defer rws.Close() //nolint:errcheck
-
-	i := 0
-	for rws.Next() {
-		(*nodes) = append((*nodes), models.Node{})
-		err = rws.Scan(&(*nodes)[i].ID, &(*nodes)[i].Bitrate, &(*nodes)[i].Width, &(*nodes)[i].Height)
-		if err != nil {
-			return i, err
-		}
-
-		i++
-	}
-
-	err = rws.Err()
-	if err != nil {
-		return i, err
-	}
-
-	return i, nil
-}
-
 func (r nodes) SelectAllNodes(ctx context.Context, nodes *[]models.Node) (int, error) {
 	rws, err := r.DB.QueryContext(ctx, "SELECT id, bitrate, width, height FROM nodes")
 	if err != nil {

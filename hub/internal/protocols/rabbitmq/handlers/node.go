@@ -68,8 +68,9 @@ func (n node) wrap(ctx context.Context, trackID uuid.UUID, req protocols.RouterR
 
 	err := json.Unmarshal(req.Payload, ns)
 	if err != nil {
-		log.Error().Err(err).Int("code", -1).Msg("handler failed")
-		_ = rep(ctx, protocols.RouterResponse{Code: -1, Result: []byte(err.Error())})
+		log.Error().Err(err).Int("code", protocols.CodeDecodePayload).Msg("handler failed")
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDecodePayload, err))
+
 		return
 	}
 
@@ -77,21 +78,21 @@ func (n node) wrap(ctx context.Context, trackID uuid.UUID, req protocols.RouterR
 
 	err = do(*ns)
 	if err != nil {
-		log.Error().Err(err).Int("code", -2).Msg("handler failed")
-		_ = rep(ctx, protocols.RouterResponse{Code: -2, Result: []byte(err.Error())})
+		log.Error().Err(err).Int("code", protocols.CodeDomain).Msg("handler failed")
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
+
 		return
 	}
 
 	nodesByte, err := json.Marshal(ns)
 	if err != nil {
-		log.Error().Err(err).Int("code", -3).Msg("handler failed")
-		_ = rep(ctx, protocols.RouterResponse{Code: -3, Result: []byte(err.Error())})
+		log.Error().Err(err).Int("code", protocols.CodeMarshalReply).Msg("handler failed")
+		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))
+
+		return
 	}
 
 	log.Info().Int("count", len(*ns)).Msg("nodes updated")
 
-	_ = rep(ctx, protocols.RouterResponse{
-		Code:   0,
-		Result: nodesByte,
-	})
+	_ = rep(ctx, protocols.ResultResponse(nodesByte))
 }

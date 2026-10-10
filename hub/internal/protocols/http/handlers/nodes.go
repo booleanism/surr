@@ -119,7 +119,7 @@ func (n nodeHandlers) getAvailableNodeHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	if nNodes == 0 {
-		http.Error(w, "zero nodes", http.StatusNoContent)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
