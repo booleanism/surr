@@ -63,22 +63,31 @@ nodes. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Build
 
 ```sh
-make            # lint + build everything
-make build      # build only (no lint)
+make            # lint + test + build everything
+make build      # build only (no lint, no test)
 make lint       # golangci-lint, every module
+make test       # go test ./..., every module
 make clean      # remove .cache/ and bin/
 ```
 
 `make build` builds each service into `bin/surr-<name>` (`bin/surr-hub`,
 `bin/surr-rx`, `bin/surr-subscriptions`, `bin/surr-tx`). Individual targets:
 `make build-hub`, `make build-rx`, `make build-subscriptions`, `make build-tx`.
+Likewise `make test-hub`, `make test-rx`, `make test-subscriptions`,
+`make test-tx`, `make test-root` test one module.
 
 Knobs: `RELEASE_TYPE=release` adds `-s -w -trimpath`; `TAGS` passes build tags;
-`GOFLAGS` / `LDFLAGS` are appended.
+`GOFLAGS` / `LDFLAGS` are appended; `TESTFLAGS` is appended to `go test` (e.g.
+`make test TESTFLAGS=-race`).
 
 There is no Python test suite. The Go tests cover the RPC reply layer and the
-backoff used by the restart loops (`go test ./...` per module); everything else
-is exercised by hand, and `make lint` is the only automated gate for it.
+backoff used by the restart loops; everything else is exercised by hand, and
+`make lint` / `make test` are the only automated gates for it. The two handler
+tests enumerate the commands their service advertises and fail when one has no
+case, so registering a handler without a test breaks `make test`.
+
+Note that neither `make lint` nor `make build` passes build tags: check the
+`vah264enc` variant of tx explicitly with `make test TAGS=va`.
 
 ## Quick start
 
@@ -124,9 +133,11 @@ than opening an empty database and failing one query at a time.
 ```
 
 Useful `hub` flags: `-a/--http` (listen address), `-d/--database`, `-s/--secret`
-(JWT signing key — **set this**, the built-in default is public), `-b/--broker`,
-`-f/--family`, `-n/--name`. Use `./bin/surr-hub run --help` for the full list;
-`subscriptions` takes the same `-d/-b/-f/-n` flags.
+(JWT signing key — **set this**; with no secret the hub generates a random one
+per process and tokens stop working after a restart), `--cookie-secure` (set the
+refresh cookie's `Secure` attribute; disable only for plain-HTTP local dev),
+`-b/--broker`, `-f/--family`, `-n/--name`. Use `./bin/surr-hub run --help` for
+the full list; `subscriptions` takes the same `-d/-b/-f/-n` flags.
 
 ### 4. Start the relay
 
@@ -139,8 +150,8 @@ Useful `hub` flags: `-a/--http` (listen address), `-d/--database`, `-s/--secret`
 
 ### 5. Start the transmitter
 
-`tx run` registers its stream with a DASH server at startup and **fails if one is
-not already listening**, so start `serve` first:
+`tx run` registers its stream with a DASH server at startup, but a failure is
+only logged, so `serve` does not have to be running:
 
 ```sh
 ./bin/surr-tx serve                              # DASH server, default port 8000
@@ -151,9 +162,10 @@ not already listening**, so start `serve` first:
 ```
 
 `--downstream <width>,<height>,<bitrate>` sets the outgoing encode
-(default `1280,720,300`). `--recording` takes the same format; recording is
-always constructed, and `--recording 0,0,0` (the default) only nulls the encoder
-specs.
+(default `1280,720,300`). `--recording` takes the same format and defaults to
+`0,0,0`, which disables recording entirely. `serve` accepts `--dash-token`;
+the stream-registering routes require it when set, and with no token only a
+loopback caller may register or delete a stream.
 
 ### 6. Start a node
 

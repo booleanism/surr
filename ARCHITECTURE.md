@@ -228,22 +228,30 @@ subscriber cap counts *subscriptions* (not subscribers) and compares with `==`.
   (`openh264dec` by default, `vah264dec` under the `va` build tag; AAC via
   `fdkaacdec`) → `intersink`s named `vid`/`aud`. The intersinks hand buffers to
   the other pipelines.
-- **downstream**: `intersrc(vid)` → `h264enc` (videoscale + capsfilter →
-  `openh264enc` by default, `vah264enc` under `va`) → `mpegtsmux` → `srtsink`
-  (caller mode, URI from `--sink`).
-- **recording**: `intersrc(vid)` → `h264enc` (+ `intersrc(aud)` → `aacenc`,
-  lazily linked on first audio buffer via a pad probe) → `dashsink2` writing
-  `manifest.mpd` + segments under `<recording-dir>/<stream-name>/`.
+- **downstream**: `intersrc(vid)` → `h264enc` (`videoconvert` + videoscale +
+  capsfilter pinning `format=I420` → `openh264enc` by default, `vah264enc`
+  under `va`; then `h264parse` with `config-interval=-1`) → `mpegtsmux` →
+  `srtsink` (caller mode, `auto-reconnect:true`, URI from `--sink`).
+- **recording**: only built when `--recording` is not `0,0,0`. `intersrc(vid)` →
+  `h264enc` (+ `intersrc(aud)` → `aacenc`, lazily linked on first audio buffer
+  via a pad probe that never sends EOS) → `dashsink2` writing `manifest.mpd` +
+  segments under `<recording-dir>/<stream-name>/`.
 
 `serve` runs a small HTTP server listing/playing recorded DASH streams
 (dash.js player template), backed by `internal/streaming` + `internal/server/dash`.
-`tx run` also registers its stream with a running DASH server's manager API
-(`dash.NewStreamManager`, `POST /stream`).
+On startup it scans the recording directory for `.registered` markers and
+repopulates the in-memory stream set, so recordings survive a restart. The
+mutating routes (`POST`/`DELETE /stream`) are behind `requireDashToken`
+(`--dash-token`): with a token configured the `X-Dash-Token` header must match
+(constant-time), and with none only a loopback caller may mutate.
+
+`tx run` registers its stream with a running DASH server's manager API
+(`dash.NewStreamManager`, `POST /stream`, forwarding `--dash-token`) as a
+best-effort step: if no `tx serve` is up it logs a warning and continues.
 
 Build-tag variants exist for hardware-accelerated codecs
-(`h264dec_va.go`, `h264enc_va.go` vs `_default.go`). **The `va` tag does not
-compile** — `h264enc.go` passes a `uint32` bitrate to the `va` variant's
-`uint64` parameter.
+(`h264dec_va.go`, `h264enc_va.go` vs `_default.go`); both variants compile and
+must keep identical signatures.
 
 ### rx (`rx/`)
 
@@ -268,12 +276,18 @@ leaves its socket spent, which is fine: the routine is only stopped at shutdown.
   SQLite repos. Outbound adapters for subscription and node analytics calls.
 - **HTTP** (`internal/protocols/http/`): per-domain `ServeMux`s mounted under
   `/auth`, `/users`, `/nodes`, `/subscriptions`:
-  - `POST /auth/signin|refresh|logout` — JWT access token (HS256, 24h) +
-    opaque refresh token (32 random bytes, 7-day TTL) stored server-side in an
-    in-memory token store; refresh cookie is HttpOnly/Secure/Lax on `/auth`.
+  - `POST /auth/signin|refresh|logout` — JWT access token (HS256, 24h, issuer
+    `surr`) + opaque refresh token (32 random bytes, 7-day TTL) stored
+    server-side in an in-memory token store; signin is rate limited to 10
+    attempts/minute per client address; all three cookies come from one helper
+    (HttpOnly, `Secure` per `--cookie-secure`, `SameSite=Lax`, `Path=/auth`).
   - `POST /users/signup`, `GET /nodes/availability`,
     `GET /nodes/analytics`, `POST /subscriptions/add`,
-    `POST /subscriptions/remove` (auth-protected).
+    `POST /subscriptions/remove` (auth-protected). Removing a subscription the
+    caller does not own answers 403.
+
+Every request body is capped at 1 MiB (`middlewares.MaxBodyBytes`) and the
+server sets Read/Write/Idle timeouts on top of `ReadHeaderTimeout`.
 
 Layering: `cmd/<svc>` → `internal/protocols/{http,rabbitmq}` (transport) →
 `internal/usecases` (business logic) → `internal/db/sqlite` (storage), with
@@ -332,10 +346,10 @@ Same layering as hub minus HTTP.
 
 These are recorded in full in DESIGN.md ("Known limitations") and TODO.md
 section E. The 2026-10 review pass reproduced every one of them from the
-source; E0–E5 have since been fixed **in the working tree, uncommitted** on top
-of `dc83aad`. E6–E11 are still open.
+source; E0–E6, E8 and E9 have since been fixed **in the working tree,
+uncommitted** on top of `dc83aad`. E7, E10 and E11 are still open.
 
-### Fixed (E0–E5) — do not reintroduce
+### Fixed (E0–E6, E8, E9) — do not reintroduce
 
 | Defect | Effect | Fix |
 |---|---|---|
@@ -351,32 +365,44 @@ of `dc83aad`. E6–E11 are still open.
 | `internal/pools/goroutines.go` `for range p.n - 1` | underflow → ~4.29B goroutines with `--goroutines 0` | `DefaultNGoroutinesPool` fallback. `subscriptions` also never started its pool at all |
 | blocking `Listen`/`Accept` could not observe ctx | shutdown had to wait for a connection; the accept goroutine outlived its routine | `rx/internal/protocols/srt/listen.go` closes the socket on cancellation |
 | an unmigrated database failed one "no such table" at a time | a fresh checkout looked like a code bug | `db.VerifySchema` at startup names the missing tables and the `migrate ... up` command |
+| tx/DASH `Stream` used an atomic ref-count (`block()` busy-spin, unlocked map) | two concurrent DASH requests livelocked the server at 100% CPU | plain `sync.RWMutex` with `Names()`/`IsExist`/`Set`/`Delete` |
+| unvalidated stream name joined onto the recording dir | path traversal via `POST`/`DELETE /stream` | `validStreamName` rejects separators, `.`/`..`, over-long names and control chars |
+| `AvailStream` was never called | recorded streams were invisible after a `tx serve` restart | `loadRegisteredStreams()` runs from `NewDash` and scans for `.registered` markers |
+| `-tags va` did not compile (`h264enc_va.go`, uint32 → uint64) | the va variant was unbuildable | same signature in both variants; `go build -tags va ./...` is part of the gate |
+| recording pipeline built even with `--recording 0,0,0` | recording could not be disabled | `setupPipelines` returns a nil recording branch when the specs are zero |
+| `tx run` aborted without a reachable `tx serve` | a relay/recording could not start on its own | `registDashStream` logs a warning and continues; registration is best effort |
+| audio pad probe emitted EOS per buffer; three `go func()` closures shared the named `err` | recording could be EOS'd early; racy lost errors | probe is buffer-only and returns per-link results; each closure uses a local error |
+| `h264enc` lacked `videoconvert`/`format=I420`/`config-interval`; `srtsink` had `auto-reconnect:false` | non-I420 sources failed to negotiate, late SRT joiners missed SPS/PPS, an rx restart killed tx | `videoconvert` + pinned I420 + `config-interval=-1`; `auto-reconnect:true` |
+| Python node: dropped `await rep(...)`, blocking GStreamer/pymongo calls on the loop, 100% CPU frame loop, unsynchronized pipeline start/stop, unhandled `insert_one`/`model.track` failures, late replies mis-dispatched as requests, naive timestamps | a caller blocked forever; a transient error silently killed counting or persistence | awaited reply + `Coroutine`-typed `ReplyFunc`; `asyncio.to_thread` for blocking calls; blocking `get_frame(timeout=...)`; a lock around the pipeline; logged failures; an abandoned-trackID set; UTC timestamps |
+| hub security: committed JWT secret, any-HMAC validation, no signin rate limit, email logged, no ownership check on removal, unbounded bodies, only `ReadHeaderTimeout`, `Secure:true` cookies, unauthenticated DASH control routes | token forgery, brute force, cross-user deletion, slowloris, broken local dev, unauthenticated stream deletion | ephemeral secret + warning, pinned HS256 and issuer, 10/min per-address limiter, ownership enforced inside the `DELETE`, 1 MiB `MaxBytesReader` + Read/Write/Idle timeouts, `--cookie-secure`, `requireDashToken` (loopback-only without a token) |
 
-### Open (E6–E11)
+### Open (E7, E10, E11)
 
 | Area | Defect | Effect |
 |---|---|---|
-| tx / DASH | `tx/internal/streaming/stream.go` `block()` busy-spin + unsynchronized map in `dash.go` | DASH server livelocks/crashes on concurrent requests |
-| tx / DASH | unvalidated stream name in `AddStream`/`DeleteStream` (`filepath.Join` + POST endpoints) | path traversal |
-| tx / DASH | `-tags va` does not compile (`h264enc.go:39`, uint32 → uint64) | the va variant is unbuildable |
 | rx data plane | `broadcast.go` subscriber cap counts topics, a reconnecting node's channel is overwritten without closing, `Unsubscribe` closes after deleting | fan-out loses or double-counts subscribers |
 | rx data plane | blocking broker RPC inside the SRT listen callback; no `Read`/`Write` deadline | a slow peer wedges accept or a writer |
-| Python runtime | `nodes/core/router.py` acks before dispatch; `processing.py` busy-waits; `pipeline.py` queue races | lost requests on a handler crash; 100% CPU |
-| Python runtime | `nodes/lib/bustle/handlers.py:112` missing `await rep(...)`; blocking pymongo/GStreamer calls on the event loop | the caller blocks forever on an invalid source address |
-| Security | committed default JWT secret (`hub/cmd/hub/cmdline.go:56`); no `MaxBytesReader`/rate limit on signin; `ValidateAccessToken` accepts any HMAC algorithm; `models.User.Passwd` is JSON-serializable; `hub` HTTP server sets only `ReadHeaderTimeout` | forgery, brute force, unbounded bodies |
-| Minor | `tx/cmd/tx/main.go` and `tx/internal/server/dash/client.go` shadow the `dash`/`url` package names; dead code in `tx/internal/core/muxer/qtmux.go`, `tx/internal/src/rtp/rtpm4adepay.go` | confusing, not breaking |
+| Minor | `tx/cmd/tx/main.go` and `tx/internal/server/dash/client.go` shadow the `dash`/`url` package names | confusing, not breaking |
+| Minor | `internal/protocols/handlers.go` `GetBytes` accepts any JSON string with no shape validation; `models.User.Passwd` is JSON-serializable; duplicate signup email surfaces as 500; `rx` cannot bind an IPv6 address | loose edges, none breaking |
+| Python packaging | no `pyproject.toml`/`setup.py` (`requirements.txt` is a venv dump), no `pyrightconfig.json`, Pyright not installed | the documented type-check gate does not run |
 
 ## Build & tooling
 
 - `make lint` — golangci-lint every module (`.golangci.yml` at repo root:
   cyclop max 10, govet enable-all with strict shadowing, gofumpt/gci).
+- `make test` — `go test ./...` in every module, plus `make test-<module>` for
+  one. `TESTFLAGS` is appended (e.g. `TESTFLAGS=-race`); `make test TAGS=va`
+  also compiles the `vah264enc` variant, which `make lint`/`make build` skip.
 - `make build` — builds every `cmd/` entrypoint into `bin/surr-<name>`;
   `make build-tx` (also build-rx/hub/subscriptions) for one;
   `RELEASE_TYPE=release` strips and trimpaths.
+- `make` runs lint, test and build in that order.
 - Go tests exist for the RPC reply layer and the restart backoff only
   (`internal/protocols/handlers_test.go`, the two `handlers` packages'
-  tests, `internal/backoff/backoff_test.go`); lint is the only automated
-  check for everything else.
+  tests, `internal/backoff/backoff_test.go`); lint and those tests are the only
+  automated checks for everything else. The two `handlers` tests enumerate the
+  commands the service advertises (`AvailableCommand`) and fail when one has no
+  case, so registering a handler without covering its reply breaks the build.
 - The Python node has no test suite and no working type-checker configuration.
 
 ## Planned evolution (not yet implemented on `main`)

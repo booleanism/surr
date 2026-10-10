@@ -138,14 +138,19 @@ Three-pipeline split (producer / downstream / recording) via `intersrc` /
 lifecycle: the producer decodes once, downstream re-encodes for SRT at
 `--downstream` specs, recording encodes at `--recording` specs (video-only
 until audio appears, lazily linked by a pad probe). Hardware codec variants
-are selected with Go build tags (`*_va.go` vs `*_default.go`) — though the
-`va` variant does not currently compile.
-
-Two caveats the CLI does not express: recording is built **unconditionally**
-(`--recording 0,0,0` only nulls the encoder specs), and `tx run` requires a
-`tx serve` DASH server to already be reachable because it registers the stream
-over HTTP at startup. Default codecs are software (`openh264dec`/`openh264enc`,
+are selected with Go build tags (`*_va.go` vs `*_default.go`); both now
+compile, and `h264enc.Valid()` turns a missing factory (e.g. no `openh264enc`
+plugin installed) into a startup error instead of a nil-pointer crash. The
+encoder inserts a `videoconvert` and pins `format=I420`, and `h264parse` runs
+with `config-interval=-1` so a node that subscribes late still receives
+SPS/PPS. Default codecs are software (`openh264dec`/`openh264enc`,
 `fdkaacdec`/`fdkaacenc`).
+
+Recording is opt-in: `--recording 0,0,0` builds no recording branch at all, so
+nothing is written and nothing is registered with the DASH server. `tx run`
+registers the stream with `tx serve` over HTTP when that server happens to be
+up, but a failure is only logged — a relay or a recording no longer depends on
+a separate `tx serve` having been started first.
 
 ### 6. Push-to-node control (`sink.start/stop`), pull-from-node media
 
@@ -161,9 +166,10 @@ its data-plane identity (the UUID) is stable across restarts and is what
 subscriptions reference.
 
 As built, `sink.start` is fire-and-forget with **no reply deadline**: rx's
-adapter never reads the reply code, and the node's invalid-source-address
-reply is not even awaited (`nodes/lib/bustle/handlers.py:112`), so a bad
-address stalls the media goroutine indefinitely.
+adapter never reads the reply code. The node's invalid-source-address path now
+awaits its reply (`nodes/lib/bustle/handlers.py`), so a bad address no longer
+stalls the node's event loop on a dropped coroutine — but the media goroutine
+still waits for the reply rx never reads.
 
 ### 7. Node self-registration with retry-until-hub
 
@@ -227,13 +233,16 @@ single-instance deployment, but the natural extension point (SQLite/Redis
 backed store) if that changes. Expired entries are never swept, so the map
 grows for the process lifetime.
 
-Note the CLI ships a default JWT secret (`hub/cmd/hub/cmdline.go:56`); real
-deployments must override `--secret`/`JWT_SECRET`. Token validation accepts
-any HMAC algorithm (HS384/HS512 as well as HS256) and does not verify the
-issuer. Signin has no rate limiting and logs the submitted email on failure.
-Subscription removal has no ownership check, so any authenticated user can
-remove any subscription.
-
+Note the CLI no longer ships a JWT secret: `--secret`/`JWT_SECRET` is empty by
+default, and the hub then generates 32 random bytes per process and logs a
+warning — tokens stop being valid across a restart, which is fine for a local
+test and a trap in any real deployment, so set the secret there. Validation
+pins `HS256` and the `iss` claim. Signin is rate limited to 10 attempts per
+minute per client address (keyed on the address, not the email, so an attacker
+cannot lock a known account out) and no longer logs the submitted email.
+Subscription removal is ownership-checked inside the delete statement, and the
+`refresh_token` cookie's `Secure` attribute follows `--cookie-secure` so a
+plain-HTTP local deployment works without weakening a real one.
 ### 10. Layered service template (hub/subscriptions)
 
 `cmd/<svc>` (CLI + wiring) → `internal/protocols/{http,rabbitmq}` (transport
@@ -434,11 +443,12 @@ covers "hub/rx/subscriptions" only, although tx imports it too.
 
 ### A. Correctness defects (found in the 2026-10 review)
 
-The review pass reproduced every item below from the source. **E0–E5 are now
-fixed in the working tree (uncommitted, on top of `dc83aad`); E6–E11 are still
-open.** TODO.md section E tracks each one with its status.
+The review pass reproduced every item below from the source. **E0–E6, E8 and
+E9 are fixed in the working tree (uncommitted, on top of `dc83aad`); E7, E10
+and E11 (MEDIUM/LOW) are still open.** TODO.md section E tracks each one with
+its status.
 
-#### Fixed (E0–E5)
+#### Fixed (E0–E6, E8, E9)
 
 0. **Subscriptions UUID storage-class mismatch — the data plane was dead.**
    `subscriptions/internal/db/sqlite/subscription.go` inserted `uuid.UUID`
@@ -479,39 +489,81 @@ open.** TODO.md section E tracks each one with its status.
 4. **`hub/internal/protocols/rabbitmq/handlers/node.go` missing `return`** after
    the -3 reply → fell through and replied again with `Code: 0`, two replies
    per request. Fixed.
+5. **Python node runtime (E8).** `nodes/lib/bustle/handlers.py:112` dropped the
+   `await rep(...)` on the invalid-source-address path, so the reply was never
+   scheduled and rx's caller blocked forever; `ReplyFunc` is now typed as
+   returning a `Coroutine`, which makes the same mistake a Pyright error.
+   `_handle_inbound_request` still acks before dispatching (the handler owns the
+   reply, and a redelivery would duplicate it), but the task is retained in
+   `Router._inflight` with a done-callback that logs its exception instead of
+   discarding it. `frame_worker` blocks on `get_frame(timeout=0.5)` instead of
+   spinning at 100% CPU; `pipeline.py` guards `start()`/`stop()`/
+   `_on_new_sample` with a lock, checks `running` in the callback and tolerates
+   `queue.Empty`; `_start_sink` stops the old pipeline before starting the new
+   one; the GStreamer state changes and the pymongo aggregation run through
+   `asyncio.to_thread`; `insert_one` and `model.track` failures are logged
+   instead of killing the task; a `recv` timeout records its trackID so a late
+   reply is dropped rather than mis-dispatched as an inbound request; `ticker`
+   floors its interval; timestamps are `datetime.now(timezone.utc)`; and
+   `bustle.py` exits non-zero when Mongo is unreachable (it used to log and
+   return 0, so a dead node looked like a clean run) and closes its client.
+6. **tx / DASH (E6).** `stream.go`'s atomic ref-count protocol (`block()`
+   busy-spin, unlocked `d map[string]struct{}`) is replaced by a plain
+   `sync.RWMutex` with `Names()`/`IsExist`/`Set`/`Delete`; `validStreamName`
+   rejects a traversal-shaped stream name before it reaches `filepath.Join`;
+   `loadRegisteredStreams()` (called by `NewDash`) replaces the never-called
+   `AvailStream`, so recorded streams survive a `tx serve` restart; the three
+   `go func()` closures that shared a named `err` use locals; the recording
+   pipeline is no longer built when `--recording 0,0,0`; the audio pad probe no
+   longer emits EOS per buffer; the muxer releases its request pad on link
+   failure; `h264enc` gained a `videoconvert` + `format=I420` and
+   `h264parse config-interval=-1`; `srtsink` sets `auto-reconnect:true`; and
+   `tx run` no longer aborts when no DASH server is up (registration is best
+   effort). `-tags va` now compiles — the `va` variant's
+   `encElementWithOptions` takes the same `uint32` as the default one.
+7. **Security (E9).** The committed default JWT secret is gone (an ephemeral
+   random secret is generated with a warning when none is configured);
+   validation pins HS256 *and* the issuer; signin is rate limited per client
+   address and no longer logs the email; the refresh cookie's `Secure` attribute
+   follows a `--cookie-secure` flag and all three cookies come from one helper;
+   the HTTP server sets Read/Write/Idle timeouts and caps bodies at 1 MiB;
+   subscription removal is ownership-checked inside the `DELETE` itself (a new
+   `protocols.CodeNotFound` carries the miss back through the broker, and the
+   hub answers 403); and the DASH control routes require a `X-Dash-Token`
+   (loopback-only when no token is configured).
 
-#### Still open (E6–E11)
+#### Still open (E7, E10, E11)
 
-5. **`nodes/lib/bustle/handlers.py:112` missing `await rep(...)`** on the
-   invalid-source-address path → the reply is never scheduled and rx's caller
-   blocks forever. Related: `_handle_inbound_request` acks *before* dispatching
-   the handler as a fire-and-forget task (`nodes/core/router.py:170`), so a
-   handler crash loses the request silently and its exception is never
-   retrieved.
-6. **Frame-worker busy-wait** (`nodes/lib/bustle/processing.py:67-70`): a
-   non-blocking `get_frame()` in a tight `while` loop burns 100% CPU when no
-   frames arrive. Also unsynchronized `start()`/`stop()` against the appsink
-   thread, and `_start_sink` restarts the pipeline without stopping the old one.
-7. **`tx/internal/streaming/stream.go:61-63`** `block()` is a busy spin
-   (`for s.c.Load() > 1`) and `ref()` increments the same counter, so two
-   concurrent DASH requests livelock the server at 100% CPU; the underlying
-   `d map[string]struct{}` is mutated without a lock (crash on concurrent
-   request + manifest fetch). Path traversal in `dash.go:76-90` (`AddStream`
-   joins an unvalidated request-body name onto the recording dir).
-8. **`-tags va` does not compile**: `tx/internal/core/coder/h264enc.go:39`
-   passes `specs.Bitrate` (uint32) to the `va` variant's
-   `encElementWithOptions(uint64)`.
 9. **ECharts-shaped analytics output**: both pipelines in
    `nodes/lib/bustle/analytics.py` end in a `$project` emitting ECharts option
    objects (`xAxis`/`yAxis`/`legend`/`series.type`/`showSymbol`), violating
    invariant 8. Corrected with the analytics service (§8, §11, TODO.md B4).
+10. **rx data plane (E7, MEDIUM)**: the broadcaster's subscriber cap counts
+    subscriptions and compares with `==` (so one subscription admits unlimited
+    nodes); a reconnecting node's channel is overwritten without being closed;
+    `Subscribe` after `Close` recreates an orphan topic; the SRT handshake
+    callbacks run blocking broker RPCs with untracked pending maps; a stalled
+    subscriber's `sock.Write` has no deadline; ctx cancellation does not stop a
+    blocked `sock.Read`; ingress never sets a rejection reason; and
+    `StartSink`/`StopSink` log per-node failures but always return nil.
+11. **Python typing / packaging (E10, MEDIUM)**: Pyright is not installed in
+    `nodes/.venv` and there is no `pyrightconfig.json`; there is no
+    `pyproject.toml`/`setup.py`, so `requirements.txt` is a venv dump.
+12. **Minor items (E11, LOW)**: `GetBytes` accepts any JSON string with no
+    shape validation, an empty `ReplyTo` is rejected silently, `models.User`
+    carries a JSON-serializable `Passwd`, duplicate signup email surfaces as
+    500 rather than 409, `rx` cannot bind an IPv6 listen address, and two local
+    variables still shadow the `dash` and `net/url` package names in tx.
 
 ### B. Operational / robustness gaps
 
 1. **Tests are still thin.** There is no Python test suite, and the Go tests
    cover only the RPC reply layer (`internal/protocols/handlers_test.go`, the
    `hub` and `subscriptions` `handlers` packages) and `internal/backoff`. For
-   everything else `make lint` is the only automated gate.
+   everything else `make lint` and `make test` are the only automated gates —
+   the two `handlers` packages enumerate the commands they advertise and fail
+   when one has no case, so the reply layer cannot regress silently, but
+   nothing else in the tree is executed by a test.
 2. **Restart loops could not recover and spun hot** (fixed, E4): no backoff, a
    one-shot `amqp091.Dial` with no `NotifyClose`, and the always-true
    `restart = restart || !restart` idiom. Routines now run inside
@@ -547,11 +599,11 @@ open.** TODO.md section E tracks each one with its status.
    and the sibling loops try every candidate and `errors.Join` the failures.
    Still open: Go requires exactly one sibling for some commands while Python
    tries all.
-6. **Security**: committed default JWT secret; any HMAC alg accepted and no
-   issuer check; no signin rate limiting and email logged on failure; no
-   ownership check on subscription removal; no request body size limits and
-   only `ReadHeaderTimeout` on the HTTP server; DASH stream add/remove
-   unauthenticated (mitigated by loopback bind).
+6. **Security** (fixed, E9): the committed default JWT secret is gone, the
+   accepted algorithm and issuer are pinned, signin is rate limited and no
+   longer logs the email, subscription removal is ownership-checked, request
+   bodies are capped at 1 MiB with full server timeouts, and the DASH control
+   routes require a token (loopback-only otherwise).
 7. **Storage hygiene**: schemas are still applied out-of-band with the
    golang-migrate CLI (the services contain no migration code), but `hub` and
    `subscriptions` now call `db.VerifySchema` at startup and exit with one
@@ -563,10 +615,15 @@ open.** TODO.md section E tracks each one with its status.
    `sweepLocked` on save. Still open: the migration's `ON DELETE CASCADE` never
    fires because `PRAGMA foreign_keys = ON` is per-connection and not enabled
    at runtime; `pymongo.MongoClient` is never closed and the timeseries
-   collection is created with a check-then-create race.
-8. **`POST /auth/*` local dev**: the refresh cookie is `Secure: true` while the
-   default bind is plain `127.0.0.1:9000`; logout uses `SameSite=Strict` while
-   signin/refresh use `Lax`.
+   collection is created with a check-then-create race. (The Mongo items are
+   fixed under E8 — the client is closed after the broker connection and the
+   collection is created with `try/except CollectionInvalid` — but the
+   `PRAGMA foreign_keys` item is still open.)
+8. **`POST /auth/*` local dev** (fixed, E9): the refresh cookie's `Secure`
+   attribute follows the new `--cookie-secure` flag (default true) so a
+   plain-HTTP `127.0.0.1:9000` deployment can opt out, and one `refreshCookie`
+   helper builds signin, refresh and logout cookies alike with
+   `SameSite=Lax`.
 9. **Python typing/packaging**: `requirements.txt` is a full venv dump (already
    divergent from the installed venv), there is no `pyproject.toml` and no
    `pyrightconfig.json`, and Pyright is not installed — the documented

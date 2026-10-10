@@ -12,9 +12,11 @@ Deep-dive docs: [ARCHITECTURE.md](ARCHITECTURE.md) (services, data flow, protoco
 
 ```sh
 make lint          # golangci-lint every module (config: .golangci.yml at repo root)
+make test          # go test ./... in every module
 make build         # build every cmd/ entrypoint into bin/surr-<name>
 make build-tx      # build a single binary (also: build-rx, build-hub, build-subscriptions)
-make               # lint + build
+make test-hub      # test one module (also: test-rx, test-subscriptions, test-tx, test-root)
+make               # lint + test + build
 make clean         # remove .cache/ and bin/
 
 # Build a release binary (stripped, trimpath)
@@ -29,9 +31,11 @@ python bustle.py --help
 
 `make build-<name>` builds the module directory whose `cmd/<name>/` contains `main.go`, running `go build` from inside that directory (so the module's own `go.mod` applies) and writing `bin/surr-<name>`. Targets today: `build-hub`, `build-rx`, `build-subscriptions`, `build-tx`. Knobs: `RELEASE_TYPE=release` (adds `-s -w -trimpath`), `TAGS` (build tags), `GOFLAGS`, `LDFLAGS`.
 
+`make test` discovers modules the same way and runs `go test ./...` in each, so a failure in any module fails the target. Knobs: `TESTFLAGS` (e.g. `TESTFLAGS=-race` or `TESTFLAGS=-count=1`) and `TAGS` (`make test TAGS=va` also compiles the vah264enc variant of tx).
+
 There is no `go.work` file; each Go module is self-contained. All four service modules (hub, rx, subscriptions, tx) reach the shared root packages via `replace github.com/booleanism/surr => ../` in their `go.mod`. tx never joins the broker at runtime, but does import the shared root `internal/logging` package at build time.
 
-There are **no Python tests**. Go tests exist but only for the RPC reply layer and the restart backoff (`internal/protocols/handlers_test.go`, `hub/…/handlers/node_test.go`, `subscriptions/…/handlers/subscription_test.go`, `internal/backoff/backoff_test.go`); for everything else `make lint` is the only automated gate (golangci-lint, cyclop max-complexity 10, govet enable-all with strict shadowing, gosec, errcheck, gocritic, gofumpt + gci formatting). Run `make lint` before committing. Pyright is *not* installed in `nodes/.venv` and there is no `pyrightconfig.json`, so the "type-check with Pyright" instruction below is aspirational — see TODO.md A0.
+There are **no Python tests**. Go tests exist but only for the RPC reply layer and the restart backoff (`internal/protocols/handlers_test.go`, `hub/…/handlers/node_test.go`, `subscriptions/…/handlers/subscription_test.go`, `internal/backoff/backoff_test.go`); for everything else `make lint` and `make test` are the only automated gates (golangci-lint, cyclop max-complexity 10, govet enable-all with strict shadowing, gosec, errcheck, gocritic, gofumpt + gci formatting). Run `make` before committing. The two handler tests enumerate the commands their service advertises and fail when one has no case, so adding a handler without a test breaks `make test`. Pyright is *not* installed in `nodes/.venv` and there is no `pyrightconfig.json`, so the "type-check with Pyright" instruction below is aspirational — see TODO.md A0.
 
 ## Architecture
 
@@ -90,15 +94,20 @@ hub and subscriptions follow the same layering: `cmd/<svc>/` (CLI + main wiring)
 
 ### Known landmines (verified; see TODO.md section E for the full list)
 
-E0–E5 (the UUID storage class, the RPC error replies, the RPC plumbing, shutdown/lifecycle, the restart loops and the storage defects) are **fixed in the working tree but uncommitted** on top of `dc83aad` — read TODO.md section E before touching those areas, and do not reintroduce them:
+E0–E6, E8 and E9 (the UUID storage class, the RPC error replies, the RPC
+plumbing, shutdown/lifecycle, the restart loops, the storage defects, tx/DASH,
+the Python node runtime and the security items) are **fixed in the working tree
+but uncommitted** on top of `dc83aad` — read TODO.md section E before touching
+those areas, and do not reintroduce them. E7, E10 and E11 are still open.
 
 - **UUID storage class must stay BLOB.** `subscriptions.add` used to insert TEXT while the lookups bound BLOB, and SQLite compares by storage class — the membership queries matched zero rows, so rx rejected every publisher. Every bind is now `id[:]`; keep it that way.
 - **Replies go through `protocols.ResultResponse`/`ErrorResponse`.** `RouterResponse.Result` is `json.RawMessage`, so a raw `[]byte(err.Error())` cannot marshal and the failure was silently dropped. The `-1/-2/-3` codes are named constants (`CodeDecodePayload`, `CodeDomain`, `CodeMarshalReply`) and are part of the wire protocol — `nodes/core/handlers.py` mirrors them.
 - **Read failures with `ErrorMessage()`, not `GetBytes()`.** A short ASCII message such as `internal` is itself valid base64, so `GetBytes()` returns garbage for exactly the replies it is most likely to be called on.
 - **Every RPC registers a trackID and must release it.** `router.Recv` does `defer r.Forget(trackID)`; adapters do the same after `Send`. The reply channel is buffered (cap 1) so a late reply is dropped and Nacked rather than blocking the delivery path.
 - **Blocking SRT calls are not cancellable by themselves.** `rx/internal/protocols/srt/listen.go` closes the socket on ctx cancellation because that is the only thing that wakes `srt_epoll_wait`; do not call `sock.Listen`/`Accept` directly from a routine.
-- **`-tags va` does not compile**: `tx/internal/core/coder/h264enc.go:39` passes `specs.Bitrate` (uint32) to `encElementWithOptions(uint64)`. Default (non-va) builds are fine.
-- **Default JWT secret is committed** (`hub/cmd/hub/cmdline.go:56`); real deployments must set `--secret`/`JWT_SECRET`.
+- **Both tx encoder build tags must compile.** The `va` and default variants of `encElementWithOptions` must keep the same signature (`bitrate uint32`); `make lint` and `make build` do not pass build tags, so check the `va` variant explicitly with `make test TAGS=va` (or `cd tx && go build -tags va ./... && go vet -tags va ./...`).
+- **The hub has no default JWT secret.** `--secret`/`JWT_SECRET` is empty by default and the hub then generates a random per-process secret with a warning (tokens do not survive a restart). Set it explicitly in any deployment.
+- **The DASH control routes need `--dash-token`.** `POST`/`DELETE /stream` are behind `requireDashToken`; with no token configured only a loopback caller may register or delete a stream, so widening the bind address cannot silently expose them.
 - The analytics pipelines in `nodes/lib/bustle/analytics.py` emit ECharts option objects from the DB, violating DESIGN invariant #8.
 
-Only the RPC reply layer and `internal/backoff` have tests (`internal/protocols/handlers_test.go`, the two `handlers` packages' tests, `internal/backoff/backoff_test.go`). Everything else is exercised by hand.
+Only the RPC reply layer and `internal/backoff` have tests (`internal/protocols/handlers_test.go`, the two `handlers` packages' tests, `internal/backoff/backoff_test.go`). Everything else is exercised by hand. The two `handlers` tests fail when a registered command has no case in their table, so adding a handler means adding a case.
