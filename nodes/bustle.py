@@ -4,12 +4,14 @@ import json
 import logging
 import os
 import signal
+import sys
 import typing
 import uuid
 
 import aio_pika
 import pymongo
 from pymongo import collection
+from pymongo.errors import CollectionInvalid
 from ultralytics.models import YOLO
 
 from core import handlers as core_handlers
@@ -184,12 +186,18 @@ def install_signal_handlers(stop_event: asyncio.Event) -> None:
             pass
 
 
-def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> collection.Collection:
-    mongo_client = pymongo.MongoClient(mongo_url)
+def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> tuple[pymongo.MongoClient, collection.Collection]:
+    # serverSelectionTimeoutMS keeps a dead or unreachable mongod from parking
+    # startup in the driver's 30s default; the failure surfaces immediately.
+    mongo_client = pymongo.MongoClient(mongo_url, serverSelectionTimeoutMS=5000)
     nodes_db = mongo_client.get_database(mongo_db)
 
     id = str(node_id).replace("-", "")
-    if id not in nodes_db.list_collection_names():
+
+    # create_collection is not idempotent, so the old list_collection_names
+    # check-then-create raced with a second node starting on the same database.
+    # Creating and tolerating CollectionInvalid is atomic.
+    try:
         nodes_db.create_collection(
             id,
             timeseries={
@@ -198,11 +206,13 @@ def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> collection.Col
                 "granularity": "seconds",
             },
         )
+    except CollectionInvalid:
+        pass
 
-    return nodes_db.get_collection(id)
+    return mongo_client, nodes_db.get_collection(id)
 
 
-async def main():
+async def main() -> int:
     args = parse_args()
 
     logging_setup.setup_logging(args.log_level, str(args.node_id))
@@ -219,12 +229,14 @@ async def main():
     Gst.init(None) # pyright: ignore[reportAttributeAccessIssue]
 
     try:
-        coll = await asyncio.to_thread(
+        mongo_client, coll = await asyncio.to_thread(
             init_db, args.mongo_url, args.mongo_db, args.node_id
         )
     except Exception as e:
+        # Exiting 0 here used to make a node that never connected look like a
+        # clean run to whatever supervises it, so it was never restarted.
         logger.error("error opening database connection node_id=%s: %s", args.node_id, e)
-        return
+        return 1
 
     handlers = core_handlers.Handlers()
     siblings = core_siblings.Siblings()
@@ -355,7 +367,8 @@ async def main():
         except asyncio.CancelledError:
             logger.info("shutting down bustle node")
         finally:
-            streamer.stop()
+            # set_state(NULL) blocks, so keep it off the event loop.
+            await asyncio.to_thread(streamer.stop)
 
             # stop background work first; listen stays alive so the
             # nodes.remove reply can still be received
@@ -412,9 +425,18 @@ async def main():
             if stop_waiter is not None and not stop_waiter.done():
                 stop_waiter.cancel()
 
+    # Closed after the connection so a late insert from a cancelled normalizer
+    # cannot use a client that is already torn down.
+    mongo_client.close()
+
+    return 0
+
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
+        # Only reachable where add_signal_handler is unsupported (Windows); on
+        # POSIX the signal is handled inside the loop and main returns normally.
         logging.getLogger("bustle").info("process terminated by user")
+        sys.exit(130)

@@ -1,5 +1,5 @@
-import threading
 import queue
+import threading
 import typing
 import uuid
 import numpy
@@ -16,33 +16,58 @@ class SRTStreamer:
         self.pipeline = None
         self.running = False
         self._frame_q: queue.Queue = queue.Queue(maxsize=1)
+        # Guards pipeline/running. The GStreamer streaming thread runs
+        # _on_new_sample concurrently with start()/stop() on the event loop, and
+        # without this the callback could touch a pipeline that stop() already
+        # set to NULL.
+        self._lock = threading.Lock()
 
     def _on_new_sample(self, sink):
-        sample = sink.emit("pull-sample")
-        if not sample:
-            return Gst.FlowReturn.ERROR
+        # Held for the whole callback so stop() cannot set the pipeline to NULL
+        # underneath a half-finished pull. stop() itself calls set_state(NULL)
+        # only after releasing this lock, which is what keeps that safe: the
+        # streaming thread never waits on set_state, so the two cannot deadlock.
+        with self._lock:
+            if not self.running:
+                return Gst.FlowReturn.OK
 
-        buffer = sample.get_buffer()
-        caps = sample.get_caps()
-        struct = caps.get_structure(0)
+            sample = sink.emit("pull-sample")
+            if not sample:
+                return Gst.FlowReturn.ERROR
 
-        width = struct.get_value("width")
-        height = struct.get_value("height")
+            buffer = sample.get_buffer()
+            caps = sample.get_caps()
+            struct = caps.get_structure(0)
 
-        success, map_info = buffer.map(Gst.MapFlags.READ)
-        if not success:
-            return Gst.FlowReturn.ERROR
+            width = struct.get_value("width")
+            height = struct.get_value("height")
 
-        img_data = numpy.frombuffer(map_info.data, dtype=numpy.uint8).reshape((height, width, 3))
-        frame_copy = img_data.copy()
+            success, map_info = buffer.map(Gst.MapFlags.READ)
+            if not success:
+                return Gst.FlowReturn.ERROR
 
-        buffer.unmap(map_info)
+            img_data = numpy.frombuffer(map_info.data, dtype=numpy.uint8).reshape((height, width, 3))
+            frame_copy = img_data.copy()
+
+            buffer.unmap(map_info)
 
         try:
             self._frame_q.put_nowait(frame_copy)
         except queue.Full:
-            self._frame_q.get_nowait()   # drop stale frame
-            self._frame_q.put_nowait(frame_copy)
+            # Drop the stale frame. Both calls can still fail: the consumer may
+            # drain the queue between put_nowait and get_nowait, and may fill it
+            # again before the second put. Raising here would abort the
+            # GStreamer streaming thread.
+            try:
+                self._frame_q.get_nowait()
+            except queue.Empty:
+                pass
+
+            try:
+                self._frame_q.put_nowait(frame_copy)
+            except queue.Full:
+                pass
+
         return Gst.FlowReturn.OK
 
     def start(self, srt_address: str):
@@ -51,31 +76,49 @@ class SRTStreamer:
             'tsdemux ! h264parse ! avdec_h264 ! videoconvert ! '
             'video/x-raw, format=BGR ! appsink name=app_sink emit-signals=true max-buffers=1 drop=true'
         )
-        self.pipeline = typing.cast(Gst.Pipeline, Gst.parse_launch(pipeline_str))
 
-        src = self.pipeline.get_by_name("src")
+        pipeline = typing.cast(Gst.Pipeline, Gst.parse_launch(pipeline_str))
+        if not pipeline:
+            raise ValueError("unable to build pipeline")
+
+        src = pipeline.get_by_name("src")
         if not src:
             raise ValueError("expected Element")
 
         uri = f"srt://{srt_address}?mode=caller&streamid=subscribe:{self.node_id}"
         src.set_property("uri", uri)
 
-        appsink = self.pipeline.get_by_name("app_sink")
+        appsink = pipeline.get_by_name("app_sink")
         if appsink is None:
             raise TypeError("appsink is none")
         appsink.connect("new-sample", self._on_new_sample)
 
-        self.running = True
-        self.pipeline.set_state(Gst.State.PLAYING)
+        # Publish the new pipeline only once it is fully wired, so a failed
+        # start() cannot leave a half-built pipeline visible to stop().
+        with self._lock:
+            self.running = True
+            self.pipeline = pipeline
 
-    def get_frame(self):
+        pipeline.set_state(Gst.State.PLAYING)
+
+    def get_frame(self, timeout: typing.Optional[float] = None):
+        """Return the next frame, or None if none arrived within timeout.
+
+        timeout=None returns immediately; a positive timeout blocks the calling
+        thread, which is what keeps frame_worker from spinning.
+        """
         try:
-            return self._frame_q.get_nowait()
+            return self._frame_q.get(timeout=timeout)
         except queue.Empty:
             return None
 
     def stop(self):
-        self.running = False
-        if self.pipeline:
-            self.pipeline.set_state(Gst.State.NULL)
+        with self._lock:
+            self.running = False
+            pipeline = self.pipeline
             self.pipeline = None
+
+        # Outside the lock: set_state(NULL) blocks until the streaming thread
+        # stops, and that thread takes this same lock in _on_new_sample.
+        if pipeline is not None:
+            pipeline.set_state(Gst.State.NULL)

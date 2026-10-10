@@ -36,7 +36,10 @@ class RouterResponse:
         code = obj.get("code", 0)
         return cls(code=code, result=obj.get("result"))
 
-ReplyFunc = typing.Callable[[RouterResponse], typing.Awaitable[None]]
+# A ReplyFunc returns a Coroutine, not a bare Awaitable, so a handler that
+# calls rep(...) without awaiting it is visible as a never-awaited coroutine
+# rather than silently producing no reply.
+ReplyFunc = typing.Callable[[RouterResponse], typing.Coroutine[typing.Any, typing.Any, None]]
 HandlerFunc = typing.Callable[[uuid.UUID, RouterRequest, ReplyFunc], typing.Coroutine[typing.Any, typing.Any, None]]
 
 class Handlers:

@@ -10,6 +10,12 @@ from . import handlers, siblings
 INTRODUCE_COMMAND = "introduce"
 BROADCAST_ROUTING_KEY = "rpc.broadcast"
 
+# A reply that arrives after recv() gave up would otherwise be mis-read as an
+# inbound request (its trackID is no longer pending), so trackIDs that were
+# abandoned are remembered for a while and the reply is dropped instead.
+ABANDONED_TTL = 60.0
+ABANDONED_MAX = 1024
+
 logger = logging.getLogger(__name__)
 
 def direct_routing_key(consumer_name: str) -> str:
@@ -49,6 +55,11 @@ class Router:
 
         self._known_track_id: dict[uuid.UUID, asyncio.Future[handlers.RouterResponse]] = {}
         self._lock = asyncio.Lock()
+
+        # Handler tasks are retained (and their exceptions retrieved) and
+        # abandoned trackIDs are remembered so a late reply is dropped.
+        self._inflight: set[asyncio.Task[None]] = set()
+        self._abandoned: dict[uuid.UUID, float] = {}
 
     async def introduce(self) -> None:
         commands = self._gh.available_commands()
@@ -107,6 +118,30 @@ class Router:
         finally:
             async with self._lock:
                 self._known_track_id.pop(track_id, None)
+                if fut.cancelled():
+                    # wait_for cancelled the future, so the reply either timed
+                    # out or this coroutine was cancelled. The peer may still
+                    # answer.
+                    self._abandon(track_id)
+
+    def _abandon(self, track_id: uuid.UUID) -> None:
+        """Remember a trackID whose recv() gave up. Caller holds self._lock."""
+        now = asyncio.get_running_loop().time()
+
+        if len(self._abandoned) >= ABANDONED_MAX:
+            cutoff = now - ABANDONED_TTL
+            for tid, at in list(self._abandoned.items()):
+                if at < cutoff:
+                    del self._abandoned[tid]
+
+            # Still full: drop the oldest half rather than growing without
+            # bound when a peer is slow but never answers.
+            if len(self._abandoned) >= ABANDONED_MAX:
+                oldest = sorted(self._abandoned.items(), key=lambda kv: kv[1])
+                for tid, _ in oldest[: len(oldest) // 2]:
+                    del self._abandoned[tid]
+
+        self._abandoned[track_id] = now
 
     async def listen(self) -> None:
         consumer_tag = await self._queue.consume(self._handle_delivery, no_ack=False)
@@ -131,6 +166,17 @@ class Router:
             fut = self._known_track_id.get(track_id)
 
         if fut is None:
+            async with self._lock:
+                abandoned = self._abandoned.pop(track_id, None)
+
+            if abandoned is not None:
+                # A reply to a send() that already timed out. Dispatching it as
+                # an inbound request would fail in the handler lookup and log a
+                # spurious error.
+                logger.debug("dropping late reply for abandoned trackID %s", track_id)
+                await message.ack()
+                return
+
             # No pending send() for this trackID -> inbound request, dispatch
             # to the handler.
             await self._handle_inbound_request(message, track_id)
@@ -185,9 +231,31 @@ class Router:
                 routing_key=reply_to,
             )
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             handler(track_id, handlers.RouterRequest(payload=message.body), rep)
         )
+        self._track_handler_task(task, message.type or "")
+
+    def _track_handler_task(self, task: asyncio.Task[None], command: str) -> None:
+        """Retain a handler task and log the exception it ends with.
+
+        The request is acked before the handler runs, so an exception here
+        means the caller never gets a reply and will time out. Without a
+        reference and a done-callback the traceback would only appear as
+        "Task exception was never retrieved" at interpreter shutdown.
+        """
+        self._inflight.add(task)
+
+        def _done(t: asyncio.Task[None]) -> None:
+            self._inflight.discard(t)
+            if t.cancelled():
+                return
+
+            exc = t.exception()
+            if exc is not None:
+                logger.error("handler %s failed: %s", command, exc, exc_info=exc)
+
+        task.add_done_callback(_done)
 
     async def _handle_reply(
         self, message: abc.AbstractIncomingMessage, fut: asyncio.Future[handlers.RouterResponse]
