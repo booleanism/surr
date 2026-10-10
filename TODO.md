@@ -233,8 +233,8 @@ the DESIGN.md §13 policy exactly — logs must carry context values
 Every item below was reproduced by reading the code (two of them empirically:
 E0 with a scratch SQLite/Go test, E1 with a `json.Marshal` probe). These are
 described in DESIGN.md "Known limitations" §A/§B and summarised in
-CLAUDE.md "Known landmines". E0 and E1 block the whole media path and the
-whole error-reporting path respectively.
+AGENTS.md "Invariants". E0 and E1 block the whole media path and the whole
+error-reporting path respectively.
 
 ### ✅ Compile regression (fixed): the tree did not build
 

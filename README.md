@@ -235,7 +235,7 @@ that ID is what goes into the `tx --sink` streamid.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — services, data flow, protocol, storage, service internals.
 - [DESIGN.md](DESIGN.md) — design rationale, trade-offs, known limitations, invariants.
 - [TODO.md](TODO.md) — staged work (nodes refactor, analytics service, logging) and verified defects.
-- [CLAUDE.md](CLAUDE.md) — orientation for AI coding assistants working in this repo.
+- [AGENTS.md](AGENTS.md) — orientation for AI coding agents working in this repo.
 
 ## License
 
