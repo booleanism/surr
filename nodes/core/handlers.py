@@ -6,7 +6,7 @@ import base64
 
 Command = str
 
-def json_serializer(obj):
+def json_serializer(obj: typing.Any) -> str:
     if isinstance(obj, bytes):
         return base64.b64encode(obj).decode('utf-8')
     return str(obj)

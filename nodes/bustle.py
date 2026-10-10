@@ -28,7 +28,7 @@ logger = logging.getLogger("bustle")
 
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst # pyright: ignore[reportMissingModuleSource]
+from gi.repository import Gst
 
 DEFAULT_NODE_ID = "50154422-fd3b-4cf0-a761-908fcbe98a1e"
 DEFAULT_NODE_NAME = "bustle0"

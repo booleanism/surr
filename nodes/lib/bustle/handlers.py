@@ -12,13 +12,6 @@ from core import pipeline
 from lib.bustle.analytics import detail_line_chart_pipeline, summary_bar_chart_pipeline
 from . import processing
 
-class Pipeline(typing.Protocol):
-    def stop(self) -> None:
-        ...
-
-    def start(self, srt_address: str) -> None:
-        ...
-
 @dataclass
 class AnalyticsParams:
     time_cluster: str
@@ -32,7 +25,7 @@ class BustleHandlers:
     _model: YOLO
     _chosen_classes: list[int]
     _async_q: asyncio.Queue[dict[str, int]]
-    _coll: collection.Collection
+    _coll: collection.Collection[dict[str, typing.Any]]
     _node_id: uuid.UUID
     _worker_task: typing.Optional[asyncio.Task[None]] = None
 
@@ -45,7 +38,7 @@ class BustleHandlers:
         model: YOLO,
         chosen_classes: list[int],
         async_q: asyncio.Queue[dict[str, int]],
-        coll: collection.Collection
+        coll: collection.Collection[dict[str, typing.Any]]
     ) -> None:
         cls._pipeline = pipeline
         cls._model = model

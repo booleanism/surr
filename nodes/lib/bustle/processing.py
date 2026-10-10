@@ -25,7 +25,7 @@ async def normalizer(
     interval: float, 
     node_id: uuid.UUID, 
     node_type: str,
-    coll: collection.Collection
+    coll: collection.Collection[dict[str, typing.Any]]
 ):
     ticker_gen = ticker.ticker(interval)
     async for _ in ticker_gen:

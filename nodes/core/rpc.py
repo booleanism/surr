@@ -2,13 +2,31 @@ from __future__ import annotations
 import asyncio
 import logging
 import typing
+import uuid
 
-from . import handlers, router, siblings
+from . import handlers, siblings
 
 logger = logging.getLogger(__name__)
 
+class RouterLike(typing.Protocol):
+    """The slice of ``router.Router`` that the RPC helper drives.
+
+    Narrower than ``router.Router`` on purpose: the retry and failover logic
+    only sends a request and awaits its reply, and typing it against that
+    interface lets the tests drive it with a scripted stand-in that never
+    touches a broker.
+    """
+
+    async def send(
+        self, command: handlers.Command, payload: bytes, sibling_name: siblings.SiblingName
+    ) -> uuid.UUID: ...
+
+    async def recv(
+        self, track_id: uuid.UUID, timeout: typing.Optional[float] = None
+    ) -> handlers.RouterResponse: ...
+
 async def call(
-    r: router.Router,
+    r: RouterLike,
     sibs: siblings.Siblings,
     command: handlers.Command,
     payload: bytes,
@@ -37,7 +55,7 @@ async def call(
 
 
 async def _call_once(
-    r: router.Router,
+    r: RouterLike,
     sibs: siblings.Siblings,
     command: handlers.Command,
     payload: bytes,

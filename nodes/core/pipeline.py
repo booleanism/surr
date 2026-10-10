@@ -16,7 +16,7 @@ class SRTStreamer:
         self.node_id = node_id
         self.pipeline = None
         self.running = False
-        self._frame_q: queue.Queue = queue.Queue(maxsize=1)
+        self._frame_q: queue.Queue[numpy.ndarray] = queue.Queue(maxsize=1)
         # Guards pipeline/running. The GStreamer streaming thread runs
         # _on_new_sample concurrently with start()/stop() on the event loop, and
         # without this the callback could touch a pipeline that stop() already
@@ -103,8 +103,15 @@ class SRTStreamer:
         img_data = numpy.frombuffer(map_info.data, dtype=numpy.uint8)
 
         info = GstVideo.VideoInfo.new_from_caps(caps)
-        stride = info.stride[0] if info.stride[0] > 0 else width * 3
-        offset = info.offset[0]
+        if info is None:
+            # new_from_caps returns None when the caps do not describe a video
+            # format. The appsink caps always do, but packed rows are the only
+            # assumption available if it ever does not.
+            stride, offset = width * 3, 0
+        else:
+            stride = info.stride[0] if info.stride[0] > 0 else width * 3
+            offset = info.offset[0]
+
         if offset + stride * (height - 1) + width * 3 > img_data.size:
             # The caps-derived layout does not fit the mapped buffer, so the
             # producer used one we cannot see (a GstVideoMeta override, which
