@@ -7,8 +7,9 @@ import numpy
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstApp', '1.0')
+gi.require_version('GstVideo', '1.0')
 
-from gi.repository import Gst
+from gi.repository import Gst, GstVideo
 
 class SRTStreamer:
     def __init__(self, node_id: uuid.UUID):
@@ -46,13 +47,19 @@ class SRTStreamer:
             if not success:
                 return Gst.FlowReturn.ERROR
 
-            img_data = numpy.frombuffer(map_info.data, dtype=numpy.uint8).reshape((height, width, 3))
-            frame_copy = img_data.copy()
+            try:
+                frame = self._frame_view(map_info, caps, width, height)
+            finally:
+                # Safe even though `frame` points at this data: reading
+                # MapInfo.data produced a Python bytes object that owns its own
+                # memory, so it outlives the unmap (see _frame_view).
+                buffer.unmap(map_info)
 
-            buffer.unmap(map_info)
+            if frame is None:
+                return Gst.FlowReturn.ERROR
 
         try:
-            self._frame_q.put_nowait(frame_copy)
+            self._frame_q.put_nowait(frame)
         except queue.Full:
             # Drop the stale frame. Both calls can still fail: the consumer may
             # drain the queue between put_nowait and get_nowait, and may fill it
@@ -64,11 +71,56 @@ class SRTStreamer:
                 pass
 
             try:
-                self._frame_q.put_nowait(frame_copy)
+                self._frame_q.put_nowait(frame)
             except queue.Full:
                 pass
 
         return Gst.FlowReturn.OK
+
+    @staticmethod
+    def _frame_view(map_info, caps, width: int, height: int):
+        """Return a numpy view over the mapped frame, with no extra copy.
+
+        PyGObject's MapInfo.data is a Python `bytes`, not a memoryview: the
+        attribute access itself performs one memcpy out of the buffer, and the
+        result owns its memory and outlives `unmap`. numpy.frombuffer only
+        wraps that object, so the `.copy()` this used to do was a second full
+        frame memcpy (~420us at 1280x720) on the GStreamer streaming thread,
+        protecting nothing.
+
+        The array is read-only, being backed by an immutable bytes.
+        ultralytics' LetterBox accepts that: it resizes into a fresh array.
+
+        Rows are strided rather than reshaped. videoconvert pads each row to an
+        alignment, so the stride is not `width * 3` whenever a row is not
+        4-byte aligned (1279 wide -> stride 3840, not 3837), and reshaping
+        would skew the image by the accumulated padding.
+
+        Returns None when the mapped buffer is too small for the layout the
+        caps describe, so the caller can fail the sample instead of reading
+        past the end.
+        """
+        img_data = numpy.frombuffer(map_info.data, dtype=numpy.uint8)
+
+        info = GstVideo.VideoInfo.new_from_caps(caps)
+        stride = info.stride[0] if info.stride[0] > 0 else width * 3
+        offset = info.offset[0]
+        if offset + stride * (height - 1) + width * 3 > img_data.size:
+            # The caps-derived layout does not fit the mapped buffer, so the
+            # producer used one we cannot see (a GstVideoMeta override, which
+            # PyGObject does not expose). Tightly packed rows are the only
+            # assumption left that cannot read past the end.
+            stride, offset = width * 3, 0
+        if offset + stride * (height - 1) + width * 3 > img_data.size:
+            return None
+
+        return numpy.ndarray(
+            (height, width, 3),
+            dtype=numpy.uint8,
+            buffer=img_data,
+            offset=offset,
+            strides=(stride, 3, 1),
+        )
 
     def start(self, srt_address: str):
         pipeline_str = (
