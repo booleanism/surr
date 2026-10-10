@@ -6,6 +6,22 @@ ARCHITECTURE.md "Planned evolution", DESIGN.md §11 (analytics service),
 also writes the query; nodes/core stays node-type-agnostic; the wire stays
 Go/Python compatible at every stage.
 
+Status of the three workstreams: **C (logging) is done**; A and B are open.
+Neither A nor B exists on `main`. Prior art for both lives outside it: the
+abandoned `feat/analytics-service` branch (surviving only as dangling commits
+and `refs/stash`) contains a first `analytics/` module, and
+`refs/remotes/gitea/main` commit `66e308b "nodes: pythonic refactor"`
+implements roughly section A (`nodes/core/{cli,config,detector,registry,service,storage,stream,worker}.py`,
+`nodes/node.py`, `nodes/workers/bustle/*`, deleting `nodes/lib/bustle/*`).
+Treat both as prior art to review, not as landed code.
+
+**Section E is different**: it tracks defects found by reading the code during
+a full review pass, then re-checked against the working tree. Its checkboxes
+are **fix status** (`[x]` = fixed), not "verified" — every item, fixed or not,
+was reproduced from the source. E0–E5 are now fixed; E6–E11 are open. All of
+these fixes are **uncommitted** on top of `dc83aad`; line numbers inside `[x]`
+items refer to the revision they were found in, not to the fixed tree.
+
 ## A. Nodes refactor (type-agnostic runtime) — DESIGN.md §12
 
 Ordered stages; each lands independently and is wire-compatible.
@@ -22,7 +38,7 @@ Ordered stages; each lands independently and is wire-compatible.
   - [ ] Golden-file test: one captured to_json() output asserted byte-for-byte
         so accidental wire changes fail CI
 - [ ] A1. De-singleton BustleHandlers (lib/bustle/handlers.py)
-  - [ ] Class attributes + setup() classmethod → __init__ instance deps
+  - [ ] Class attributes + setup() classmethod → `__init__` instance deps
         (node_id, pipeline, model, chosen_classes, async_q, coll)
   - [ ] register(self, handlers_mgr) registers bound handlers
   - [ ] Command names and payloads stay byte-identical
@@ -161,8 +177,12 @@ the DESIGN.md §13 policy exactly — logs must carry context values
 - [x] C7. Remove all remaining fmt.Printf INFO:/ERRO:/WARN: prints across
       mains and internals — verified with go build, go vet, gofumpt and
       golangci-lint (make lint: 0 issues in every module)
-- [x] C8. (folds into A2) bustle.py print()s → stdlib logging, matching the
-      level semantics of core/ modules (Python side keeps stdlib logging)
+- [x] C8. bustle.py print()s → stdlib logging, matching the level semantics of
+      core/ modules (Python side keeps stdlib logging). **Correction:** this did
+      NOT fold into A2 — it shipped as a standalone module,
+      `nodes/core/logging_setup.py` (imported at `bustle.py:16`, called at
+      `bustle.py:208`), while A2 is still open. `core/*.py` still use
+      module-level loggers rather than the configured root logger.
 
 ## D. Standalone fixes (unrelated to A/B, small)
 
@@ -178,17 +198,413 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       and committed (e3ca2db)
 - [ ] Replace the `restart = restart || !restart` idiom — it always
       evaluates to true after the first pass, i.e. it is an obfuscated
-      `restart = true` (rx/cmd/rx/main.go:185,209,233,257;
-      hub/cmd/hub/main.go:160,181,236;
-      subscriptions/cmd/subscriptions/main.go:135). Keep the behavior
+      `restart = true`. Exact sites (verified): `rx/cmd/rx/main.go:198`
+      (a single `listen()` helper — the four old rx sites were consolidated by
+      commit 4efe154), `hub/cmd/hub/main.go:157,178,233`,
+      `subscriptions/cmd/subscriptions/main.go:132`. Keep the behavior
       (log "restarting <loop> listen" on every re-entry after the first,
       since any re-entry follows an error), just make it readable:
       `restart = true` after the first iteration, or track a `first`
       flag and log when `!first`. No semantic change.
-- [x] POST /subscriptions/remove returns 501 — implemented (handler decodes
-      the subscription id from the auth'd user, calls the remove usecase
-      over the broker; 400 on nil id). Note: subscription ownership is not
-      enforced yet — any authenticated user can remove any subscription.
+- [x] POST /subscriptions/remove used to return 501 — implemented
+      (`hub/internal/protocols/http/handlers/subscriptions.go:75`: decodes the
+      subscription id, calls the remove usecase over the broker; 400 on nil id).
+      Note: subscription ownership is still not enforced — any authenticated
+      user can remove any subscription (TODO.md E9).
 - [ ] Go test suite (make lint is the only gate today)
 - [ ] PostgreSQL support (README TODO)
 - [ ] Analytics presentation layer (README TODO)
+
+## E. Verified defects (full code review pass)
+
+Every item below was reproduced by reading the code (two of them empirically:
+E0 with a scratch SQLite/Go test, E1 with a `json.Marshal` probe). These are
+described in DESIGN.md "Known limitations" §A/§B and summarised in
+CLAUDE.md "Known landmines". E0 and E1 block the whole media path and the
+whole error-reporting path respectively.
+
+### ✅ Compile regression (fixed): the tree did not build
+
+- [x] `rabbitmq.NewRouter` gained a fifth parameter `run RunTask`
+      (`internal/protocols/rabbitmq/router.go:84`, used at `:199-205` to send
+      deliveries through the goroutines pool instead of an unbounded `go`),
+      and the three call sites were left behind. All three now pass a pool:
+      `hub/cmd/hub/main.go:103`, `rx/cmd/rx/main.go:90`,
+      `subscriptions/cmd/subscriptions/main.go:88`. Two follow-on edits were
+      needed: rx builds the pool *before* the router (`rx/cmd/rx/main.go:89`),
+      and subscriptions had no pool at all, so it grew a `--goroutines` flag
+      (`subscriptions/cmd/subscriptions/cmdline.go:35-41`,
+      `subscriptions/cmd/subscriptions/main.go:87`). `go build ./...` is now
+      clean in all five modules.
+
+**Status of the E0–E5 fixes**: E0–E5 are fixed. Two release blockers remain,
+and neither is code: none of this is committed, and the E1 regression tests
+(`internal/protocols/handlers_test.go`, the two handler-package tests,
+`internal/backoff/backoff_test.go`) are the only coverage — E2–E5 have none.
+
+### E0. Subscriptions UUID storage-class mismatch — data plane dead (CRITICAL)
+
+- [x] `subscriptions/internal/db/sqlite/subscription.go:60,64` bind
+      `uuid.UUID` (→ TEXT) on insert; `:123`, `:157`, `:168` bind `ID[:]`
+      (→ BLOB) on select. SQLite compares storage classes → zero rows.
+- [x] Same class at `hub/internal/db/sqlite/node.go:68,71`
+      (`SelectAllNodesByID` binds `n.ID` TEXT against BLOB rows).
+- [x] Effect: rx ingress rejects every publisher ("no subscribed nodes"),
+      rx egress rejects every node ("no unique subscription"), hub analytics
+      ownership check fails.
+- [x] Fix: bind `uuid[:]` on both sides (BLOBs are the documented intent,
+      and DESIGN invariant 10 now records this). Applied across the package —
+      `:29` (`SelectSubscriptionsByUser`, now `userID[:]`), `:60,64` (insert),
+      `:113,116` (`DeleteSubscriptions`), `:123`, `:168` all bind `ID[:]`.
+      No regression test was added (the repo has no test files at all), so a
+      future edit can silently reintroduce the mismatch.
+
+### E1. RPC error replies are never published (CRITICAL)
+
+- [x] `RouterResponse.Result` is `json.RawMessage`; handlers assign
+      `[]byte(err.Error())`, so `json.Marshal` fails with
+      `invalid character 's' looking for beginning of value` and the error is
+      discarded (`_ = rep(...)`). Callers time out instead of getting -1/-2/-3.
+- [x] Sites: `hub/internal/protocols/rabbitmq/handlers/node.go:72,81,88` and
+      ~18 in `subscriptions/internal/protocols/rabbitmq/handlers/subscription.go`.
+- [x] Consequence: `nodes.add` failures become a permanent 1 Hz retry loop
+      (`nodes/core/rpc.py`, `retries=None`), with no diagnostic on either side.
+- [ ] Fix: build the error `Result` as valid JSON (e.g.
+      `json.RawMessage(strconv.Quote(msg))`). **Applied and verified** — all 27
+      `Result:` assignments across `hub/internal/protocols/rabbitmq/handlers/node.go`
+      (4) and `subscriptions/internal/protocols/rabbitmq/handlers/subscription.go`
+      (23) are now either `json.RawMessage(strconv.Quote(err.Error()))` or a
+      marshalled success payload; no `Result: []byte(...)` remains anywhere.
+      Still open: the "test that marshals every non-zero-code reply" was not
+      written (no test files in the repo).
+
+### E2. RPC plumbing (HIGH)
+
+- [x] `call()` double-send on a cap-1 channel: `res <- err` then
+      unconditional `res <- nil` → the closure blocks forever, `done` never
+      closes, `call()` blocks until ctx cancellation and leaks a pool worker.
+      `hub/internal/adapter/rabbitmq/nodes.go:99-106`,
+      `hub/internal/adapter/rabbitmq/subscription.go:151-158`,
+      `rx/internal/adapter/rabbitmq/subscriptions.go:109-131`.
+      **Fixed**: each closure now `return`s after `res <- err` and declares
+      `err :=` locally, so the second send is gone. The unbuffered-channel
+      deadlock that the first attempt introduced is also gone —
+      `hub/internal/adapter/rabbitmq/subscription.go:106` is back to
+      `make(chan error, 1)`, matching `hub/internal/adapter/rabbitmq/nodes.go:57`
+      and `rx/internal/adapter/rabbitmq/subscriptions.go:66`.
+- [x] Same closures race on the captured `err`/`resp` variables — fixed: the
+      closures now declare `err :=` locally, shadowing the outer variable. The
+      early `return` on the Recv-error path also skipped `close(done)`, so
+      `call()` waited for ctx cancellation instead of returning the real error.
+      **Resolved** by removing the `done` channel outright: `call()` now
+      `select`s on an internal `recvErr := make(chan error, 1)` and
+      `ctx.Done()`, so the Recv error is returned as-is.
+- [x] `hub/internal/adapter/rabbitmq/subscription.go:91-137`: **fixed.** The
+      shared `res` channel before the sibling loop is gone — a channel is now
+      created per sibling — so a straggler reply can no longer be read as the
+      next sibling's result. A non-zero reply code `continue`s to the next
+      candidate, as does a payload-unmarshal failure, and so do the two
+      hard-error paths (a `call` error and a receive error): every failure is
+      appended to an `errs` slice and the loop ends with
+      `return errors.Join(errs...)`. That is what "try every candidate" means
+      in `nodes/core/rpc.py`. The same rewrite landed in
+      `rx/internal/adapter/rabbitmq/subscriptions.go`.
+- [x] `internal/protocols/rabbitmq/router.go`: **fixed.** The `track` struct
+      and its `done` flag are gone. `knownTrackID` is now
+      `map[uuid.UUID]chan protocols.RouterResponse` with a **buffered** channel
+      (cap 1), so `handleDelivery` hands the reply over without needing a
+      receiver, and `Recv` does `defer r.Forget(trackID)`, which releases the
+      entry on the success, timeout and cancellation paths alike. The `if c.done`
+      branch that returned without `Ack`/`Nack` is gone; a reply that arrives
+      after the caller gave up is `Nack`ed without requeue and logged. The same
+      change removed the leak where every successful RPC left an entry behind.
+- [x] `hub/internal/protocols/rabbitmq/handlers/node.go:85-96` is missing a
+      `return` after the -3 reply → two replies per request (second one
+      `Code: 0`).
+- [x] `internal/protocols/handlers.go:88-104` `AvailableCommand` reads the map
+      without `l.mu`, racing the 1s introduce loop against a late `Set`.
+- [x] `internal/protocols/handlers.go:30` `GetBytes()` had no call sites; the
+      base64 convention survived only because `json.Unmarshal` into `*[]byte`
+      happens to decode Python's JSON string. **Fixed** by making the contract
+      explicit and giving failures their own accessor: reply codes are now
+      named constants (`CodeSuccess`, `CodeDecodePayload`, `CodeDomain`,
+      `CodeMarshalReply`), replies are built by `ResultResponse`/
+      `ErrorResponse` instead of 27 hand-written `RawMessage(strconv.Quote(...))`
+      sites, and the three adapters read failures through the new
+      `RouterResponse.ErrorMessage()` — `GetBytes()` on a short ASCII message
+      such as `internal` returns base64 garbage, which is exactly what the
+      adapters used to log.
+- [x] Ack semantics diverge: Go `Nack(false, true)` requeues on shutdown,
+      Python always `nack(requeue=False)`.
+
+### E3. Shutdown / lifecycle (HIGH)
+
+- [x] `internal/logging/cleanups.go:28-46`: `Run` copies `pending` and sets it
+      nil before executing, so a `Register` concurrent with the drain is
+      silently dropped — the doc comment claims the opposite.
+- [x] `rx/cmd/rx/main.go:98-104,181-198`: **fixed.** Both sockets are
+      registered with `cleanups`, so SIGTERM closes them, and the blocking
+      `Listen`/`Accept` loop is now cancellable: `rx/internal/protocols/srt/listen.go`
+      runs `sock.Listen` and the accept loop on their own goroutine and closes
+      the socket when ctx is cancelled — closing it is the only thing that
+      wakes `srt_epoll_wait`, which parks with an infinite timeout. Both
+      `ingress.Listen` and `egress.Listen` are now one call to that helper. The
+      old `routine`/`startRoutines`/`listen` restart helpers in
+      `rx/cmd/rx/main.go` are gone, replaced by `internal/restart` (see E4).
+- [x] `subscriptions/cmd/subscriptions/main.go:73-76` + `:58`: `run()` returns
+      on a fatal setup error without cancelling ctx, so the `<-cleanupDone` at
+      `:58` blocks forever (hub's `main` does call `cancel()`).
+- [x] `nodes/bustle.py:351-379`: **fixed.** `listen_task` is cancelled in the
+      `finally` unconditionally, after the `nodes.remove` attempt, so the
+      consumer is stopped even when registration never completed — otherwise
+      it stayed parked on `await asyncio.Future()` while
+      `async with connection:` closed the channel under it.
+- [x] `nodes/bustle.py:323-326`: **fixed, with a correction.** `intro_task`
+      *is* in the `asyncio.wait` set (a crashed introduce loop is re-raised),
+      and `register_task` is deliberately excluded because its completion is
+      the success path — but its failure was invisible, so it now has a
+      done-callback that logs `node registration failed`. The shutdown
+      `gather(..., return_exceptions=True)` no longer swallows: each result is
+      inspected and a non-`CancelledError` exception is logged with its
+      traceback.
+
+### E4. Restart loops / reconnect (HIGH)
+
+- [x] No backoff and no reconnect anywhere: **fixed.** Three new pieces,
+      wired into all three broker services:
+      - `internal/backoff` — `Backoff` with `DefaultBase = 250ms`,
+        `DefaultMax = 30s`, `Next`/`Reset`/`Wait(ctx)`. The jitter is
+        deterministic (a prime multiplier), so no `math/rand` and no gosec
+        exemption; it is clamped back under the maximum.
+      - `internal/restart.Loop(ctx, name, f)` — the one restart loop all
+        routines use now. It logs each failure, waits with backoff before
+        re-entering, and resets the backoff when an attempt stayed up for at
+        least `DefaultMax`, so a routine that survived a while does not inherit
+        the previous outage's delay. This replaced three hand-rolled spins in
+        `hub/cmd/hub/main.go` and rx's `startRoutines`/`listen` helpers, and
+        subscriptions' router loop.
+      - `internal/protocols/rabbitmq/supervisor.go` — `Supervisor.Watch(ctx)`
+        blocks on `conn.NotifyClose(...)` and, when the broker drops the
+        connection, redials with backoff, declares a fresh queue and installs
+        it via the new `router.ReplaceChannel`. `router`'s channel is now
+        behind a `RWMutex` with `channel()`/`queue()` accessors so every
+        publish and consume uses the current one. Broker URIs in these logs go
+        through `logging.RedactURL`.
+      Also fixed on the way: subscriptions never started its goroutines pool
+      (`goPool.Listen` was called only by hub and rx), so every inbound RPC sat
+      in the pool's queue, unexecuted, until the channel filled.
+- [x] `internal/pools/goroutines.go:32` `for range p.n - 1` underflows when
+      `n == 0` (uint32) → ~4.29B goroutines with `--goroutines 0`.
+
+### E5. SQLite / storage (HIGH)
+
+- [x] `subscriptions/internal/db/sqlite/subscription.go:45-82` +
+      `internal/db/db.go:37-67`: **fixed.** `BeginTx` now takes a
+      single-slot gate (`t.gate`) before swapping `DB`, so two overlapping
+      callers each get their own `*sql.Tx` instead of the second one executing
+      on the first one's transaction; the returned release function is
+      idempotent (`sync.Once`) and gives the gate back, so a caller that
+      forgets it blocks the next transaction rather than corrupting it.
+- [x] `DeleteSubscriptions` (`:107-120`): **fixed.** It deletes from
+      `subscribed_nodes` first and then from `subscriptions`, in one
+      transaction, because the schema's `ON DELETE CASCADE` only fires when
+      `PRAGMA foreign_keys` is enabled on the connection and the services never
+      set it. The empty-list panic (`subsID[:len(subsID)-1]`) is gone: an empty
+      list is now rejected up front with `ErrNothingToWrite`.
+- [x] Empty node lists produce invalid SQL (`:67-77`): **fixed** — the second
+      statement is skipped when a subscription has no nodes, since a
+      subscription with zero nodes is legitimate.
+- [x] `scanRows` silently truncates at `cap(*buf)` (`:67-77`): **fixed** — it
+      now returns `ErrBufferFull` naming the row count, so a truncated read can
+      no longer be mistaken for a small result set.
+- [x] `hub/internal/db/sqlite/node.go:63-71` `SelectAllNodesByID`: **fixed by
+      removal** — the function is gone (it was unused, and its replacement is
+      the `SelectAllNodes` that does not take an ID list at all).
+- [x] `internal/db/db.go:15-17`: **fixed.** The `TX` interface declares
+      `BeginTx(ctx, opts) (func(), error)`, matching `*Transaction.BeginTx`.
+- [x] `hub/internal/usecases/auth/refresh.go:37-62`: **fixed.**
+      `SaveRefreshToken` sweeps expired entries at most once per
+      `sweepInterval` (1m), and `ValidateRefreshToken` still deletes the token
+      it just rejected; the store no longer grows without bound.
+- [x] The migrations are applied out-of-band with the golang-migrate CLI, so a
+      fresh checkout has no `hub.db`/`subscriptions.db` schema and nothing in
+      the startup path enforced it. **Fixed by failing fast**:
+      `internal/db/schema.go` adds `VerifySchema(ctx, db, migrationsPath, tables...)`,
+      called right after the connection is opened by `hub`
+      (`schema_migrations`, `nodes`, `users`) and `subscriptions`
+      (`subscriptions`, `subscribed_nodes`). A missing table produces one error
+      naming the tables and the exact `migrate ... up` command, instead of the
+      previous behaviour — a service that started happily and then failed one
+      "no such table" at a time. The table check queries `sqlite_master` with a
+      bound parameter, so no table name is ever interpolated into SQL.
+      Embedding and running the migrations at startup remains an option, but it
+      would have to reimplement golang-migrate's `schema_migrations`
+      bookkeeping (version + dirty flag) to stay compatible with the CLI.
+
+### E6. tx / DASH (HIGH)
+
+- [ ] `tx/internal/streaming/stream.go:61-63` `block()` busy-spins
+      (`for s.c.Load() > 1`), and `ref()` increments the same counter, so two
+      concurrent DASH requests livelock the server at 100% CPU. Replace the
+      atomic counter protocol with a `sync.RWMutex`.
+- [ ] `tx/internal/streaming/stream.go:23-57` + `dash.go:25-27`: `d` is
+      mutated with no lock; `AvailStream` writes it directly → concurrent map
+      read/write panic.
+- [ ] `tx/internal/streaming/dash.go:76-90` (and `:56-67`): path traversal —
+      `AddStream`/`RemoveStream` join an unvalidated request-body name onto the
+      recording dir (`os.MkdirAll`/`os.Create`/`os.Remove`).
+- [ ] `tx/internal/core/coder/h264enc.go:39` vs `h264enc_va.go:11`: `-tags va`
+      does not compile (uint32 bitrate passed to a uint64 parameter).
+- [ ] `tx/cmd/tx/pipeline.go:46,54,62`: three goroutines assign the shared
+      named return `err` → data race and lost errors.
+- [ ] `tx/cmd/tx/pipeline.go:35-39`: the recording pipeline is built even with
+      `--recording 0,0,0` (only the specs are nulled) — recording cannot be
+      disabled.
+- [ ] `tx/cmd/tx/main.go:239`: `tx run` aborts if the DASH server is not
+      already up, so relay/recording cannot start without a separate
+      `tx serve`.
+- [ ] `tx/cmd/tx/pipeline.go:124-136`: the lazy audio pad probe emits EOS on
+      every buffer and re-arms on failure → recording can be EOS'd early.
+- [ ] `tx/internal/streaming/dash.go:15-27`: `AvailStream` is never called, so
+      recorded streams are invisible after a `tx serve` restart.
+- [ ] `tx/internal/server/dash/dash.go:94,113`: `err = t.Execute(...)` writes
+      the enclosing function's `err` from request closures → race.
+- [ ] `tx/internal/core/muxer/muxer.go` `req()` leaks the request pad on link
+      failure (dashsink2's equivalent releases it).
+- [ ] `tx/internal/core/coder/h264enc.go:26-45`: only videoscale + a
+      width/height capsfilter (no videoconvert/format/framerate/PAR) and no
+      `config-interval` on h264parse → non-I420 sources fail to negotiate and
+      late-joining SRT nodes may never see SPS/PPS.
+- [ ] `tx/internal/sink/srt.go:20-24`: `auto-reconnect:false` + cancel-on-bus
+      error kills tx when rx restarts; property-map iteration makes `uri` vs
+      `mode` application order nondeterministic.
+- [ ] Dead code: `tx/internal/core/muxer/qtmux.go`,
+      `tx/internal/sink/autovideosink.go`; `rtpm4adepay.go` filename typo.
+
+### E7. rx data plane (MEDIUM)
+
+- [ ] `rx/internal/protocols/srt/broadcast.go:54`: subscriber cap counts
+      subscription maps and compares with `==` — one subscription admits
+      unlimited nodes; the (max+1)-th subscription is rejected.
+- [ ] `broadcast.go:60-64`: a reconnecting node's channel is overwritten in
+      the map but never closed → the previous `handleCaller` blocks forever on
+      `range ch`.
+- [ ] `broadcast.go:50-66` + `egress.go:169`: `Subscribe` after `Close(subID)`
+      recreates an orphan topic that is never closed or fed.
+- [ ] `Unsubscribe` closes the channel while holding the registry mutex.
+- [ ] `ingress.go:66-103` / `egress.go:65-105`: blocking broker RPC inside the
+      SRT handshake callback stalls handshakes when the pool is saturated;
+      pending maps are keyed by peer address with no TTL and leak.
+- [ ] `egress.go:184`: blocking `sock.Write` with no deadline → a stalled
+      subscriber wedges the goroutine, pins pooled buffers, and its deferred
+      `Unsubscribe` never runs.
+- [ ] `ingress.go:150-186`: ctx cancellation does not stop a blocked
+      `sock.Read` → `Close(subID)` and `StopSink` are skipped, so nodes keep
+      streaming after rx shutdown.
+- [ ] `ingress.go:66-103` never sets an SRT rejection reason (egress does).
+- [ ] `rx/internal/adapter/rabbitmq/nodes.go`: `StartSink`/`StopSink` always
+      return nil (per-node failures only logged) and require exactly one
+      sibling.
+
+### E8. Python node runtime (HIGH)
+
+- [ ] `nodes/lib/bustle/handlers.py:112`: missing `await rep(...)` on the
+      invalid-source-address path → the reply is never scheduled and rx's
+      caller blocks forever. Type `ReplyFunc` as returning a `Coroutine` so
+      Pyright catches this.
+- [ ] `nodes/core/router.py:170,188`: `ack()` before dispatching the handler as
+      a fire-and-forget task (reference dropped, no done-callback) → a crash
+      between ack and reply loses the request silently, and handler exceptions
+      are never retrieved.
+- [ ] `nodes/lib/bustle/processing.py:67-70`: frame-worker busy-wait at 100%
+      CPU (`get_frame()` is non-blocking) — same item as A3, listed here for
+      the standalone fix.
+- [ ] `nodes/lib/bustle/handlers.py:102,116`: blocking GStreamer state changes
+      on the event loop (`set_state(NULL)` on an srtsrc with
+      `poll-timeout=10000` can block for seconds) → no introduce, no replies.
+- [ ] `nodes/lib/bustle/handlers.py:115-116`: `_start_sink` never stops the old
+      pipeline → leaked pipeline, two appsink callbacks feeding one queue.
+- [ ] `nodes/core/pipeline.py:17,68,77-81`: no synchronization between
+      `start()`/`stop()` and `_on_new_sample`; the callback never checks
+      `running`.
+- [ ] `nodes/core/pipeline.py:41-45`: `queue.Full` → `get_nowait()` can raise
+      `queue.Empty` on the GStreamer thread.
+- [ ] `nodes/lib/bustle/processing.py:57`: no error handling around
+      `insert_one` → a transient pymongo error exits the whole node process;
+      `frame_worker` likewise has none (dies silently while `running` stays
+      true).
+- [ ] `nodes/core/router.py:50,132-139`: a late reply after a `recv` timeout is
+      mis-dispatched as an inbound request (the trackID is popped in `finally`).
+- [ ] `nodes/core/ticker.py`: `interval <= 0` degenerates to a `call_later(0)`
+      hot loop.
+- [ ] `nodes/lib/bustle/handlers.py:79-80`: blocking pymongo aggregation on the
+      event loop (up to 5 weeks of timeseries).
+- [ ] `nodes/lib/bustle/processing.py:39`: naive local `datetime.now()` in a
+      timeseries `timeField` with seconds granularity → buckets shift when
+      TZ != UTC; zero-detection classes are omitted instead of zero-filled.
+- [ ] `nodes/bustle.py:222-227`: Mongo init failure logs and returns → exit
+      code 0 for a dead node; `:385-389` `except KeyboardInterrupt` is dead
+      code; `pymongo.MongoClient` is never closed; collection creation is a
+      check-then-create race.
+
+### E9. Security (HIGH)
+
+- [ ] `hub/cmd/hub/cmdline.go:56`: committed default JWT secret → anyone with
+      the repo can forge tokens when `JWT_SECRET` is unset.
+- [ ] `hub/internal/usecases/auth/authen.go:94-96`: any HMAC algorithm
+      accepted (HS384/HS512) and the issuer is not verified.
+- [ ] `hub/internal/protocols/http/handlers/auth.go:54-72`: no rate limiting
+      on signin and the email is logged on failure.
+- [ ] No ownership check on subscription removal
+      (`hub/internal/usecases/subscription.go:57` + subscriptions handler).
+- [ ] `hub/cmd/hub/main.go:209-213`: only `ReadHeaderTimeout` set (no
+      Read/Write/IdleTimeout) and no `http.MaxBytesReader` on any handler →
+      slowloris / large-body DoS.
+- [ ] `hub/internal/protocols/http/handlers/auth.go:93,138,167`: `Secure: true`
+      cookie with the default plain-HTTP `127.0.0.1:9000` bind breaks local
+      dev; logout uses `SameSite=Strict` while signin/refresh use `Lax`.
+- [ ] `tx/internal/server/dash/dash.go:177,211`: `POST /stream` and
+      `DELETE /stream` are unauthenticated (mitigated only by the loopback
+      bind).
+
+### E10. Python typing / packaging (MEDIUM)
+
+- [ ] Pyright is not installed in `nodes/.venv` and there is no
+      `pyrightconfig.json`; default mode reports 7 errors + 1 warning (all
+      PyGObject stub attribute issues in `nodes/core/pipeline.py`), strict mode
+      111. Either add the config + dependency (TODO A0) or drop the claim.
+- [ ] `nodes/requirements.txt` is a full venv dump and already diverges from
+      the installed venv (pins `aio-pika==10.0.1`/`pymongo==4.18.1`; venv has
+      10.1.0/4.18.2). Replace with a real dependency list + `pyproject.toml`.
+- [ ] Lint hygiene: unused `import threading` (`nodes/core/pipeline.py:1`),
+      missing type args (`Queue`, `Task`, `Collection`), untyped `obj` params
+      (`nodes/core/handlers.py:9,12,30`), unused `Pipeline` Protocol
+      (`nodes/lib/bustle/handlers.py`), `cls._coll`/`cls._node_id` never
+      declared as class attributes.
+
+### E11. Minor (LOW)
+
+- [x] `internal/db/db.go:61-74`: `Commit`/`Rollback` read `t.DB` without `t.mu`.
+- [ ] `internal/protocols/handlers.go:30-46`: `GetBytes` base64-decodes any
+      valid JSON string with no shape validation, and returns `nil, nil` for
+      `"null"` — indistinguishable from an empty result.
+- [ ] `internal/protocols/rabbitmq/router.go:195-197`: empty `ReplyTo` is
+      rejected silently.
+- [x] `hub/internal/protocols/http/handlers/nodes.go:122`: `http.Error(w,
+      "zero nodes", http.StatusNoContent)` — 204 must have no body.
+- [ ] `internal/models/user.go:7`: `Passwd` is JSON-serializable (safe only
+      because call sites marshal just the ID).
+- [ ] No email/password validation; duplicate email surfaces as 500, not 409.
+- [ ] `rx/cmd/rx/cmdline.go`: `srtHost` splits on `:` → no IPv6 listen addrs.
+- [ ] `tx/cmd/tx/main.go:158` ignored the `url.Parse` error — **fixed**
+      (`if err != nil { return err }`). Still open: `tx/cmd/tx/main.go:120`
+      (`dash := dash.NewDashServer(...)`) still shadows the `dash` package
+      imported at `:17`, and `tx/internal/server/dash/client.go:52`
+      (`url := c.u.JoinPath(...)`) still shadows `net/url` imported at `:6`.
+      Both compile because the shadowed name is only used on the right-hand
+      side before it is rebound.
+- [x] `rx/cmd/rx/main.go:41`: the last raw `fmt.Println` in the tree is gone —
+      no `fmt.Print*` call survives anywhere (`git grep 'fmt\.Print'` is
+      empty). The CLI parse error is now swallowed (`if err != nil { return }`)
+      rather than printed; urfave/cli prints its own usage, so nothing is lost,
+      but a log line would be better than a silent exit.

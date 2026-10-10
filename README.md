@@ -1,24 +1,214 @@
 # surr
 
-Event-driven powered microservices AI surveillance system. Built on top of GStreamer,
-SRT, YOLO, MongoDB, SQLite3 and RabbitMQ.
+Event-driven microservices AI surveillance system, built on GStreamer, SRT, YOLO,
+MongoDB, SQLite3 and RabbitMQ.
 
-## Available Nodes
+`surr` moves live camera video from an RTSP source to AI workers and stores the
+results as time-series analytics. The media path uses SRT for transport and
+zero-copy fan-out; the control plane is a set of small services that discover
+each other over a RabbitMQ topic exchange — there is no service registry and no
+central orchestrator.
 
-Currently only support:
+> **Project status: the control plane runs and the media-path defects found in
+> the last review pass are fixed, but the fixes are uncommitted and barely
+> tested.** E0–E5 in [TODO.md](TODO.md) — the SQLite UUID storage-class
+> mismatch that made `rx` reject every publisher, the RPC error replies that
+> were never published, the RPC plumbing races, shutdown/lifecycle, the restart
+> loops and the storage defects — are fixed in the working tree on top of
+> `dc83aad`. E6–E11 (tx/DASH, the rx data plane, the Python runtime, security)
+> are still open. Only the RPC reply layer has regression tests.
 
-- Bustle (object counter)
+## How it fits together
 
-## Solutions
+```
+camera (RTSP) ──→ tx ──── SRT ────→ rx ──── SRT ────→ nodes (YOLO)
+                                     │                      │
+                                     │                      ↓
+                                     │                   MongoDB
+                    ┌────────────────┴───────────────┐
+                    │      RabbitMQ topic exchange    │
+                    └───────┬────────────────┬───────┘
+                            │                │
+                          hub          subscriptions
+                    (HTTP API, auth)      (SQLite)
+```
 
-Reach me out via email: `me [at] ulhism [dot] id`
+| Service | Module | Role |
+| --- | --- | --- |
+| **tx** | `tx/` | Transmitter. Pulls an RTSP source, transcodes with GStreamer, publishes SRT and/or records DASH segments. |
+| **rx** | `rx/` | Receiver/relay. Terminates SRT ingress, looks up which nodes belong to a subscription, and fans the stream out over SRT egress. |
+| **hub** | `hub/` | Control plane. HTTP API (JWT auth, users, nodes, subscriptions) backed by SQLite, plus broker handlers. |
+| **subscriptions** | `subscriptions/` | Answers which nodes belong to a subscription. SQLite-backed, no HTTP surface. |
+| **nodes** | `nodes/` | Python AI workers. Pull SRT frames, run inference, write results to MongoDB. |
 
-## TODO
+Every service broadcasts an `introduce` message advertising the commands it
+serves; peers cache these and route commands by name (not by service address).
+Because a node's commands are prefixed with its own UUID
+(`<node-id>.sink.start`), the same mechanism dispatches work to individual
+nodes. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-- [ ] Presentation (analytics)
-- [ ] PostgreSQL support
+## Requirements
+
+- **Go 1.27+** — `rx` and `tx` declare `go 1.27.1`.
+- **RabbitMQ** — the message bus every service joins at runtime.
+- **SQLite3** — via `mattn/go-sqlite3`, so **cgo is required** to build `hub` and
+  `subscriptions`.
+- **GStreamer 1.0 + development headers** — required to build `tx` (go-gst) and
+  to run the Python nodes.
+- **MongoDB** — analytics storage for nodes.
+- **Python 3** with GObject/GStreamer bindings, `ultralytics` (YOLO), `pymongo`
+  and `aio-pika` — for the nodes runtime. `nodes/requirements.txt` is a
+  `pip freeze` dump of a working environment, not a minimal pin set.
+
+## Build
+
+```sh
+make            # lint + build everything
+make build      # build only (no lint)
+make lint       # golangci-lint, every module
+make clean      # remove .cache/ and bin/
+```
+
+`make build` builds each service into `bin/surr-<name>` (`bin/surr-hub`,
+`bin/surr-rx`, `bin/surr-subscriptions`, `bin/surr-tx`). Individual targets:
+`make build-hub`, `make build-rx`, `make build-subscriptions`, `make build-tx`.
+
+Knobs: `RELEASE_TYPE=release` adds `-s -w -trimpath`; `TAGS` passes build tags;
+`GOFLAGS` / `LDFLAGS` are appended.
+
+There is no Python test suite. The Go tests cover the RPC reply layer and the
+backoff used by the restart loops (`go test ./...` per module); everything else
+is exercised by hand, and `make lint` is the only automated gate for it.
+
+## Quick start
+
+### 1. Start the infrastructure
+
+RabbitMQ on `127.0.0.1:5672`, MongoDB on `127.0.0.1:27017`, and an RTSP source
+(the `tx --src` flag default example assumes one at `rtsp://127.0.0.1:8554/cam1`).
+
+### 2. Run the SQLite migrations
+
+The services contain no migration code — they never create their own tables. The
+`.sql` files in `internal/migrations/sqlite/` follow the
+[golang-migrate](https://github.com/golang-migrate/migrate) naming convention and
+are applied with the `migrate` CLI:
+
+```sh
+migrate -path hub/internal/migrations/sqlite \
+        -database "sqlite3://$PWD/hub.db" up
+migrate -path subscriptions/internal/migrations/sqlite \
+        -database "sqlite3://$PWD/subscriptions.db" up
+```
+
+This creates the tables and a `schema_migrations` bookkeeping table. Use `down`
+to roll back one version. Run this before starting `hub` and `subscriptions`:
+both check for their tables at startup (`internal/db/schema.go`) and exit with
+one error naming the missing tables and the `migrate ... up` command, rather
+than opening an empty database and failing one query at a time.
+
+> **The `migrate` CLI must be built with the `sqlite3` driver.** Stock
+> `golang-migrate` release binaries do not include it, so `sqlite3://` fails
+> with `unknown driver sqlite3`. Build your own (needs cgo, because the driver
+> is `mattn/go-sqlite3`):
+>
+> ```sh
+> go install -tags 'sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+> ```
+
+### 3. Start the control plane
+
+```sh
+./bin/surr-hub run              # HTTP API on 127.0.0.1:9000
+./bin/surr-subscriptions run
+```
+
+Useful `hub` flags: `-a/--http` (listen address), `-d/--database`, `-s/--secret`
+(JWT signing key — **set this**, the built-in default is public), `-b/--broker`,
+`-f/--family`, `-n/--name`. Use `./bin/surr-hub run --help` for the full list;
+`subscriptions` takes the same `-d/-b/-f/-n` flags.
+
+### 4. Start the relay
+
+```sh
+./bin/surr-rx run               # SRT ingress 127.0.0.1:4200, egress 127.0.0.1:4201
+```
+
+`-w/--worker` sets the ingress backlog and the subscriber cap (default 28);
+`-i/--ingress` and `-e/--egress` move the SRT endpoints.
+
+### 5. Start the transmitter
+
+`tx run` registers its stream with a DASH server at startup and **fails if one is
+not already listening**, so start `serve` first:
+
+```sh
+./bin/surr-tx serve                              # DASH server, default port 8000
+./bin/surr-tx run \
+  --src rtsp://127.0.0.1:8554/cam1 \
+  --sink 'srt://127.0.0.1:4200?mode=caller&streamid=publish:<subscription-id>' \
+  --name cam1
+```
+
+`--downstream <width>,<height>,<bitrate>` sets the outgoing encode
+(default `1280,720,300`). `--recording` takes the same format; recording is
+always constructed, and `--recording 0,0,0` (the default) only nulls the encoder
+specs.
+
+### 6. Start a node
+
+Run from the `nodes/` directory (the runtime imports `core` and `lib` as
+top-level packages):
+
+```sh
+cd nodes
+python bustle.py --node-id <uuid>
+```
+
+The node needs YOLO weights — pass `-m/--model <path>`, and note that weight
+files are not committed to this repository. `--mongo-url`, `--mongo-db`,
+`--broker`, `-f/--family`, `-c/--chosen-classes` and `--drain-interval` are the
+other knobs; `python bustle.py --help` lists them all.
+
+The node self-registers with `hub` on boot (`nodes.add`) and deregisters on
+graceful shutdown (`nodes.remove`). It retries registration until the hub
+appears, so start order does not matter.
+
+## HTTP API
+
+All routes are served by `hub` on `-a/--http` (default `127.0.0.1:9000`).
+Protected routes require `Authorization: Bearer <access token>`.
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/users/signup` | — | Create a user |
+| `POST` | `/auth/signin` | — | Exchange credentials for a JWT + refresh cookie |
+| `POST` | `/auth/refresh` | cookie | Rotate the refresh token, mint a new access token |
+| `POST` | `/auth/logout` | cookie | Revoke the refresh token |
+| `GET` | `/nodes/availability` | ✓ | Nodes not yet bound to a subscription |
+| `GET` | `/nodes/analytics?node_id=&time_cluster=` | ✓ | Analytics for one node (proxied to the node over the broker) |
+| `POST` | `/subscriptions/add` | ✓ | Bind nodes to a new subscription |
+| `POST` | `/subscriptions/remove` | ✓ | Remove a subscription |
+
+A typical first run: `POST /users/signup`, `POST /auth/signin` to get a token,
+then `POST /subscriptions/add` with the node IDs to obtain a subscription ID —
+that ID is what goes into the `tx --sink` streamid.
+
+## Nodes
+
+| Node | Description |
+| --- | --- |
+| **Bustle** | Object counter. Runs YOLO over the SRT stream, counts chosen classes per frame, takes a per-interval median, and writes one document per interval into a MongoDB time-series collection named after the node. |
+
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — services, data flow, protocol, storage, service internals.
+- [DESIGN.md](DESIGN.md) — design rationale, trade-offs, known limitations, invariants.
+- [TODO.md](TODO.md) — staged work (nodes refactor, analytics service, logging) and verified defects.
+- [CLAUDE.md](CLAUDE.md) — orientation for AI coding assistants working in this repo.
 
 ## License
 
-This project is licensed under the
-MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
+
+Copyright (c) 2026 Mambaul Hisam. Reach me at `me [at] ulhism [dot] id`.
