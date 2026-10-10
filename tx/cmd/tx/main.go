@@ -155,7 +155,11 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, cleanups *logging.C
 func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *CommandLine, cleanups *logging.Cleanups) error {
 	log := zerolog.Ctx(ctx)
 
-	dashURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", cmdLine.DashPort))
+	dashURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", cmdLine.DashPort))
+	if err != nil {
+		return err
+	}
+
 	streamName := dash.StreamName{
 		Name: cmdLine.Run.StreamName,
 	}
