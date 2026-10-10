@@ -154,12 +154,19 @@ class SRTStreamer:
         pipeline.set_state(Gst.State.PLAYING)
 
     def get_frame(self, timeout: typing.Optional[float] = None):
-        """Return the next frame, or None if none arrived within timeout.
+        """Return the next frame, or None if none is available.
 
-        timeout=None returns immediately; a positive timeout blocks the calling
-        thread, which is what keeps frame_worker from spinning.
+        timeout=None is non-blocking, which is what the old get_nowait() did.
+        A positive timeout blocks the calling thread for at most that long,
+        which is what keeps frame_worker from spinning at 100% CPU.
+
+        The array is a read-only view over the sample's own memory, so a caller
+        that needs to mutate it must copy first. It is deliberately not copied
+        here: see _frame_view.
         """
         try:
+            if timeout is None:
+                return self._frame_q.get_nowait()
             return self._frame_q.get(timeout=timeout)
         except queue.Empty:
             return None
