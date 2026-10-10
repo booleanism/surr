@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/booleanism/surr/internal/models"
@@ -22,6 +23,20 @@ func newCaptureHandlers() *captureHandlers {
 func (c *captureHandlers) Set(cmd protocols.Command, h protocols.HandlerFunc) error {
 	c.handlers[cmd] = h
 	return nil
+}
+
+// AvailableCommand mirrors protocols.handlers so the test can assert that every
+// command this service advertises is actually exercised below. Without it a
+// newly registered command would silently ship untested — which is how the
+// unmarshalable-reply bug survived a review pass.
+func (c *captureHandlers) AvailableCommand(cmds *[]protocols.Command) int {
+	(*cmds) = (*cmds)[:0]
+
+	for k := range c.handlers {
+		(*cmds) = append((*cmds), k)
+	}
+
+	return len(c.handlers)
 }
 
 // invoke runs one registered handler and returns the reply it published.
@@ -67,6 +82,12 @@ func assertWire(t *testing.T, resp protocols.RouterResponse, wantCode int) proto
 		t.Fatalf("code is %d, want %d (body %s)", decoded.Code, wantCode, body)
 	}
 
+	// The E1 invariant: every failure reply carries its message as a JSON
+	// string, so a caller can always read it with ErrorMessage().
+	if wantCode != protocols.CodeSuccess && !json.Valid(decoded.Result) {
+		t.Fatalf("code %d: result %s is not valid JSON", wantCode, decoded.Result)
+	}
+
 	return decoded
 }
 
@@ -103,6 +124,48 @@ func (f fakeSubscriptions) GetNodeIDsByUser(context.Context, models.User, *[]mod
 	return 0, f.byUserErr
 }
 
+type subsCase struct {
+	subs     fakeSubscriptions
+	name     string
+	command  protocols.Command
+	payload  string
+	wantMsg  string
+	wantCode int
+}
+
+// assertEveryCommandCovered fails when a command the service advertises has no
+// case in the table. The reply-marshalling bug survived a review pass because
+// nothing tied the handler registry to the tests, so a command could ship
+// completely untested.
+func assertEveryCommandCovered(t *testing.T, tests []subsCase) {
+	t.Helper()
+
+	h := newCaptureHandlers()
+	if err := SetupSubscription(fakeSubscriptions{}, h); err != nil {
+		t.Fatalf("setup subscription handlers: %v", err)
+	}
+
+	var advertised []protocols.Command
+	if n := h.AvailableCommand(&advertised); n != len(advertised) {
+		t.Fatalf("AvailableCommand reported %d commands but filled %d", n, len(advertised))
+	}
+
+	if len(advertised) == 0 {
+		t.Fatal("no command is registered")
+	}
+
+	covered := make(map[protocols.Command]bool, len(tests))
+	for _, tt := range tests {
+		covered[tt.command] = true
+	}
+
+	for _, cmd := range advertised {
+		if !covered[cmd] {
+			t.Errorf("command %s is registered but no case covers it", cmd)
+		}
+	}
+}
+
 func TestSubscriptionHandlers(t *testing.T) {
 	const (
 		nodeID = `{"id":"6f1c1a2e-1f4a-4a1c-9b0e-1a2b3c4d5e6f"}`
@@ -113,14 +176,7 @@ func TestSubscriptionHandlers(t *testing.T) {
 
 	domainErr := errors.New("no such subscription")
 
-	tests := []struct {
-		subs     fakeSubscriptions
-		name     string
-		command  protocols.Command
-		payload  string
-		wantMsg  string
-		wantCode int
-	}{
+	tests := []subsCase{
 		{name: "add success", command: "subscriptions.add", payload: subs, wantCode: protocols.CodeSuccess},
 		{name: "remove success", command: "subscriptions.remove", payload: subs, wantCode: protocols.CodeSuccess},
 		{name: "by nodeid success", command: "subscriptions.by.nodeid.get", payload: nodeID, wantCode: protocols.CodeSuccess},
@@ -158,6 +214,19 @@ func TestSubscriptionHandlers(t *testing.T) {
 			name: "nodes all domain error", command: "subscriptions.nodes.all.get", payload: ``,
 			subs: fakeSubscriptions{allErr: domainErr}, wantCode: protocols.CodeDomain, wantMsg: domainErr.Error(),
 		},
+		{
+			// A refused delete (unknown id, or one owned by another user) is
+			// reported with its own code so the hub can answer 403 instead of
+			// 500; it has to survive the wire like any other failure reply.
+			name: "remove not found", command: "subscriptions.remove", payload: subs,
+			subs:     fakeSubscriptions{removeErr: fmt.Errorf("gone: %w", models.ErrSubscriptionNotFound)},
+			wantCode: protocols.CodeNotFound, wantMsg: "gone: subscription not found",
+		},
+		{
+			name: "remove error with json metacharacters", command: "subscriptions.remove", payload: subs,
+			subs:     fakeSubscriptions{removeErr: errors.New("delete \"subscribed_nodes\":\nconstraint failed")},
+			wantCode: protocols.CodeDomain, wantMsg: "delete \"subscribed_nodes\":\nconstraint failed",
+		},
 	}
 
 	for _, tt := range tests {
@@ -174,4 +243,6 @@ func TestSubscriptionHandlers(t *testing.T) {
 			}
 		})
 	}
+
+	assertEveryCommandCovered(t, tests)
 }
