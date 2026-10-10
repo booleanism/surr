@@ -28,6 +28,7 @@ type CommandLine struct {
 	SelectedCommand string
 	LogLevel        string
 	LogFormat       string
+	DashToken       string
 	Run             RunCmdLine
 	Serve           ServeCmdLine
 	DashPort        uint16
@@ -95,6 +96,11 @@ func (cl *CommandLine) parseCLI(ctx context.Context, args []string) error {
 				Usage:       "local dash server port",
 				Value:       8000,
 				Destination: &cl.DashPort,
+			},
+			&cli.StringFlag{
+				Name:        "dash-token",
+				Usage:       "shared secret for the dash control routes (POST/DELETE /stream). with no token, only a loopback caller may register or delete a stream",
+				Destination: &cl.DashToken,
 			},
 			&cli.StringFlag{
 				Name:        "log-level",

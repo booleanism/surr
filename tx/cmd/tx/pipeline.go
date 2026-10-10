@@ -25,46 +25,43 @@ type PipelinesConfig struct {
 	RecordingSpecs         core.StreamSpecs
 }
 
+// setupPipelines builds the producer, downstream and (optionally) recording
+// pipelines and starts a bus watch on each.
+//
+// recording is nil when --recording is 0,0,0: recording is opt-in, and the
+// pipeline used to be built regardless, which created the stream directory and
+// registered the stream even though nothing was being recorded.
 func setupPipelines(ctx context.Context, cancel context.CancelCauseFunc, cfg PipelinesConfig) (producer, downstream, recording *core.Pipeline, err error) {
 	downstream, err = setupDownstream(cfg.DownstreamPipelineName, cfg.SrtSinkURI, cfg.DownstreamSpecs)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	recSpecs := &cfg.RecordingSpecs
-	if cfg.RecordingSpecs.IsZero() {
-		recSpecs = nil
-	}
-
-	recording, err = setupRecording(cfg.RecordingPipelineName, cfg.RecordingDir, cfg.StreamName, recSpecs)
-	if err != nil {
-		return nil, nil, nil, err
+	if !cfg.RecordingSpecs.IsZero() {
+		recording, err = setupRecording(cfg.RecordingPipelineName, cfg.RecordingDir, cfg.StreamName, &cfg.RecordingSpecs)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 	}
 
 	producer = core.NewPipeline(cfg.ProducerPipelineName)
-	go func() {
-		err = producer.WatchBus(ctx)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Str("pipeline", producer.GetName()).Err(err).Msg("bus watch")
-			cancel(err)
-		}
-	}()
 
-	go func() {
-		err = downstream.WatchBus(ctx)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Str("pipeline", downstream.GetName()).Err(err).Msg("bus watch")
-			cancel(err)
-		}
-	}()
+	watched := []*core.Pipeline{producer, downstream}
+	if recording != nil {
+		watched = append(watched, recording)
+	}
 
-	go func() {
-		err = recording.WatchBus(ctx)
-		if err != nil {
-			zerolog.Ctx(ctx).Error().Str("pipeline", recording.GetName()).Err(err).Msg("bus watch")
-			cancel(err)
-		}
-	}()
+	for _, pipe := range watched {
+		// A local watchErr, not the enclosing named return: these goroutines
+		// run concurrently, so assigning a shared err is a data race and one
+		// pipeline's failure could overwrite another's before it is read.
+		go func() {
+			if watchErr := pipe.WatchBus(ctx); watchErr != nil {
+				zerolog.Ctx(ctx).Error().Str("pipeline", pipe.GetName()).Err(watchErr).Msg("bus watch")
+				cancel(watchErr)
+			}
+		}()
+	}
 
 	return producer, downstream, recording, nil
 }
@@ -74,6 +71,10 @@ func setupDownstream(pipelineName, srturi string, specs core.StreamSpecs) (*core
 
 	src := src.NewInterSrc(VidProdName)
 	h264enc := coder.NewH264Enc(&specs)
+	if !h264enc.Valid() {
+		return nil, fmt.Errorf("h264 encoder elements unavailable: install openh264enc, or build with -tags va for vah264enc")
+	}
+
 	mpegtsmux := muxer.NewMPEGTSMux()
 	sink := sink.NewSRTSink(srturi)
 
@@ -96,6 +97,10 @@ func setupRecording(pipelineName, p, streamName string, recSpecs *core.StreamSpe
 	pipe := core.NewPipeline(pipelineName)
 	vidSrc := src.NewInterSrc(VidProdName)
 	h264enc := coder.NewH264Enc(recSpecs)
+	if !h264enc.Valid() {
+		return nil, fmt.Errorf("h264 encoder elements unavailable: install openh264enc, or build with -tags va for vah264enc")
+	}
+
 	audSrc := src.NewInterSrc(AudProdName)
 	aacenc := coder.NewAACEnc()
 
@@ -121,18 +126,23 @@ func setupRecording(pipelineName, p, streamName string, recSpecs *core.StreamSpe
 		return nil, fmt.Errorf("unable to link audio recording elements")
 	}
 
-	audSrc.GetStaticPad("src").AddProbe(gst.PadProbeTypeBuffer|gst.PadProbeTypeBlock, func(pad gst.Pad, info *gst.PadProbeInfo) (goret gst.PadProbeReturn) {
-		caps := pad.GetCurrentCaps()
-		if caps == nil {
+	// Link the muxer's audio pad lazily, on the first buffer that carries real
+	// caps, then remove the probe. The probe used to send an EOS to the muxer
+	// on every buffer it saw, which ended the audio branch of the recording;
+	// it also blocked the streaming thread (PadProbeTypeBlock) while doing so.
+	audSrc.GetStaticPad("src").AddProbe(gst.PadProbeTypeBuffer, func(pad gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+		if pad.GetCurrentCaps() == nil {
 			return gst.PadProbeOK
 		}
 
-		dashsink2.SendEvent(gst.NewEventEOS())
 		if ret := dashsink2.AudioSink()(aacenc.GetStaticPad("src")); ret != gst.PadLinkOK {
-			return gst.PadProbePass
+			// The muxer is not ready for the pad yet; try again on the next
+			// buffer rather than giving up or emitting EOS.
+			return gst.PadProbeOK
 		}
 
 		dashsink2.SyncStateWithParent()
+
 		return gst.PadProbeRemove
 	})
 

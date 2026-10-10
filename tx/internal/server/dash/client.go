@@ -34,14 +34,19 @@ type (
 )
 
 type dashClient struct {
-	c *http.Client
-	u *url.URL
+	c     *http.Client
+	u     *url.URL
+	token string
 }
 
-func NewDashClient(c *http.Client, u *url.URL) *dashClient {
+// NewDashClient returns a client for the DASH server's control routes. token is
+// sent as X-Dash-Token when non-empty; the server requires it for stream
+// registration and removal once the bind address is not loopback.
+func NewDashClient(c *http.Client, u *url.URL, token string) *dashClient {
 	return &dashClient{
-		c: c,
-		u: u,
+		c:     c,
+		u:     u,
+		token: token,
 	}
 }
 
@@ -57,6 +62,9 @@ func (c *dashClient) Do(req StreamRequest) (StreamResponse, error) {
 	}
 
 	httpReq.Header.Set("Content-Type", mime)
+	if c.token != "" {
+		httpReq.Header.Set("X-Dash-Token", c.token)
+	}
 
 	resp, err := c.c.Do(httpReq)
 	if err != nil {

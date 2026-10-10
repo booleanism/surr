@@ -82,18 +82,17 @@ func (d *DashServer) Index(notfound *http.ServeMux) (string, http.HandlerFunc, e
 		}
 
 		data := make(map[string]string)
-		s := d.d.GetStreams()
-		defer s.Unref()
-
-		for k := range s.Iter() {
+		for _, k := range d.d.GetStreams().Names() {
 			data[k] = filepath.Join("play", k)
 		}
 
 		w.Header().Add("Content-Type", "text/html")
 
-		err = t.Execute(w, data)
-		if err != nil {
-			d.log.Error().Err(err).Msg("rendering template")
+		// A local variable: this closure runs concurrently with every other
+		// request, so writing the enclosing function's err here would race.
+		execErr := t.Execute(w, data)
+		if execErr != nil {
+			d.log.Error().Err(execErr).Msg("rendering template")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -110,9 +109,10 @@ func (d *DashServer) PlayStream(manifestFileName string) (string, http.HandlerFu
 		d.isStreamExist(r, func(name string) int {
 			w.Header().Set("Content-Type", "text/html")
 			mpdurl := fmt.Sprintf("/stream/%s/%s", name, manifestFileName)
-			err = t.Execute(w, mpdurl)
-			if err != nil {
-				d.log.Error().Str("stream", name).Err(err).Msg("unable to render play")
+
+			execErr := t.Execute(w, mpdurl)
+			if execErr != nil {
+				d.log.Error().Str("stream", name).Err(execErr).Msg("unable to render play")
 				return http.StatusInternalServerError
 			}
 
@@ -139,10 +139,7 @@ func (d *DashServer) StreamManifest(manifestFileName string) (string, http.Handl
 
 func (d *DashServer) isStreamExist(r *http.Request, onExist func(name string) int) func(w http.ResponseWriter) {
 	name := r.PathValue("name")
-	s := d.d.GetStreams()
-	defer s.Unref()
-
-	if name == "" || !s.IsExist(name) {
+	if name == "" || !d.d.GetStreams().IsExist(name) {
 		return func(w http.ResponseWriter) {
 			w.WriteHeader(http.StatusNotFound)
 		}

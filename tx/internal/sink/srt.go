@@ -17,8 +17,11 @@ func NewSRTSink(uri string) *srtsink {
 		},
 	}
 
+	// auto-reconnect: the sink is the SRT egress to rx. With it off, an rx
+	// restart (or any transient network error) ends the stream and the bus
+	// error tears down the whole tx process.
 	srtsink := gst.ElementFactoryMakeWithProperties("srtsink", map[string]any{
-		"auto-reconnect": false,
+		"auto-reconnect": true,
 		"uri":            uri,
 		"mode":           int32(1),
 	})

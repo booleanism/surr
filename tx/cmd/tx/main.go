@@ -110,17 +110,21 @@ func main() {
 func serveCommand(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) error {
 	log := zerolog.Ctx(ctx)
 
-	dashStream := streaming.NewDash(streaming.StreamDeps{
+	dashStream, err := streaming.NewDash(streaming.StreamDeps{
 		OpenInRoot: func(s1, s2 string) (streaming.WriterToCloser, error) {
 			return os.OpenInRoot(s1, s2)
 		},
 	}, cmdLine.RecordingDir, ManifestFileName)
+	if err != nil {
+		log.Error().Err(err).Msg("open recording dir")
+		return err
+	}
 
 	tmpl := template.New("tmpl")
 	dash := dash.NewDashServer(tmpl, dashStream, *log)
 
 	var srv *http.Server
-	srv, err := setupDashServer(fmt.Sprintf("%s:%d", "127.0.0.1", cmdLine.DashPort), ManifestFileName, dash, *log)
+	srv, err = setupDashServer(fmt.Sprintf("%s:%d", "127.0.0.1", cmdLine.DashPort), ManifestFileName, cmdLine.DashToken, dash, *log)
 	if err != nil {
 		log.Error().Err(err).Msg("setup dash server")
 		return err
@@ -152,13 +156,39 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, cleanups *logging.C
 	}
 }
 
-func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *CommandLine, cleanups *logging.Cleanups) error {
+// registDashStream tells the DASH server about a new recording and returns a
+// function that removes it again, or nil when registration was not possible.
+//
+// It is best effort: the DASH server is a separate process that may not be
+// running yet, and tx run is expected to relay and record without one, so a
+// failure is logged and the recording still proceeds.
+func registDashStream(ctx context.Context, cmdLine *CommandLine, streamName dash.StreamName) func() {
 	log := zerolog.Ctx(ctx)
 
 	dashURL, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", cmdLine.DashPort))
 	if err != nil {
-		return err
+		log.Error().Err(err).Msg("parse dash url")
+		return nil
 	}
+
+	c := &http.Client{Timeout: GeneralTimeout}
+	dashManager := dash.NewStreamManager(dash.NewDashClient(c, dashURL, cmdLine.DashToken).Do)
+
+	if regErr := dashManager.RegistStream(streamName); regErr != nil {
+		log.Warn().Err(regErr).Str("stream", streamName.Name).
+			Msg("unable to register stream with the dash server; recording will still be written but will not appear in the dash index")
+		return nil
+	}
+
+	return func() {
+		if unregErr := dashManager.UnregStream(streamName); unregErr != nil {
+			log.Warn().Err(unregErr).Str("stream", streamName.Name).Msg("unable to unregister stream")
+		}
+	}
+}
+
+func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *CommandLine, cleanups *logging.Cleanups) error {
+	log := zerolog.Ctx(ctx)
 
 	streamName := dash.StreamName{
 		Name: cmdLine.Run.StreamName,
@@ -173,7 +203,9 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 	pipes := []*core.Pipeline{}
 	pipeSetState := func(st gst.State) {
 		for _, p := range pipes {
-			p.SetState(st)
+			if p != nil {
+				p.SetState(st)
+			}
 		}
 	}
 
@@ -191,7 +223,10 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 		return err
 	}
 
-	pipes = append(pipes, prodPipe, dsPipe, recPipe)
+	pipes = append(pipes, prodPipe, dsPipe)
+	if recPipe != nil {
+		pipes = append(pipes, recPipe)
+	}
 
 	// video related stuff
 	vidSink := sink.NewInterSink(VidProdName)
@@ -226,7 +261,10 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 		if os.Getenv("GST_DEBUG_DUMP_DOT_DIR") != "" {
 			gst.DebugBinToDotFile(prodPipe, gst.DebugGraphShowAll, ProducerPipelineName)
 			gst.DebugBinToDotFile(dsPipe, gst.DebugGraphShowAll, DownstreamPipelineName)
-			gst.DebugBinToDotFile(recPipe, gst.DebugGraphShowAll, RecordingPipelineName)
+
+			if recPipe != nil {
+				gst.DebugBinToDotFile(recPipe, gst.DebugGraphShowAll, RecordingPipelineName)
+			}
 		}
 
 		pipeSetState(gst.StateNull)
@@ -234,24 +272,14 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 		return nil
 	})
 
-	c := &http.Client{
-		Timeout: GeneralTimeout,
-	}
-
-	dashClient := dash.NewDashClient(c, dashURL)
-	dashManager := dash.NewStreamManager(dashClient.Do)
-	err = dashManager.RegistStream(streamName)
-	if err != nil {
-		return fmt.Errorf("unable to regist stream: %w", err)
-	}
-
-	cleanups.Register(func() error {
-		if unregErr := dashManager.UnregStream(streamName); unregErr != nil {
-			return fmt.Errorf("unable to unregister stream: %w", unregErr)
+	if recPipe != nil {
+		if unreg := registDashStream(ctx, cmdLine, streamName); unreg != nil {
+			cleanups.Register(func() error {
+				unreg()
+				return nil
+			})
 		}
-
-		return nil
-	})
+	}
 
 	log.Info().
 		Str("stream", cmdLine.Run.StreamName).

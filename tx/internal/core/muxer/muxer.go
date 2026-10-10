@@ -36,6 +36,14 @@ func (q *muxer) req(t string) func(srcpad gst.Pad) gst.PadLinkReturn {
 		ghostPad.SetActive(true)
 		q.AddPad(ghostPad)
 
-		return srcpad.Link(ghostPad)
+		ret := srcpad.Link(ghostPad)
+		if ret != gst.PadLinkOK {
+			// Release both: a request pad left behind keeps the muxer's pad
+			// counter moving and leaks the ghost pad on every retry.
+			q.RemovePad(ghostPad)
+			q.mux.ReleaseRequestPad(internalSink)
+		}
+
+		return ret
 	}
 }
