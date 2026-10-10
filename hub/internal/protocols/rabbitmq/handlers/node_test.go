@@ -58,7 +58,8 @@ func assertWire(t *testing.T, resp protocols.RouterResponse, wantCode int) proto
 	}
 
 	var decoded protocols.RouterResponse
-	if err := json.Unmarshal(body, &decoded); err != nil {
+	err = json.Unmarshal(body, &decoded)
+	if err != nil {
 		t.Fatalf("unmarshal reply %s: %v", body, err)
 	}
 
@@ -80,12 +81,12 @@ func TestNodeHandlers(t *testing.T) {
 	const payload = `[{"id":"6f1c1a2e-1f4a-4a1c-9b0e-1a2b3c4d5e6f","bitrate":4000,"width":1280,"height":720}]`
 
 	tests := []struct {
+		node     fakeNode
 		name     string
 		command  protocols.Command
 		payload  string
-		node     fakeNode
-		wantCode int
 		wantMsg  string
+		wantCode int
 	}{
 		{name: "add success", command: "nodes.add", payload: payload, wantCode: protocols.CodeSuccess},
 		{name: "remove success", command: "nodes.remove", payload: payload, wantCode: protocols.CodeSuccess},

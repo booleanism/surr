@@ -100,7 +100,8 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	}
 	defer sqliteDB.Close() //nolint:errcheck
 
-	if err := db.VerifySchema(ctx, sqliteDB, MigrationsPath, "subscriptions", "subscribed_nodes"); err != nil {
+	err = db.VerifySchema(ctx, sqliteDB, MigrationsPath, "subscriptions", "subscribed_nodes")
+	if err != nil {
 		return err
 	}
 

@@ -97,7 +97,8 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 		return err
 	}
 
-	if err := db.VerifySchema(ctx, sqliteDB, MigrationsPath, "schema_migrations", "nodes", "users"); err != nil {
+	err = db.VerifySchema(ctx, sqliteDB, MigrationsPath, "schema_migrations", "nodes", "users")
+	if err != nil {
 		return err
 	}
 
@@ -191,12 +192,12 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	cleanups.Register(httpSrv.Close)
 
 	go restart.Loop(ctx, "http-listen", func(ctx context.Context) error {
-		err := httpSrv.ListenAndServe()
-		if errors.Is(err, http.ErrServerClosed) {
+		serveErr := httpSrv.ListenAndServe()
+		if errors.Is(serveErr, http.ErrServerClosed) {
 			return nil
 		}
 
-		return err
+		return serveErr
 	})
 
 	return nil

@@ -24,7 +24,8 @@ func TestErrorResponseIsValidJSON(t *testing.T) {
 		}
 
 		var decoded RouterResponse
-		if err := json.Unmarshal(body, &decoded); err != nil {
+		err = json.Unmarshal(body, &decoded)
+		if err != nil {
 			t.Fatalf("code %d: unmarshal reply %s: %v", code, body, err)
 		}
 
@@ -73,8 +74,8 @@ func TestResultResponse(t *testing.T) {
 func TestErrorMessage(t *testing.T) {
 	tests := []struct {
 		name   string
-		result json.RawMessage
 		want   string
+		result json.RawMessage
 	}{
 		{name: "empty", result: nil, want: ""},
 		{name: "null", result: json.RawMessage("null"), want: ""},

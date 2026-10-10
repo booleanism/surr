@@ -23,15 +23,13 @@ import (
 // The initial connection is established by the service before the supervisor
 // exists (the router cannot be built without a channel), so it is passed in.
 type Supervisor struct {
+	log      zerolog.Logger
+	router   *router
+	conn     *amqp091.Connection
 	addr     string
 	name     string
 	exchange string
-
-	router *router
-	log    zerolog.Logger
-
-	mu   sync.Mutex
-	conn *amqp091.Connection
+	mu       sync.Mutex
 }
 
 // NewSupervisor returns a supervisor for router. addr is the broker URI, name
@@ -124,7 +122,8 @@ func (s *Supervisor) reconnect(ctx context.Context, b *backoff.Backoff) bool {
 			continue
 		}
 
-		if err := s.setup(conn); err != nil {
+		err = s.setup(conn)
+		if err != nil {
 			s.log.Warn().Err(err).Msg("broker reconnect failed")
 			_ = conn.Close()
 

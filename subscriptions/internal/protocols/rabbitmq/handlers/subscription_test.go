@@ -58,7 +58,8 @@ func assertWire(t *testing.T, resp protocols.RouterResponse, wantCode int) proto
 	}
 
 	var decoded protocols.RouterResponse
-	if err := json.Unmarshal(body, &decoded); err != nil {
+	err = json.Unmarshal(body, &decoded)
+	if err != nil {
 		t.Fatalf("unmarshal reply %s: %v", body, err)
 	}
 
@@ -113,12 +114,12 @@ func TestSubscriptionHandlers(t *testing.T) {
 	domainErr := errors.New("no such subscription")
 
 	tests := []struct {
+		subs     fakeSubscriptions
 		name     string
 		command  protocols.Command
 		payload  string
-		subs     fakeSubscriptions
-		wantCode int
 		wantMsg  string
+		wantCode int
 	}{
 		{name: "add success", command: "subscriptions.add", payload: subs, wantCode: protocols.CodeSuccess},
 		{name: "remove success", command: "subscriptions.remove", payload: subs, wantCode: protocols.CodeSuccess},

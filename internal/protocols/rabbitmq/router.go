@@ -65,20 +65,20 @@ func SetupRouter(ch *amqp091.Channel, name, exchangeName string) (QueueSetupRetu
 }
 
 type router struct {
-	gh               GetHandler
-	siblings         Siblings
-	run              RunTask
-	knownTrackID     map[uuid.UUID]chan protocols.RouterResponse
+	gh           GetHandler
+	siblings     Siblings
+	run          RunTask
+	knownTrackID map[uuid.UUID]chan protocols.RouterResponse
+	// ch and q belong to the current broker connection. The reconnect
+	// supervisor swaps both after the broker restarts, so every publish and
+	// every Listen call reads them through channel()/queue() instead of
+	// caching a copy; chMu guards the swap.
+	ch               *amqp091.Channel
 	exchName         string
 	directRoutingKey string
+	q                amqp091.Queue
+	chMu             sync.RWMutex
 	mu               sync.Mutex
-
-	// chMu guards the broker channel and queue. The reconnect supervisor swaps
-	// them after the broker restarts, so every publish and every Listen call
-	// reads them through channel()/queue() instead of caching a copy.
-	chMu sync.RWMutex
-	ch   *amqp091.Channel
-	q    amqp091.Queue
 }
 
 func NewRouter(ch *amqp091.Channel, q QueueSetupReturnFunc, gh GetHandler, sibs Siblings, run RunTask) *router {
@@ -233,7 +233,7 @@ func (r *router) Listen(ctx context.Context) error {
 				return fmt.Errorf("delivery channel closed")
 			}
 
-			err := r.run.Run(ctx, func() {
+			err = r.run.Run(ctx, func() {
 				r.handleDelivery(ctx, msg)
 			})
 			if err != nil {

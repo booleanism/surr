@@ -98,22 +98,22 @@ func (n nodes) call(ctx context.Context, command protocols.Command, payload []by
 	err = n.t.Run(ctx, func() {
 		log := zerolog.Ctx(ctx)
 
-		err := n.r.Recv(ctx, trackID, &resp)
-		if err != nil {
-			log.Error().Str("command", string(command)).Str("track_id", trackID.String()).Err(err).Msg("receiving response")
+		rpcErr := n.r.Recv(ctx, trackID, &resp)
+		if rpcErr != nil {
+			log.Error().Str("command", string(command)).Str("track_id", trackID.String()).Err(rpcErr).Msg("receiving response")
 		} else {
 			log.Debug().Str("command", string(command)).Str("track_id", trackID.String()).Int("code", resp.Code).Msg("rpc round trip")
 		}
 
-		recvErr <- err
+		recvErr <- rpcErr
 	})
 	if err != nil {
 		return resp, err
 	}
 
 	select {
-	case err := <-recvErr:
-		return resp, err
+	case rpcErr := <-recvErr:
+		return resp, rpcErr
 	case <-ctx.Done():
 		return resp, ctx.Err()
 	}

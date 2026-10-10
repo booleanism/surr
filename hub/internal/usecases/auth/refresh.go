@@ -18,9 +18,9 @@ type tokenData struct {
 }
 
 type refreshTokenStore struct {
+	lastSweep time.Time
 	u         map[tokenType]tokenData
 	ttl       time.Duration
-	lastSweep time.Time
 	mu        sync.RWMutex
 }
 

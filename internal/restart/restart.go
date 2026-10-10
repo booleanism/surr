@@ -53,7 +53,8 @@ func Loop(ctx context.Context, name string, f func(ctx context.Context) error) {
 			b.Reset()
 		}
 
-		if err := b.Wait(ctx); err != nil {
+		err = b.Wait(ctx)
+		if err != nil {
 			return
 		}
 	}
