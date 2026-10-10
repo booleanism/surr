@@ -48,6 +48,10 @@ const (
 	CodeDecodePayload = -1
 	CodeDomain        = -2
 	CodeMarshalReply  = -3
+	// CodeNotFound reports that the addressed object does not exist, or does
+	// not belong to the caller. It is distinct from CodeDomain so the hub can
+	// answer 403/404 instead of 500 without string-matching the message.
+	CodeNotFound = -4
 )
 
 // ResultResponse builds a success reply from an already-marshalled payload.

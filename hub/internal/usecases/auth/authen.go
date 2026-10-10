@@ -62,17 +62,26 @@ func (a authenticator) VerifyCredentials(ctx context.Context, u UserAuth) (uuid.
 	return user.ID, nil
 }
 
+// TokenIssuer is the value written to the JWT `iss` claim and required on
+// validation.
+const TokenIssuer = "surr"
+
+// signingMethod is the only algorithm tokens are signed with. Validation pins
+// it, because accepting any HMAC method lets an attacker pick the weakest one
+// the shared secret supports.
+var signingMethod = jwt.SigningMethodHS256
+
 func (a authenticator) GenerateTokenPair(userID uuid.UUID) (TokenPair, error) {
 	claims := JwtClaims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(a.exp)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "surr",
+			Issuer:    TokenIssuer,
 		},
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token := jwt.NewWithClaims(signingMethod, claims)
 	accessToken, err := token.SignedString(a.s)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("signing access token: %w", err)
@@ -92,12 +101,17 @@ func (a authenticator) GenerateTokenPair(userID uuid.UUID) (TokenPair, error) {
 
 func (a authenticator) ValidateAccessToken(tokenString string) (uuid.UUID, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &JwtClaims{}, func(token *jwt.Token) (any, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		// Exact match, not a type assertion: HS384/HS512 are also HMAC and
+		// would otherwise be accepted against the same secret.
+		if token.Method != signingMethod {
 			return nil, fmt.Errorf("unexpected signing algorithm: %v", token.Header["alg"])
 		}
 
 		return a.s, nil
-	})
+	},
+		jwt.WithValidMethods([]string{signingMethod.Alg()}),
+		jwt.WithIssuer(TokenIssuer),
+	)
 	if err != nil {
 		return uuid.Nil, err
 	}

@@ -117,6 +117,15 @@ func (s subscription) do(ctx context.Context, command protocols.Command, payload
 		if resp.Code != 0 {
 			msg := resp.ErrorMessage()
 			log.Info().Int("code", resp.Code).Msg("non-zero reply code")
+
+			// The subscriptions service reports a refused delete with a
+			// dedicated code so the HTTP layer can answer 403 rather than 500.
+			if resp.Code == protocols.CodeNotFound {
+				errs = append(errs, fmt.Errorf("%s: %w: %s", sn, models.ErrSubscriptionNotFound, msg))
+
+				continue
+			}
+
 			errs = append(errs, fmt.Errorf("%s: unexpected response code %d: %s", sn, resp.Code, msg))
 
 			continue

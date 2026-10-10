@@ -120,6 +120,10 @@ func (s subscription) scanRows(rws *sql.Rows, fn func(i int) []any) (int, error)
 	return i, nil
 }
 
+// ErrSubscriptionNotFound reports that a delete matched no subscription
+// owned by the requesting user.
+var ErrSubscriptionNotFound = models.ErrSubscriptionNotFound
+
 func (s subscription) DeleteSubscriptions(ctx context.Context, subsID []models.Subscription) error {
 	if len(subsID) == 0 {
 		return fmt.Errorf("%w: delete subscriptions", ErrNothingToWrite)
@@ -134,9 +138,38 @@ func (s subscription) DeleteSubscriptions(ctx context.Context, subsID []models.S
 	placeholders := make([]string, len(subsID))
 	idsArgs := make([]any, len(subsID))
 
+	// Ownership is enforced in the WHERE clause instead of by a preceding
+	// SELECT: the check and the delete are then a single statement, so a
+	// caller cannot remove another user's subscription by naming its id.
+	conds := make([]string, len(subsID))
+	condsArgs := make([]any, 0, len(subsID)*2)
+
 	for i, id := range subsID {
 		placeholders[i] = "?"
 		idsArgs[i] = id.ID[:]
+		conds[i] = "(id = ? AND user_id = ?)"
+		condsArgs = append(condsArgs, id.ID[:], id.User.ID[:])
+	}
+
+	subStmt := fmt.Sprintf("DELETE FROM subscriptions WHERE %s", strings.Join(conds, " OR "))
+
+	res, err := s.DB.ExecContext(ctx, subStmt, condsArgs...)
+	if err != nil {
+		_ = s.Rollback()
+		return err
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		_ = s.Rollback()
+		return err
+	}
+
+	// All or nothing: a batch that names one subscription the user does not
+	// own must not silently delete the others.
+	if affected != int64(len(subsID)) {
+		_ = s.Rollback()
+		return fmt.Errorf("%w: %d of %d subscriptions matched", ErrSubscriptionNotFound, affected, len(subsID))
 	}
 
 	in := strings.Join(placeholders, ", ")
@@ -147,12 +180,6 @@ func (s subscription) DeleteSubscriptions(ctx context.Context, subsID []models.S
 	// membership queries for a subscription that no longer exists.
 	nodeStmt := fmt.Sprintf("DELETE FROM subscribed_nodes WHERE subscription_id IN (%s)", in)
 	if _, err = s.DB.ExecContext(ctx, nodeStmt, idsArgs...); err != nil {
-		_ = s.Rollback()
-		return err
-	}
-
-	subStmt := fmt.Sprintf("DELETE FROM subscriptions WHERE id IN (%s)", in)
-	if _, err = s.DB.ExecContext(ctx, subStmt, idsArgs...); err != nil {
 		_ = s.Rollback()
 		return err
 	}

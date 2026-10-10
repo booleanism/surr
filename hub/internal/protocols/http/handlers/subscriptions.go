@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
@@ -101,6 +102,15 @@ func (s subscriptionHandlers) remove(w http.ResponseWriter, r *http.Request) {
 	subsNodes.User.ID = uid
 	subsID, err := s.s.RemoveSubscription(r.Context(), subsNodes)
 	if err != nil {
+		// The subscription service refuses a delete it cannot match against
+		// the caller's user id; report that as forbidden rather than as an
+		// internal failure.
+		if errors.Is(err, models.ErrSubscriptionNotFound) {
+			log.Warn().Err(err).Msg("remove subscription")
+			http.Error(w, "subscription not found", http.StatusForbidden)
+			return
+		}
+
 		log.Error().Err(err).Msg("remove subscription")
 		http.Error(w, "unable to remove subscription", http.StatusInternalServerError)
 		return

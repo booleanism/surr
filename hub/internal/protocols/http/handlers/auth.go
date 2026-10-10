@@ -3,9 +3,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
 	"github.com/booleanism/surr/hub/internal/usecases/auth"
 	"github.com/booleanism/surr/internal/models"
 	"github.com/google/uuid"
@@ -25,19 +28,37 @@ type RefreshTokenStore interface {
 }
 
 type authHandlers struct {
-	m *http.ServeMux
-	s RefreshTokenStore
-	a Authenticator
+	m       *http.ServeMux
+	s       RefreshTokenStore
+	a       Authenticator
+	limiter *middlewares.RateLimiter
 
-	jwtTTL time.Duration
+	jwtTTL       time.Duration
+	secureCookie bool
 }
 
-func NewAuthHandlers(mux *http.ServeMux, s RefreshTokenStore, a Authenticator, jwtTTL time.Duration) authHandlers {
+// Signin rate limiting: a caller that fails or repeats signin is throttled per
+// client address. Argon2 verification is deliberately expensive, so an
+// unthrottled endpoint is both a credential-stuffing target and a CPU
+// amplifier.
+const (
+	SigninAttemptsPerWindow = 10
+	SigninWindow            = time.Minute
+)
+
+// NewAuthHandlers registers the auth routes.
+//
+// secureCookie controls the Secure attribute on the refresh cookie: leave it
+// true for anything reachable over TLS, and set it false only for a plain-HTTP
+// local deployment, where a browser would otherwise refuse to store the cookie.
+func NewAuthHandlers(mux *http.ServeMux, s RefreshTokenStore, a Authenticator, jwtTTL time.Duration, secureCookie bool) authHandlers {
 	ah := authHandlers{
-		m:      mux,
-		s:      s,
-		a:      a,
-		jwtTTL: jwtTTL,
+		m:            mux,
+		s:            s,
+		a:            a,
+		limiter:      middlewares.NewRateLimiter(SigninAttemptsPerWindow, SigninWindow),
+		jwtTTL:       jwtTTL,
+		secureCookie: secureCookie,
 	}
 
 	mux.HandleFunc("POST /signin", ah.signinHandler)
@@ -51,10 +72,33 @@ func (h authHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.m.ServeHTTP(w, r)
 }
 
+// refreshCookie builds the refresh cookie so signin, refresh and logout cannot
+// drift apart in their attributes.
+func (h authHandlers) refreshCookie(value string, expires time.Time) *http.Cookie {
+	return &http.Cookie{ //nolint:gosec // HttpOnly and SameSite are always set; Secure follows --cookie-secure.
+		Name:     "refresh_token",
+		Value:    value,
+		Path:     "/auth",
+		HttpOnly: true,
+		Secure:   h.secureCookie,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expires,
+	}
+}
+
 func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close() //nolint:errcheck
 
 	log := zerolog.Ctx(r.Context())
+
+	// Key on the client address, not on the submitted email: keying on the
+	// email would let an attacker lock a known account out.
+	if allowed, retryAfter := h.limiter.Allow(clientAddr(r)); !allowed {
+		log.Warn().Dur("retry_after", retryAfter).Msg("signin rate limited")
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		http.Error(w, "too many signin attempts", http.StatusTooManyRequests)
+		return
+	}
 
 	var req models.User
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -67,7 +111,9 @@ func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 		Passwd: req.Passwd,
 	})
 	if err != nil {
-		log.Warn().Str("email", req.Email).Msg("signin failed")
+		// The submitted address is not logged: a failed signin would otherwise
+		// write user identifiers to disk in cleartext.
+		log.Warn().Err(err).Msg("signin failed")
 		http.Error(w, "invalid email or password", http.StatusUnauthorized)
 		return
 	}
@@ -85,15 +131,7 @@ func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    tokens.RefreshToken,
-		Path:     "/auth",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(h.s.TTL()),
-	})
+	http.SetCookie(w, h.refreshCookie(tokens.RefreshToken, time.Now().Add(h.s.TTL())))
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -101,6 +139,17 @@ func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 		"token_type":   "Bearer",
 		"expires_in":   h.jwtTTL.Seconds(),
 	})
+}
+
+// clientAddr returns the host part of the request's remote address, so the
+// limiter is not defeated by a client that cycles source ports.
+func clientAddr(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+
+	return host
 }
 
 func (h authHandlers) refreshAccessTokenHandler(w http.ResponseWriter, r *http.Request) {
@@ -130,15 +179,7 @@ func (h authHandlers) refreshAccessTokenHandler(w http.ResponseWriter, r *http.R
 
 	log.Info().Str("user_id", userID.String()).Msg("refresh token rotated")
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    newTokens.RefreshToken,
-		Path:     "/auth",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(h.s.TTL()),
-	})
+	http.SetCookie(w, h.refreshCookie(newTokens.RefreshToken, time.Now().Add(h.s.TTL())))
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -159,13 +200,17 @@ func (h authHandlers) logoutHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // HttpOnly and SameSite are always set; Secure follows --cookie-secure.
 		Name:     "refresh_token",
 		Value:    "",
 		Path:     "/auth",
 		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   h.secureCookie,
+		// SameSite matches the cookie set at signin: a Strict cookie is not
+		// sent on a top-level navigation from another site, so the value being
+		// cleared would be dropped by the browser in exactly the case where the
+		// server already deleted it from its store.
+		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
 

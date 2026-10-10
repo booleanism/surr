@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -36,10 +37,47 @@ const (
 	JWTTTL         = 24 * time.Hour
 	RefreshTTL     = JWTTTL * 7
 
+	// MaxRequestBodyBytes caps every request body. The largest legitimate
+	// body is a subscription add carrying a node list.
+	MaxRequestBodyBytes = 1 << 20 // 1 MiB
+
+	// The read and write deadlines are wider than GeneralTimeout because a
+	// handler may wait on a broker round trip, but they still bound a
+	// slowloris client or a stuck peer.
+	HTTPReadTimeout  = 15 * time.Second
+	HTTPWriteTimeout = 30 * time.Second
+	HTTPIdleTimeout  = 60 * time.Second
+
 	// MigrationsPath is where this service's SQL migrations live. It is only
 	// used to tell an operator what to run when the database is unmigrated.
 	MigrationsPath = "hub/internal/migrations/sqlite"
 )
+
+// resolveJWTSecret returns the configured signing secret, or a random
+// per-process one when none is set.
+//
+// A literal default used to be compiled in, which meant anyone holding the
+// repository could mint tokens for any deployment that never set JWT_SECRET.
+// Refusing to start would break `go run ./cmd/hub run`, so an unset secret now
+// produces an ephemeral key plus a loud warning: tokens stop validating on
+// restart, and a second hub instance cannot verify this one's tokens.
+func resolveJWTSecret(ctx context.Context, configured string) ([]byte, error) {
+	if configured != "" {
+		return []byte(configured), nil
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("generating ephemeral jwt secret: %w", err)
+	}
+
+	zerolog.Ctx(ctx).Warn().
+		Msg("JWT_SECRET is unset: generated an ephemeral signing secret. " +
+			"Access tokens will not survive a restart and other hub instances " +
+			"cannot validate them; set --secret/JWT_SECRET for any real deployment")
+
+	return buf, nil
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -158,9 +196,14 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	go restart.Loop(ctx, "goroutines-pool", goPool.Listen)
 
 	refreshToken := auth.NewRefreshTokenStore(RefreshTTL)
-	auth := auth.NewAuthenticator(usersRepo, argon, []byte(cmdLine.JWTSecret), JWTTTL)
+
+	jwtSecret, err := resolveJWTSecret(ctx, cmdLine.JWTSecret)
+	if err != nil {
+		return err
+	}
+
+	auth := auth.NewAuthenticator(usersRepo, argon, jwtSecret, JWTTTL)
 	authMiddleware := middlewares.NewAuth(auth)
-	_ = authMiddleware
 
 	subsMux := http.NewServeMux()
 	subsHandlers := httpHandlers.NewSubscription(subsMux, subsCase, authMiddleware)
@@ -172,7 +215,7 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	nodeHandlers := httpHandlers.NewNode(nodeMux, nodeCase, analCase, authMiddleware)
 
 	authMux := http.NewServeMux()
-	authHandlers := httpHandlers.NewAuthHandlers(authMux, refreshToken, auth, JWTTTL)
+	authHandlers := httpHandlers.NewAuthHandlers(authMux, refreshToken, auth, JWTTTL, cmdLine.CookieSecure)
 
 	apiMux := http.NewServeMux()
 	apiMux.Handle("/subscriptions/", http.StripPrefix("/subscriptions", subsHandlers))
@@ -185,8 +228,11 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 
 	httpSrv := http.Server{
 		Addr:              cmdLine.HTTPAddr,
-		Handler:           middlewares.NewRequestLogger(*log)(mainMux),
+		Handler:           middlewares.MaxBodyBytes(MaxRequestBodyBytes)(middlewares.NewRequestLogger(*log)(mainMux)),
 		ReadHeaderTimeout: GeneralTimeout,
+		ReadTimeout:       HTTPReadTimeout,
+		WriteTimeout:      HTTPWriteTimeout,
+		IdleTimeout:       HTTPIdleTimeout,
 	}
 
 	cleanups.Register(httpSrv.Close)

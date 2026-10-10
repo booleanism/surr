@@ -1,6 +1,19 @@
 package models
 
-import "github.com/google/uuid"
+import (
+	"errors"
+
+	"github.com/google/uuid"
+)
+
+// ErrSubscriptionNotFound reports that no subscription matched the requested id
+// for the requesting user.
+//
+// It lives here rather than in either service because it crosses the broker:
+// the subscriptions service enforces ownership in SQL and replies with
+// protocols.CodeNotFound, and the hub turns that back into this error so its
+// HTTP layer can answer 403 instead of 500.
+var ErrSubscriptionNotFound = errors.New("subscription not found")
 
 type Node struct {
 	ID      uuid.UUID `json:"id,omitzero"`

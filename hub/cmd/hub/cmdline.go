@@ -18,6 +18,7 @@ type CommandLine struct {
 	LogLevel        string
 	LogFormat       string
 	NGoroutinesPool uint32
+	CookieSecure    bool
 }
 
 func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
@@ -52,8 +53,7 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 					&cli.StringFlag{
 						Name:        "secret",
 						Aliases:     []string{"s"},
-						Usage:       "argon jwt secret",
-						Value:       "ac51c5949c74852a16d2ea08884c829aa10425e11097bd954c89c77b3224e7f6",
+						Usage:       "jwt signing secret. required in production: without it a random per-process secret is generated and tokens stop being valid after a restart",
 						Destination: &c.JWTSecret,
 						Sources:     cli.EnvVars("JWT_SECRET"),
 					},
@@ -85,6 +85,12 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 						Usage:       "local http listen",
 						Value:       "127.0.0.1:9000",
 						Destination: &c.HTTPAddr,
+					},
+					&cli.BoolFlag{
+						Name:        "cookie-secure",
+						Usage:       "set the Secure attribute on the refresh cookie. disable only for a plain-HTTP local deployment, where the browser would otherwise drop it",
+						Value:       true,
+						Destination: &c.CookieSecure,
 					},
 					&cli.StringFlag{
 						Name:        "log-level",

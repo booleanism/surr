@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
@@ -154,8 +155,15 @@ func (s subscriptions) removeHandler(ctx context.Context, trackID uuid.UUID, req
 
 	err = s.s.RemoveSubscriptions(ctx, *subsNodes)
 	if err != nil {
-		s.logFail(ctx, command, protocols.CodeDomain, err)
-		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
+		// A refused delete (unknown id, or one owned by another user) is
+		// reported separately so the hub can answer 403 instead of 500.
+		code := protocols.CodeDomain
+		if errors.Is(err, models.ErrSubscriptionNotFound) {
+			code = protocols.CodeNotFound
+		}
+
+		s.logFail(ctx, command, code, err)
+		_ = rep(ctx, protocols.ErrorResponse(code, err))
 		return
 	}
 
