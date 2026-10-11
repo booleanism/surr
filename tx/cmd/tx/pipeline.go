@@ -124,7 +124,7 @@ func setupRecording(ctx context.Context, pipelineName, p, streamName string, rec
 		return nil, fmt.Errorf("unable to link video recording elements")
 	}
 	if ret := dashsink2.VideoSink()(h264enc.GetStaticPad("src")); ret != gst.PadLinkOK {
-		return nil, fmt.Errorf("unable to link video recording: %s", ret)
+		return nil, fmt.Errorf("unable to link video recording: %s", ret.String())
 	}
 
 	if !audSrc.Link(aacenc) {
