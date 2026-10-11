@@ -13,16 +13,16 @@ import pymongo
 from pymongo import collection
 from pymongo.errors import CollectionInvalid
 
-from core import handlers as core_handlers
-from core import logging_setup
-from core import pipeline as core_pipeline
-from core import rpc as core_rpc
-from core import router as core_router
-from core import siblings as core_siblings
-from core import ticker as core_ticker
 from lib import detector as lib_detector
 from lib.bustle import handlers as bustle_handlers
 from lib.bustle import processing as bustle_processing
+from lib.core import handlers as core_handlers
+from lib.core import logging_setup
+from lib.core import pipeline as core_pipeline
+from lib.core import rpc as core_rpc
+from lib.core import router as core_router
+from lib.core import siblings as core_siblings
+from lib.core import ticker as core_ticker
 
 logger = logging.getLogger("bustle")
 

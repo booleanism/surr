@@ -1,4 +1,4 @@
-"""``core.ticker``: the async pacing generator.
+"""``lib.core.ticker``: the async pacing generator.
 
 The ticker computes each deadline from a fixed start time, so delays do not
 accumulate drift. A non-positive interval used to make every delay 0, which
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from core import ticker
+from lib.core import ticker
 
 class TickerTests(unittest.IsolatedAsyncioTestCase):
     async def _take(self, interval: float, count: int) -> tuple[list[int], float]:

@@ -1,6 +1,6 @@
-"""Fakes shared by the ``nodes/core`` tests.
+"""Fakes shared by the ``nodes/lib/core`` tests.
 
-``core.router`` reaches RabbitMQ only through ``aio_pika``'s abstract base
+``lib.core.router`` reaches RabbitMQ only through ``aio_pika``'s abstract base
 classes, so it can be driven with small fakes that record what was published
 instead of a live broker. Nothing here opens a connection, so the suite runs
 without RabbitMQ.
@@ -19,7 +19,7 @@ import uuid
 
 from aio_pika import abc
 
-from core import handlers, router
+from lib.core import handlers, router
 
 class FakeExchange:
     """Records every ``publish`` so a test can inspect the wire message."""
@@ -59,7 +59,7 @@ class FakeQueue:
         self.bound.append(routing_key)
 
 class FakeChannel:
-    """The two ``declare_*`` calls ``core.router.setup_router`` makes."""
+    """The two ``declare_*`` calls ``lib.core.router.setup_router`` makes."""
 
     def __init__(self) -> None:
         self.exchange_name: typing.Optional[str] = None
@@ -109,7 +109,7 @@ class FakeMessage:
         self.nacks.append(requeue)
 
 class ScriptedRouter:
-    """A ``core.router.Router`` stand-in for ``core.rpc.call``.
+    """A ``lib.core.router.Router`` stand-in for ``lib.core.rpc.call``.
 
     ``respond`` is called with ``(command, payload, sibling_name)`` and either
     returns a ``RouterResponse`` or raises the exception it returns.
@@ -141,7 +141,7 @@ def make_router(
     queue: typing.Optional[FakeQueue] = None,
 ) -> router.Router:
     """Build a ``Router`` wired to fakes (its channel is never used)."""
-    from core import siblings
+    from lib.core import siblings
 
     return router.Router(
         channel=typing.cast(abc.AbstractChannel, None),

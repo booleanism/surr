@@ -2,7 +2,7 @@
 
 Run with ``make test-nodes`` from the repo root, or directly::
 
-    cd nodes && .venv/bin/python -m unittest discover -s tests -t .
+    .venv/bin/python -m unittest discover -s nodes/tests -t nodes
 
 These suites deliberately drive error paths (unknown commands, malformed
 trackIDs, retried RPCs), so the root logger is turned down: the warnings are

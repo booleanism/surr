@@ -6,10 +6,10 @@ import typing
 import uuid
 
 from pymongo import collection
-from core import handlers
-from core import pipeline
-from lib.detector import Detector
 from lib.bustle.analytics import detail_line_chart_pipeline, summary_bar_chart_pipeline
+from lib.core import handlers
+from lib.core import pipeline
+from lib.detector import Detector
 from . import processing
 
 @dataclass

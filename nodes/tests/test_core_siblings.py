@@ -1,6 +1,6 @@
-"""``core.siblings``: the registry that resolves a command to a service.
+"""``lib.core.siblings``: the registry that resolves a command to a service.
 
-``core.rpc._call_once`` calls ``get_name`` and then tries *every* returned
+``lib.core.rpc._call_once`` calls ``get_name`` and then tries *every* returned
 name, because a sibling that restarted under a new name leaves a stale entry
 behind. ``get_name`` returning an empty list rather than None is therefore
 load-bearing: ``if not names`` is what produces the "no sibling yet" error.
@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from core import siblings
+from lib.core import siblings
 
 def registered(sibs: siblings.Siblings, name: str) -> siblings.Sibling:
     """``Siblings.get`` with the missing case turned into a failure."""

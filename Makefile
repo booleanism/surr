@@ -83,7 +83,7 @@ $(TEST_TARGETS): test-%: prep-cache
 # per-test output, and PYTHON=... to use another interpreter.
 #
 # `-t nodes` is load-bearing: it is what puts nodes/ on sys.path, so the tests'
-# `from core import ...` resolves without nodes/ being a package.
+# `from lib.core import ...` resolves without nodes/ being a package.
 test-nodes:
 	@echo "==> running python tests in nodes/ (interpreter: $(PYTHON))"
 	@$(PYTHON) -c "import aio_pika, numpy" 2>/dev/null || { \
@@ -98,7 +98,7 @@ build: prep-cache $(CMD_TARGETS)
 
 # Static analysis for the Python side, configured in the root pyproject.toml
 # (typeCheckingMode = "standard", venvPath = ".venv", extraPaths = ["nodes"]).
-# It covers nodes/bustle.py, nodes/core/, nodes/lib/ and nodes/tests/, and needs
+# It covers nodes/bustle.py, nodes/lib/ and nodes/tests/, and needs
 # the gi stubs from PyGObject-stubs -- see pyproject.toml for why
 # gst-python-stubs must not be installed.
 # Pass TYPECHECKFLAGS=--outputjson for machine-readable output.

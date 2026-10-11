@@ -26,8 +26,8 @@ import numpy
 
 from lib import detector
 
-# ``frame_worker`` is typed against ``core.pipeline.SRTStreamer``, and
-# ``core.pipeline`` imports GObject-Introspection at module scope, so the worker
+# ``frame_worker`` is typed against ``lib.core.pipeline.SRTStreamer``, and
+# ``lib.core.pipeline`` imports GObject-Introspection at module scope, so the
 # tests are skipped rather than failed on a host without GStreamer. Declaring
 # the name up front keeps the module importable either way; the production call
 # site in ``lib/bustle/handlers.py`` is what type-checks the real signature.
@@ -217,7 +217,7 @@ class FakeDetector:
 def box(class_id: int, confidence: float = 0.9) -> detector.Detection:
     return detector.Detection(class_id, confidence, (0.0, 0.0, 1.0, 1.0))
 
-@unittest.skipUnless(GST_AVAILABLE, "needs GStreamer (core.pipeline imports gi)")
+@unittest.skipUnless(GST_AVAILABLE, "needs GStreamer (lib.core.pipeline imports gi)")
 class FrameWorkerTests(unittest.IsolatedAsyncioTestCase):
     NAMES = {0: "person", 1: "bicycle", 2: "car", 3: "motorcycle"}
     CHOSEN = [0, 1, 2, 3]

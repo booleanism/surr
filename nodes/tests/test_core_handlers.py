@@ -1,4 +1,4 @@
-"""``core.handlers``: the wire shape of a RouterResponse.
+"""``lib.core.handlers``: the wire shape of a RouterResponse.
 
 This is the Python half of the protocol the Go services speak
 (``internal/protocols/handlers.go``). ``RouterResponse.GetBytes`` on the Go
@@ -14,7 +14,7 @@ import json
 import unittest
 import uuid
 
-from core import handlers
+from lib.core import handlers
 
 class JsonSerializerTests(unittest.TestCase):
     def test_bytes_become_base64_strings(self):

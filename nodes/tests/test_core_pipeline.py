@@ -1,4 +1,4 @@
-"""``core.pipeline``: the SRT frame path.
+"""``lib.core.pipeline``: the SRT frame path.
 
 The regression these lock down: ``videoconvert`` pads every row to an
 alignment, so the stride is not ``width * 3`` whenever a row is not 4-byte
@@ -40,7 +40,7 @@ try:  # pragma: no cover - the guard is exercised only where GStreamer is absent
 
     Gst.init(None)
 
-    from core.pipeline import SRTStreamer
+    from lib.core.pipeline import SRTStreamer
 
     GST_AVAILABLE = True
     GST_ERROR = ""

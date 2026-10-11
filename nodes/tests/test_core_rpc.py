@@ -1,4 +1,4 @@
-"""``core.rpc.call``: sibling resolution, retries and candidate failover.
+"""``lib.core.rpc.call``: sibling resolution, retries and candidate failover.
 
 The node calls this at boot before the hub has necessarily introduced itself
 (``nodes.add`` retries until the hub shows up), so "no sibling yet" has to be
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from core import handlers, rpc, siblings
+from lib.core import handlers, rpc, siblings
 
 from . import support
 

@@ -7,7 +7,7 @@
 #   uv run python nodes/bustle.py --help
 #
 # The venv lives at the repo root but the code lives in nodes/, which is not a
-# package (there is no nodes/__init__.py: the imports are `from core import
+# package (there is no nodes/__init__.py: the imports are `from lib.core import
 # ...` with nodes/ as the root). So `package = false` below: uv syncs the
 # dependencies and never tries to build or install the project itself.
 
@@ -71,9 +71,9 @@ torch = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }
 
 [tool.pyright]
-include = ["nodes/bustle.py", "nodes/core", "nodes/lib", "nodes/tests"]
+include = ["nodes/bustle.py", "nodes/lib", "nodes/tests"]
 exclude = [".venv", "**/__pycache__"]
-# The code lives in nodes/ and imports `core`/`lib` as top-level names, so that
+# The code lives in nodes/ and imports `lib` as a top-level name, so that
 # directory has to be on the search path or every import reads as unresolved.
 extraPaths = ["nodes"]
 # Pinning the venv is what makes the third-party imports (aio_pika, pymongo,

@@ -1,4 +1,4 @@
-"""``core.router``: the sibling RPC protocol on the Python side.
+"""``lib.core.router``: the sibling RPC protocol on the Python side.
 
 These tests pin the behaviours the Go router (``internal/protocols/rabbitmq``)
 relies on, and the ones that were repaired in E8:
@@ -21,7 +21,7 @@ import uuid
 
 from aio_pika import abc
 
-from core import handlers, router, siblings
+from lib.core import handlers, router, siblings
 
 from . import support
 
@@ -225,7 +225,7 @@ class DeliveryTests(RouterTestCase):
         self.handlers.set("ping", handler)
         message = support.FakeMessage(body=b"{}", type="ping", correlation_id=str(uuid.uuid4()))
 
-        with self.assertLogs("core.router", level="ERROR") as captured:
+        with self.assertLogs("lib.core.router", level="ERROR") as captured:
             await support.deliver(self.router, message)
             await support.drain(self.router)
 
@@ -350,7 +350,7 @@ class HandlerTaskTests(RouterTestCase):
             body=b"{}", type="ping", correlation_id=str(uuid.uuid4()), reply_to="rpc.direct.rx0"
         )
 
-        with self.assertLogs("core.router", level="ERROR") as captured:
+        with self.assertLogs("lib.core.router", level="ERROR") as captured:
             await support.deliver(self.router, message)
             await support.drain(self.router)
 

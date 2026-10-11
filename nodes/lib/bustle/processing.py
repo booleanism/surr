@@ -8,8 +8,8 @@ import uuid
 
 import pandas as pd
 from pymongo import collection
-from core import ticker
-from core import pipeline
+from lib.core import pipeline
+from lib.core import ticker
 from lib.detector import Detector
 
 logger = logging.getLogger(__name__)

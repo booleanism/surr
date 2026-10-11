@@ -1,4 +1,4 @@
-"""``core.logging_setup``: the root logger configuration.
+"""``lib.core.logging_setup``: the root logger configuration.
 
 The node stamps every record with its node id, the same context the Go
 services carry as a zerolog field (DESIGN.md 13). ``setup_logging`` is called
@@ -12,7 +12,7 @@ import io
 import logging
 import unittest
 
-from core import logging_setup
+from lib.core import logging_setup
 
 class SetupLoggingTests(unittest.TestCase):
     def setUp(self) -> None:
