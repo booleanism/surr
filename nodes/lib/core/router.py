@@ -61,9 +61,18 @@ class Router:
         self._inflight: set[asyncio.Task[None]] = set()
         self._abandoned: dict[uuid.UUID, float] = {}
 
-    async def introduce(self) -> None:
+    async def introduce(self, version: str) -> None:
+        """Broadcast this node's command set, wire revision and build id.
+
+        version is the build id from lib/version.py, advertised for diagnosis
+        only.
+        """
         commands = self._gh.available_commands()
-        body = siblings.Sibling(commands=commands).to_json()
+        body = siblings.Sibling(
+            commands=commands,
+            protocol_revision=siblings.PROTOCOL_REVISION,
+            version=version,
+        ).to_json()
 
         await self._exchange.publish(
             aio_pika.Message(
@@ -198,6 +207,28 @@ class Router:
             return
 
         self._siblings.set(message.reply_to, sibling)
+
+        # Register the peer either way. The command sets usually still line up,
+        # and refusing a mismatched peer would turn a warning into an outage;
+        # the point is that the disagreement is on the record before it
+        # surfaces as an unexplained failure on some later command.
+        if sibling.protocol_revision != siblings.PROTOCOL_REVISION:
+            logger.warning(
+                "sibling protocol revision mismatch sibling=%s "
+                "peer_protocol_revision=%d protocol_revision=%d peer_version=%s",
+                message.reply_to,
+                sibling.protocol_revision,
+                siblings.PROTOCOL_REVISION,
+                sibling.version or "-",
+            )
+
+        logger.debug(
+            "sibling registry updated sibling=%s count=%d peer_version=%s",
+            message.reply_to,
+            len(sibling.commands),
+            sibling.version or "-",
+        )
+
         await message.ack()
 
     async def _handle_inbound_request(

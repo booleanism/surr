@@ -72,17 +72,26 @@ class IntroduceTests(RouterTestCase):
             pass
 
         self.handlers.set("b.sink.start", handler)
-        await self.router.introduce()
+        await self.router.introduce("test-version")
 
         message, routing_key = self.exchange.last
         self.assertEqual(routing_key, router.BROADCAST_ROUTING_KEY)
         self.assertEqual(message.type, router.INTRODUCE_COMMAND)
         self.assertEqual(message.reply_to, "rpc.direct.bustle0")
-        self.assertEqual(json.loads(message.body), {"commands": ["b.sink.start"]})
+        self.assertEqual(
+            json.loads(message.body),
+            {
+                "commands": ["b.sink.start"],
+                "protocol_revision": siblings.PROTOCOL_REVISION,
+                "version": "test-version",
+            },
+        )
 
     async def test_advertises_nothing_before_any_handler_is_set(self):
-        await self.router.introduce()
-        self.assertEqual(json.loads(self.exchange.last[0].body), {"commands": []})
+        await self.router.introduce("test-version")
+        body = json.loads(self.exchange.last[0].body)
+        self.assertEqual(body["commands"], [])
+        self.assertEqual(body["protocol_revision"], siblings.PROTOCOL_REVISION)
 
 class SendTests(RouterTestCase):
     async def test_sends_to_the_sibling_name_and_records_the_track_id(self):
@@ -176,6 +185,64 @@ class DeliveryTests(RouterTestCase):
 
         self.assertEqual(message.acks, 1)
         self.assertEqual(self.sibs.get_name("nodes.add"), ["rpc.direct.hub0"])
+
+    async def test_a_peer_on_the_same_revision_is_not_warned_about(self):
+        body = siblings.Sibling(
+            commands=["nodes.add"],
+            protocol_revision=siblings.PROTOCOL_REVISION,
+            version="abc123",
+        ).to_json()
+        message = support.FakeMessage(
+            body=body, type=router.INTRODUCE_COMMAND, reply_to="rpc.direct.hub0"
+        )
+
+        with self.assertNoLogs("lib.core.router", level="WARNING"):
+            await support.deliver(self.router, message)
+
+        sibling = self.sibs.get("rpc.direct.hub0")
+        self.assertIsNotNone(sibling)
+        assert sibling is not None  # narrows for the type checker
+        self.assertEqual(sibling.protocol_revision, siblings.PROTOCOL_REVISION)
+
+    async def test_a_peer_on_a_different_revision_is_warned_about_and_still_registered(self):
+        body = siblings.Sibling(
+            commands=["nodes.add"],
+            protocol_revision=siblings.PROTOCOL_REVISION + 1,
+            version="newer-build",
+        ).to_json()
+        message = support.FakeMessage(
+            body=body, type=router.INTRODUCE_COMMAND, reply_to="rpc.direct.hub0"
+        )
+
+        with self.assertLogs("lib.core.router", level="WARNING") as captured:
+            await support.deliver(self.router, message)
+
+        warning = "\n".join(captured.output)
+        self.assertIn("protocol revision mismatch", warning)
+        self.assertIn(f"peer_protocol_revision={siblings.PROTOCOL_REVISION + 1}", warning)
+        self.assertIn(f"protocol_revision={siblings.PROTOCOL_REVISION}", warning)
+        self.assertIn("peer_version=newer-build", warning)
+
+        # Refusing the peer would turn a warning into an outage, so it is
+        # registered anyway -- the point is only that the mismatch is on record.
+        self.assertEqual(message.acks, 1)
+        self.assertEqual(self.sibs.get_name("nodes.add"), ["rpc.direct.hub0"])
+
+    async def test_a_peer_predating_the_revision_field_is_warned_about(self):
+        # The pre-revision wire shape: no protocol_revision key at all. It
+        # decodes as 0, which is exactly right -- that peer does not speak the
+        # current revision -- so the warning must fire.
+        message = support.FakeMessage(
+            body=b'{"commands":["nodes.add"]}',
+            type=router.INTRODUCE_COMMAND,
+            reply_to="rpc.direct.hub0",
+        )
+
+        with self.assertLogs("lib.core.router", level="WARNING") as captured:
+            await support.deliver(self.router, message)
+
+        self.assertIn("peer_protocol_revision=0", "\n".join(captured.output))
+        self.assertEqual(message.acks, 1)
 
     async def test_an_unknown_command_is_nacked_without_dispatch(self):
         message = support.FakeMessage(

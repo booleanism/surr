@@ -21,15 +21,48 @@ def registered(sibs: siblings.Siblings, name: str) -> siblings.Sibling:
     return sib
 
 class SiblingTests(unittest.TestCase):
-    def test_wire_shape_is_exactly_commands(self):
-        self.assertEqual(json.loads(siblings.Sibling(commands=["a", "b"]).to_json()), {"commands": ["a", "b"]})
+    def test_the_wire_carries_commands_revision_and_version(self):
+        body = json.loads(
+            siblings.Sibling(
+                commands=["a", "b"], protocol_revision=1, version="abc123"
+            ).to_json()
+        )
+        self.assertEqual(
+            body,
+            {"commands": ["a", "b"], "protocol_revision": 1, "version": "abc123"},
+        )
+
+    def test_the_defaults_are_the_old_peer_shape(self):
+        # A Sibling built without the new fields must encode as revision 0, so
+        # it is indistinguishable from a peer that predates the field -- which
+        # is what makes the mismatch warning fire during a rolling upgrade.
+        body = json.loads(siblings.Sibling(commands=["a"]).to_json())
+        self.assertEqual(body, {"commands": ["a"], "protocol_revision": 0, "version": ""})
 
     def test_round_trip(self):
-        sib = siblings.Sibling.from_json(siblings.Sibling(commands=["nodes.add"]).to_json())
+        sib = siblings.Sibling.from_json(
+            siblings.Sibling(
+                commands=["nodes.add"], protocol_revision=1, version="abc123"
+            ).to_json()
+        )
         self.assertEqual(sib.commands, ["nodes.add"])
+        self.assertEqual(sib.protocol_revision, 1)
+        self.assertEqual(sib.version, "abc123")
 
     def test_a_missing_commands_key_is_an_empty_list(self):
         self.assertEqual(siblings.Sibling.from_json(b"{}").commands, [])
+
+    def test_a_body_without_a_revision_decodes_as_zero(self):
+        # The pre-revision wire shape. Decoding it as 0 rather than refusing it
+        # is deliberate: the peer is registered and warned about, so a mixed
+        # deployment keeps working while the operator is told.
+        sib = siblings.Sibling.from_json(b'{"commands": ["nodes.add"]}')
+        self.assertEqual(sib.protocol_revision, 0)
+        self.assertEqual(sib.version, "")
+
+    def test_the_revision_is_a_positive_int(self):
+        self.assertIsInstance(siblings.PROTOCOL_REVISION, int)
+        self.assertGreater(siblings.PROTOCOL_REVISION, 0)
 
     def test_undecodable_body_raises(self):
         with self.assertRaises(json.JSONDecodeError):

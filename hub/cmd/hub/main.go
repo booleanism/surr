@@ -189,7 +189,7 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if introErr := router.Introduce(ctx); introErr != nil {
+				if introErr := router.Introduce(ctx, Version); introErr != nil {
 					log.Error().Err(introErr).Msg("introducing it self")
 				}
 			}

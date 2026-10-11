@@ -122,12 +122,17 @@ func (r *router) ReplaceChannel(ch *amqp091.Channel, q amqp091.Queue) {
 	r.chMu.Unlock()
 }
 
-func (r *router) Introduce(ctx context.Context) error {
+// Introduce broadcasts this service's command set, wire revision and build id
+// on the broadcast routing key. version is the build id injected by the
+// Makefile; it is advertised for diagnosis only.
+func (r *router) Introduce(ctx context.Context, version string) error {
 	commands := make([]protocols.Command, 0, 64)
 	_ = r.gh.AvailableCommand(&commands)
 
 	siblingByte, err := json.Marshal(&protocols.Sibling{
-		Commands: commands,
+		Commands:         commands,
+		ProtocolRevision: protocols.ProtocolRevision,
+		Version:          version,
 	})
 	if err != nil {
 		return err
@@ -136,6 +141,7 @@ func (r *router) Introduce(ctx context.Context) error {
 	zerolog.Ctx(ctx).Debug().
 		Str("sibling", r.directRoutingKey).
 		Int("count", len(commands)).
+		Int("protocol_revision", protocols.ProtocolRevision).
 		Msg("introduce broadcast")
 
 	return r.channel().PublishWithContext(ctx, r.exchName, BroadcastRoutingKey, false, false, amqp091.Publishing{
@@ -259,9 +265,26 @@ func (r *router) handlerIntroCommand(ctx context.Context, repyTo string, body []
 		return err
 	}
 
-	zerolog.Ctx(ctx).Debug().
+	log := zerolog.Ctx(ctx)
+
+	// Register the peer either way. The command sets usually still line up, and
+	// refusing a mismatched peer would turn a warning into an outage; the point
+	// is that the disagreement is on the record before it surfaces as an
+	// unexplained failure on some later command.
+	if sibling.ProtocolRevision != protocols.ProtocolRevision {
+		log.Warn().
+			Str("sibling", repyTo).
+			Int("peer_protocol_revision", sibling.ProtocolRevision).
+			Int("protocol_revision", protocols.ProtocolRevision).
+			Str("peer_version", sibling.Version).
+			Msg("sibling protocol revision mismatch")
+	}
+
+	log.Debug().
 		Str("sibling", repyTo).
 		Int("count", len(sibling.Commands)).
+		Int("peer_protocol_revision", sibling.ProtocolRevision).
+		Str("peer_version", sibling.Version).
 		Msg("sibling registry updated")
 
 	return nil
