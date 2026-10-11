@@ -38,7 +38,7 @@ func setupPipelines(ctx context.Context, cancel context.CancelCauseFunc, cfg Pip
 	}
 
 	if !cfg.RecordingSpecs.IsZero() {
-		recording, err = setupRecording(cfg.RecordingPipelineName, cfg.RecordingDir, cfg.StreamName, &cfg.RecordingSpecs)
+		recording, err = setupRecording(ctx, cfg.RecordingPipelineName, cfg.RecordingDir, cfg.StreamName, &cfg.RecordingSpecs)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -93,7 +93,7 @@ func setupDownstream(pipelineName, srturi string, specs core.StreamSpecs) (*core
 	return pipe, nil
 }
 
-func setupRecording(pipelineName, p, streamName string, recSpecs *core.StreamSpecs) (*core.Pipeline, error) {
+func setupRecording(ctx context.Context, pipelineName, p, streamName string, recSpecs *core.StreamSpecs) (*core.Pipeline, error) {
 	pipe := core.NewPipeline(pipelineName)
 	vidSrc := src.NewInterSrc(VidProdName)
 	h264enc := coder.NewH264Enc(recSpecs)
@@ -103,6 +103,11 @@ func setupRecording(pipelineName, p, streamName string, recSpecs *core.StreamSpe
 
 	audSrc := src.NewInterSrc(AudProdName)
 	aacenc := coder.NewAACEnc()
+	if !aacenc.Valid() {
+		return nil, fmt.Errorf("aac encoder elements unavailable: install fdkaacenc, voaacenc or avenc_aac")
+	}
+
+	zerolog.Ctx(ctx).Info().Str("element", aacenc.ElementName()).Msg("aac encoder selected")
 
 	dashsink2 := sink.NewDashSink2(map[string]any{
 		"mpd-root-path":   filepath.Join(p, streamName),

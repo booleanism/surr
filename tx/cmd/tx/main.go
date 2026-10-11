@@ -236,8 +236,19 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 	vidSink := sink.NewInterSink(VidProdName)
 	prodPipe.Add(vidSink)
 
-	rtph264caps, rtph264depay := rtp.NewRTPH264Depay(prodPipe, *log)
+	// Both decoders are built and validated together, before anything is wired:
+	// ElementFactoryMake returns nil for a factory this GStreamer installation
+	// does not have, and linking through that nil element crashes the process,
+	// so a missing plugin has to be a startup error instead.
 	prodH264dec := coder.NewH264Dec()
+	aacdec := coder.NewAACDec()
+	if decErr := coder.CheckDecoders(prodH264dec, aacdec); decErr != nil {
+		return decErr
+	}
+
+	log.Info().Str("element", aacdec.ElementName()).Msg("aac decoder selected")
+
+	rtph264caps, rtph264depay := rtp.NewRTPH264Depay(prodPipe, *log)
 	cbData[rtph264caps] = rtph264depay.OnPadAdded(prodH264dec.LinkChain(prodPipe, func(srcpad gst.Pad) gst.PadLinkReturn {
 		return srcpad.Link(vidSink.GetStaticPad("sink"))
 	}))
@@ -250,7 +261,6 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 		return srcpad.Link(audSink.GetStaticPad("sink"))
 	}
 
-	aacdec := coder.NewAACDec()
 	rtpmp4acaps, rtpmp4adepay := rtp.NewRTPMP4ADepay(prodPipe, *log)
 	cbData[rtpmp4acaps] = rtpmp4adepay.OnPadAdded(aacdec.LinkChain(prodPipe, audlink))
 
