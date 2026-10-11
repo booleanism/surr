@@ -14,6 +14,7 @@ from pymongo import collection
 from pymongo.errors import CollectionInvalid
 
 from lib import detector as lib_detector
+from lib import version as lib_version
 from lib.bustle import handlers as bustle_handlers
 from lib.bustle import processing as bustle_processing
 from lib.core import handlers as core_handlers
@@ -177,11 +178,12 @@ def parse_args(argv: typing.Optional[typing.List[str]] = None) -> argparse.Names
 
 async def introduce(
     interval: float,
-    intro: typing.Callable[[], typing.Coroutine[typing.Any, typing.Any, None]],
+    router: core_router.Router,
+    version: str,
 ) -> None:
     ticker_gen = core_ticker.ticker(interval)
     async for _ in ticker_gen:
-        await intro()
+        await router.introduce(version)
 
 
 def install_signal_handlers(stop_event: asyncio.Event) -> None:
@@ -225,9 +227,10 @@ async def main() -> int:
     logging_setup.setup_logging(args.log_level, str(args.node_id))
 
     logger.info(
-        "bustle node starting name=%s node_id=%s family=%s broker=%s node=%s",
+        "bustle node starting name=%s node_id=%s version=%s family=%s broker=%s node=%s",
         args.node_name,
         args.node_id,
+        lib_version.VERSION,
         args.family,
         redact_url(args.broker),
         args.node_type,
@@ -314,7 +317,7 @@ async def main() -> int:
             logger.info("starting router listen")
 
             intro_task = asyncio.create_task(
-                introduce(args.intro_interval, router.introduce)
+                introduce(args.intro_interval, router, lib_version.VERSION)
             )
 
             normalizer_task = asyncio.create_task(
