@@ -791,6 +791,15 @@ The venv is `./.venv` at the repo root, while all the node code stays in
 - [ ] `internal/models/user.go:7`: `Passwd` is JSON-serializable (safe only
       because call sites marshal just the ID).
 - [ ] No email/password validation; duplicate email surfaces as 500, not 409.
+      Confirmed by hand: the request decodes straight into `models.User`, whose
+      password field is tagged `passwd` (`internal/models/user.go:7`), and
+      nothing checks it afterwards. A body of
+      `{"email":"x@y.z","password":"..."}` — the field named the way almost
+      every API names it — is accepted, because Go's decoder ignores unknown
+      keys, and the account is created with an **empty password** that then
+      authenticates successfully. Signup should reject an empty `passwd`, and
+      ideally reject unknown fields so the mistake is a 400 rather than a
+      silent account.
 - [ ] `rx/cmd/rx/cmdline.go`: `srtHost` splits on `:` → no IPv6 listen addrs.
 - [ ] `tx/cmd/tx/main.go:158` ignored the `url.Parse` error — **fixed**
       (`if err != nil { return err }`). Still open: `tx/cmd/tx/main.go:120`
