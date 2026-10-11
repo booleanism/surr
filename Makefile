@@ -20,6 +20,14 @@ PYRIGHT ?= $(if $(wildcard $(VENV_DIR)/bin/pyright),$(VENV_DIR)/bin/pyright,pyri
 export GOCACHE := $(CACHE_DIR)/go-build
 export GOLANGCI_LINT_CACHE := $(CACHE_DIR)/golangci-lint
 
+# Version stamped into every binary and logged at startup, so a running service
+# can say which build it is. `git describe` gives the nearest tag, or the
+# abbreviated commit when the tree has no tags yet, and appends -dirty when
+# there are uncommitted changes. The `|| echo` covers a source archive with no
+# .git directory. The node resolves the same string at startup (nodes/lib/
+# version.py), so both sides of a mixed deployment report the same build.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
+
 # Build configuration variables
 TAGS ?=
 GOFLAGS ?=
@@ -36,7 +44,14 @@ ifeq ($(RELEASE_TYPE),release)
 endif
 
 BUILD_TAGS_FLAG := $(if $(TAGS),-tags '$(TAGS)',)
-LDFLAGS_FLAG := $(if $(LDFLAGS),-ldflags '$(LDFLAGS)',)
+
+# The version is always injected, so LDFLAGS=... (and the release -s -w) append
+# to it rather than replacing it -- passing LDFLAGS on the command line used to
+# be the only way to set linker flags, and it must not silently drop the build
+# id. Every cmd/ package declares `var Version` in package main, which is what
+# -X main.Version=... targets.
+VERSION_LDFLAGS := -X main.Version=$(VERSION)
+LDFLAGS_FLAG := -ldflags '$(strip $(LDFLAGS) $(VERSION_LDFLAGS))'
 
 # Discover Go module paths (root + submodules), normalised so a module is
 # addressable as `make hub` / `make test-hub` rather than `make test-./hub`

@@ -23,8 +23,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Version is the build id reported by --version and logged at startup. The
+// Makefile injects it with -ldflags -X main.Version=$(VERSION); see the
+// Makefile for how VERSION is derived.
+var Version = "dev"
+
 const (
-	Version       = "1.0.0"
 	IntroInterval = 1 * time.Second
 
 	// MigrationsPath is where this service's SQL migrations live. It is only
@@ -45,7 +49,7 @@ func main() {
 		return
 	}
 
-	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, cmdLine.LogLevel, cmdLine.LogFormat)
+	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, Version, cmdLine.LogLevel, cmdLine.LogFormat)
 
 	cleanups := &logging.Cleanups{}
 	cleanupDone := make(chan struct{})

@@ -35,11 +35,16 @@ func ParseLevel(level string) zerolog.Level {
 	return l
 }
 
-// Setup builds the service root logger (service=<name> family=<family>
-// fields, console or json output) and returns a context derived from ctx
-// that carries it. It is called once from each service's main; everything
-// downstream reads the logger via zerolog.Ctx.
-func Setup(ctx context.Context, name, family, level, format string) (context.Context, zerolog.Logger) {
+// Setup builds the service root logger (service=<name> version=<version>
+// family=<family> fields, console or json output) and returns a context derived
+// from ctx that carries it. It is called once from each service's main;
+// everything downstream reads the logger via zerolog.Ctx.
+//
+// version is the build id injected by the Makefile (see its VERSION variable).
+// It is logged once here so a running process can say which build it is without
+// being asked, which is what makes a mixed deployment diagnosable from the logs
+// alone.
+func Setup(ctx context.Context, name, family, version, level, format string) (context.Context, zerolog.Logger) {
 	var out zerolog.Logger
 	if format == FormatJSON {
 		out = zerolog.New(os.Stdout).With().Timestamp().Logger()
@@ -52,6 +57,7 @@ func Setup(ctx context.Context, name, family, level, format string) (context.Con
 
 	out = out.With().
 		Str("service", name).
+		Str("version", version).
 		Logger().
 		Level(ParseLevel(level))
 

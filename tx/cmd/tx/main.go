@@ -24,8 +24,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Version is the build id reported by --version and logged at startup. The
+// Makefile injects it with -ldflags -X main.Version=$(VERSION); see the
+// Makefile for how VERSION is derived.
+var Version = "dev"
+
 const (
-	Version          = "1.0.0"
 	VidProdName      = "vid"
 	AudProdName      = "aud"
 	ManifestFileName = "manifest.mpd"
@@ -58,7 +62,7 @@ func main() {
 		return
 	}
 
-	ctx, log := logging.Setup(ctx, "tx", "", cmdLine.LogLevel, cmdLine.LogFormat)
+	ctx, log := logging.Setup(ctx, "tx", "", Version, cmdLine.LogLevel, cmdLine.LogFormat)
 
 	cleanups := &logging.Cleanups{}
 	cleanupDone := make(chan struct{})

@@ -30,9 +30,15 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Version is the build id reported by --version and logged at startup. The
+// Makefile injects it with -ldflags -X main.Version=$(VERSION), where VERSION
+// is `git describe --tags --always --dirty`. A plain `go build` or `go run`
+// gets this default instead, which is deliberately not a plausible release
+// number.
+var Version = "dev"
+
 const (
 	IntroInterval  = 1 * time.Second
-	Version        = "1.0.0"
 	GeneralTimeout = 5 * time.Second
 	JWTTTL         = 24 * time.Hour
 	RefreshTTL     = JWTTTL * 7
@@ -91,7 +97,7 @@ func main() {
 		return
 	}
 
-	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, cmdLine.LogLevel, cmdLine.LogFormat)
+	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, Version, cmdLine.LogLevel, cmdLine.LogFormat)
 
 	cleanups := &logging.Cleanups{}
 	cleanupDone := make(chan struct{})
