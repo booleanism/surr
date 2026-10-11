@@ -122,7 +122,20 @@ registering a handler without a test breaks `make test`.
 Note that neither `make lint` nor `make build` passes build tags: check the
 `vah264enc` variant of tx explicitly with `make test TAGS=va`.
 
+`make lint`, `make test-go` and `make build` also run in CI on every push and
+pull request (`.github/workflows/ci.yml`), alongside the Python tests and
+pyright. `make test` is `test-go` plus `test-nodes`; CI splits them because the
+Go half needs a cgo toolchain and the Python half needs the GStreamer typelibs,
+and neither should wait on the other.
+
 ## Quick start
+
+There are two ways to run this: the compose stack in `deploy/`, which brings up
+RabbitMQ, MongoDB, both migrators and every service on the right networks, or by
+hand, which is what the rest of this section describes. **Start with
+[`deploy/README.md`](deploy/README.md)** unless you are working on a single
+service — it is the shorter path, and it documents the one component the
+repository does not contain (an RTSP source).
 
 ### 1. Start the infrastructure
 
@@ -142,6 +155,11 @@ migrate -path hub/internal/migrations/sqlite \
 migrate -path subscriptions/internal/migrations/sqlite \
         -database "sqlite3://$PWD/subscriptions.db" up
 ```
+
+> In the compose stack this is the `migrate-hub` / `migrate-subscriptions`
+jobs, which run to completion before the services start. They exist because
+that `migrate` CLI cannot be pulled as a stock image at all — see
+`deploy/migrate.Dockerfile`.
 
 This creates the tables and a `schema_migrations` bookkeeping table. Use `down`
 to roll back one version. Run this before starting `hub` and `subscriptions`:
@@ -244,6 +262,13 @@ A typical first run: `POST /users/signup`, `POST /auth/signin` to get a token,
 then `POST /subscriptions/add` with the node IDs to obtain a subscription ID —
 that ID is what goes into the `tx --sink` streamid.
 
+Two field names surprise people, and both fail quietly: the password field is
+`passwd`, not `password` (an unknown key is ignored, so a `password` signup
+creates an account with an empty password that then authenticates), and
+`/subscriptions/add` takes `{"nodes":[{"id":"..."}]}`, not a flat list of ids
+(the wrong key creates an empty subscription, and the node cannot be added again
+because a node belongs to exactly one subscription).
+
 ## Nodes
 
 | Node | Description |
@@ -252,6 +277,7 @@ that ID is what goes into the `tx --sink` streamid.
 
 ## Documentation
 
+- [deploy/README.md](deploy/README.md) — run the whole system with Docker Compose, including the RTSP source it needs.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — services, data flow, protocol, storage, service internals.
 - [DESIGN.md](DESIGN.md) — design rationale, trade-offs, known limitations, invariants.
 - [TODO.md](TODO.md) — staged work (nodes refactor, analytics service, logging) and verified defects.
