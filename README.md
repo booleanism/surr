@@ -13,7 +13,7 @@ central orchestrator.
 > review down to HIGH severity is fixed.** [TODO.md](TODO.md) section E is the
 > tracker for the review findings and their status — what is fixed, and what is
 > still open — so it is the only place that records it. Tests cover the RPC reply
-> layer, the restart backoff and the `nodes/core` runtime, and `make typecheck`
+> layer, the restart backoff and the `nodes/lib/core` runtime, and `make typecheck`
 > gates the Python side with pyright; the SRT data plane, the SQLite layer and
 > the tx pipelines are exercised by hand.
 
@@ -69,7 +69,7 @@ make            # lint + test + typecheck + build everything
 make build      # build only (no lint, no test)
 make lint       # golangci-lint, every module
 make test       # go test ./..., every module, then the nodes/ python suite
-make test-nodes # python tests for nodes/core (nodes/tests)
+make test-nodes # python tests for nodes/lib/core (nodes/tests)
 make typecheck  # pyright over nodes/ (pyproject.toml)
 make clean      # remove .cache/ and bin/
 ```
@@ -109,12 +109,12 @@ over the real stubs and makes every GStreamer enum and constructor an
 unknown-attribute error.
 
 The Go tests cover the RPC reply layer and the backoff used by the restart loops.
-The Python suite in `nodes/tests` covers the `nodes/core` runtime — the wire
+The Python suite in `nodes/tests` covers the `nodes/lib/core` runtime — the wire
 shapes, the router's ack/abandoned-trackID paths, the RPC retry ladder, the
 ticker, logging setup and the GStreamer frame path — and the classes that need
 the GStreamer bindings skip themselves where those are missing. `make typecheck`
-adds pyright in `standard` mode over `nodes/bustle.py`, `nodes/core/`,
-`nodes/lib/` and `nodes/tests/`. Everything else (the SRT data plane, the SQLite
+adds pyright in `standard` mode over `nodes/bustle.py`, `nodes/lib/` and
+`nodes/tests/`. Everything else (the SRT data plane, the SQLite
 layer, the tx pipelines) is exercised by hand. The two handler tests enumerate
 the commands their service advertises and fail when one has no case, so
 registering a handler without a test breaks `make test`.
@@ -202,8 +202,8 @@ loopback caller may register or delete a stream.
 
 ### 6. Start a node
 
-Run from the repo root. `nodes/` is not a package — the runtime imports `core`
-and `lib` as top-level names, and Python puts a script's own directory on
+Run from the repo root. `nodes/` is not a package — the runtime imports `lib`
+as a top-level name, and Python puts a script's own directory on
 `sys.path`, so the path below resolves as-is:
 
 ```sh

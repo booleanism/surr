@@ -64,7 +64,7 @@ acked; malformed ones are nacked without requeue so poison messages cannot loop
 transparently handles base64-encoded string payloads — this exists because the
 Python side base64-encodes binary results inside a JSON string. Any change to
 the response shape must be mirrored in both `internal/protocols/handlers.go`
-and `nodes/core/handlers.py`. `GetBytes()` has no call sites (the convention
+and `nodes/lib/core/handlers.py`. `GetBytes()` has no call sites (the convention
 survives because `json.Unmarshal` into `*[]byte` happens to base64-decode
 Python's string), and it is the wrong reader for failures: a short ASCII message
 such as `internal` is itself valid base64, so it decodes to garbage. Use
@@ -369,13 +369,14 @@ Not yet implemented on `main` — see TODO.md for staged execution. (A version
 of this refactor exists on `refs/remotes/gitea/main` as commit `66e308b
 "nodes: pythonic refactor"`, which restructures `nodes/` into
 `core/{cli,config,detector,registry,service,storage,stream,worker}.py`,
-`node.py`, and `workers/bustle/*`. It is not on `main` and should be treated
+`node.py`, and `workers/bustle/*` — those modules now belong under
+`nodes/lib/core/` on `main`. It is not on `main` and should be treated
 as prior art, not as landed code.)
 
 The `nodes/` refactor extracts the type-agnostic lifecycle (boot, introduce
 loop, registration, shutdown choreography — ~90% of `bustle.py`'s finally-block)
-into `core/node.py` so a new node type is an entrypoint + `lib/<type>/`
-package, never a copy of `bustle.py`. Two rules keep it honest: `core/`
+into `lib/core/node.py` so a new node type is an entrypoint + `lib/<type>/`
+package, never a copy of `bustle.py`. Two rules keep it honest: `lib/core/`
 contains no AI/model/database specifics (they enter only via hooks and the
 pipeline object), and the refactor is wire-compatible at every stage. The
 `analytics.declare` call from §11 becomes a post-registration hook on this
@@ -385,7 +386,7 @@ runtime. See ARCHITECTURE.md "Planned evolution" for the shape.
 
 Implemented in `internal/logging/` and wired into all four Go services;
 TODO.md section C is complete. Python nodes use stdlib `logging` via
-`nodes/core/logging_setup.py`.
+`nodes/lib/core/logging_setup.py`.
 
 **Choice.** zerolog on the Go side: zero-allocation structured logging, one
 small dependency, native context support (`zerolog.Ctx`), and it works
@@ -544,7 +545,7 @@ is the tracker for these findings and their status.
    `gi.repository` bindings). `uv.lock` records the resolved transitive graph
    and `uv sync` is the one setup command; `requirements.txt` is gone, and
    `make typecheck` runs the gate (0 errors). The typing fixes it
-   required were real: a `RouterLike` Protocol so `core/rpc.py` no longer
+   required were real: a `RouterLike` Protocol so `lib/core/rpc.py` no longer
    depends on the concrete `Router`, a `None` guard on
    `GstVideo.VideoInfo.new_from_caps` in `_frame_view`, and type arguments on
    the `queue.Queue`/`pymongo.Collection` attributes. The one landmine: the
@@ -594,7 +595,7 @@ is the tracker for these findings and their status.
 
 ### B. Operational / robustness gaps
 
-1. **Tests are still thin.** The Python `nodes/core` runtime now has a suite
+1. **Tests are still thin.** The Python `nodes/lib/core` runtime now has a suite
    (`nodes/tests/`, run by `make test-nodes` and wired into
    `make test`), including the detector seam (`lib/detector.py`, exercised
    against a faked `libreyolo`), and the Go tests cover the RPC reply layer
@@ -602,7 +603,7 @@ is the tracker for these findings and their status.
    `handlers` packages) and `internal/backoff`. The two `handlers` packages
    enumerate the commands they advertise and fail when one has no case, so the
    reply layer cannot regress silently. The Python side is also type checked by
-   `make typecheck` (pyright, `standard`, over `bustle.py`, `core/`, `lib/` and
+   `make typecheck` (pyright, `standard`, over `bustle.py`, `lib/` and
    `tests/`). Nothing else in the tree — the SRT data plane, the SQLite layer,
    the tx pipelines — is executed by a test, and for those `make lint` and
    `make test` are the only automated gates.
@@ -694,7 +695,7 @@ is the tracker for these findings and their status.
   the pipeline includes `poll-timeout=10000` and the BGR caps/appsink
   properties.
 - TODO.md's C8 ("folds into A2") was wrong: the Python logging work shipped as
-  a standalone `nodes/core/logging_setup.py` while A2 is still open.
+  a standalone `nodes/lib/core/logging_setup.py` while A2 is still open.
 
 ## Invariants to preserve when changing code
 
@@ -712,7 +713,7 @@ is the tracker for these findings and their status.
    and `subscribe:<node-uuid>` (egress).
 5. Pooled buffers must be returned exactly once on every path — the
    broadcaster's refcount and the `defer ...ResetAndPut` pairs depend on it.
-6. `nodes/core/` must stay node-type-agnostic: no AI/model/database specifics
+6. `nodes/lib/core/` must stay node-type-agnostic: no AI/model/database specifics
    may land there (they enter via hooks, the pipeline object, or manifests).
    Enforced as part of the nodes refactor (DESIGN.md §12). `logging_setup.py`
    complies; `pipeline.py` currently hard-codes the H264/BGR decode chain

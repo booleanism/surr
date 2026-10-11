@@ -3,7 +3,7 @@
 Execution tracker for the designed-but-unbuilt efforts. Design context:
 ARCHITECTURE.md "Planned evolution", DESIGN.md §11 (analytics service),
 §12 (nodes refactor) and §13 (logging). Principles: whoever writes the data
-also writes the query; nodes/core stays node-type-agnostic; the wire stays
+also writes the query; nodes/lib/core stays node-type-agnostic; the wire stays
 Go/Python compatible at every stage.
 
 Status of the three workstreams: **C (logging) is done**; A and B are open.
@@ -11,7 +11,9 @@ Neither A nor B exists on `main`. Prior art for both lives outside it: the
 abandoned `feat/analytics-service` branch (surviving only as dangling commits
 and `refs/stash`) contains a first `analytics/` module, and
 `refs/remotes/gitea/main` commit `66e308b "nodes: pythonic refactor"`
-implements roughly section A (`nodes/core/{cli,config,detector,registry,service,storage,stream,worker}.py`,
+implements roughly section A (its runtime package
+`nodes/core/{cli,config,detector,registry,service,storage,stream,worker}.py`
+— the same modules section A now targets under `nodes/lib/core/` — plus
 `nodes/node.py`, `nodes/workers/bustle/*`, deleting `nodes/lib/bustle/*`).
 Treat both as prior art to review, not as landed code.
 
@@ -32,7 +34,7 @@ Ordered stages; each lands independently and is wire-compatible.
   - [x] pyproject.toml at the repo root: pyright config (standard, exclude
         .venv, extraPaths nodes), proper dependency pins (requirements.txt was
         a venv dump, and is gone; uv.lock carries the transitive graph)
-  - [x] Unit tests for nodes/core (pure python, fakes, no broker):
+  - [x] Unit tests for nodes/lib/core (pure python, fakes, no broker):
     - [x] handlers: RouterResponse to_json/from_json round-trip incl.
           base64-bytes convention (guards the Go wire contract)
     - [x] siblings: get_name returns all candidates / None
@@ -45,7 +47,7 @@ Ordered stages; each lands independently and is wire-compatible.
         (node_id, pipeline, model, chosen_classes, async_q, coll)
   - [ ] register(self, handlers_mgr) registers bound handlers
   - [ ] Command names and payloads stay byte-identical
-- [ ] A2. Extract core/node.py (the real work)
+- [ ] A2. Extract lib/core/node.py (the real work)
   - [ ] Node class: node_id/name/family/intro_interval/rpc_timeout, router,
         siblings, handlers, pipeline (duck-typed start/stop),
         registration_payload (opaque bytes), on_start(ctx) hook
@@ -53,7 +55,7 @@ Ordered stages; each lands independently and is wire-compatible.
         nodes.add with retry-until-sibling, graceful shutdown choreography
         (stop pipeline → cancel tasks keeping listen alive → nodes.remove →
         cancel listen)
-  - [ ] registration payload builder in core/ (hub's {id, bitrate, width,
+  - [ ] registration payload builder in lib/core/ (hub's {id, bitrate, width,
         height} contract, node-type-generic)
   - [ ] bustle.py shrinks to: parse args → build streamer/model/queue/
         handlers instance → Node(...).run()
@@ -181,10 +183,10 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       mains and internals — verified with go build, go vet, gofumpt and
       golangci-lint (make lint: 0 issues in every module)
 - [x] C8. bustle.py print()s → stdlib logging, matching the level semantics of
-      core/ modules (Python side keeps stdlib logging). **Correction:** this did
+      lib/core/ modules (Python side keeps stdlib logging). **Correction:** this did
       NOT fold into A2 — it shipped as a standalone module,
-      `nodes/core/logging_setup.py` (imported at `bustle.py:16`, called at
-      `bustle.py:208`), while A2 is still open. `core/*.py` still use
+      `nodes/lib/core/logging_setup.py` (imported at `bustle.py:16`, called at
+      `bustle.py:208`), while A2 is still open. `lib/core/*.py` still use
       module-level loggers rather than the configured root logger.
 
 ## D. Standalone fixes (unrelated to A/B, small)
@@ -244,7 +246,7 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       `handlers` packages) plus `internal/backoff`; the two `handlers` tests
       enumerate the commands their service advertises and fail when one has no
       case. The Python side is covered as well: `nodes/tests/` (117 tests, stdlib
-      `unittest`) exercises the `nodes/core` runtime and the detector seam and
+      `unittest`) exercises the `nodes/lib/core` runtime and the detector seam and
       runs from
       `make test-nodes`, wired into `make test`, and `make typecheck` gates it
       with pyright. Still untested: the SRT data plane, the SQLite layer and the
@@ -310,7 +312,7 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
 - [x] Sites: `hub/internal/protocols/rabbitmq/handlers/node.go:72,81,88` and
       ~18 in `subscriptions/internal/protocols/rabbitmq/handlers/subscription.go`.
 - [x] Consequence: `nodes.add` failures become a permanent 1 Hz retry loop
-      (`nodes/core/rpc.py`, `retries=None`), with no diagnostic on either side.
+      (`nodes/lib/core/rpc.py`, `retries=None`), with no diagnostic on either side.
 - [x] Fix: build the error `Result` as valid JSON (e.g.
       `json.RawMessage(strconv.Quote(msg))`). **Applied and verified** — all 27
       `Result:` assignments across `hub/internal/protocols/rabbitmq/handlers/node.go`
@@ -363,7 +365,7 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       hard-error paths (a `call` error and a receive error): every failure is
       appended to an `errs` slice and the loop ends with
       `return errors.Join(errs...)`. That is what "try every candidate" means
-      in `nodes/core/rpc.py`. The same rewrite landed in
+      in `nodes/lib/core/rpc.py`. The same rewrite landed in
       `rx/internal/adapter/rabbitmq/subscriptions.go`.
 - [x] `internal/protocols/rabbitmq/router.go`: **fixed.** The `track` struct
       and its `done` flag are gone. `knownTrackID` is now
@@ -603,9 +605,9 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       caller blocks forever. Type `ReplyFunc` as returning a `Coroutine` so
       Pyright catches this. **Fixed**: the call is awaited and `ReplyFunc` is
       now `Callable[[RouterResponse], Coroutine[Any, Any, None]]`
-      (`nodes/core/handlers.py`), which makes a dropped `rep(...)` a Pyright
+      (`nodes/lib/core/handlers.py`), which makes a dropped `rep(...)` a Pyright
       error rather than silent.
-- [x] `nodes/core/router.py:170,188`: `ack()` before dispatching the handler as
+- [x] `nodes/lib/core/router.py:170,188`: `ack()` before dispatching the handler as
       a fire-and-forget task (reference dropped, no done-callback) → a crash
       between ack and reply loses the request silently, and handler exceptions
       are never retrieved. **Fixed**: `_track_handler_task` keeps the task in
@@ -626,13 +628,13 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       pipeline → leaked pipeline, two appsink callbacks feeding one queue.
       **Fixed**: `_start_sink` stops the pipeline (not just the worker task)
       before starting the new one.
-- [x] `nodes/core/pipeline.py:17,68,77-81`: no synchronization between
+- [x] `nodes/lib/core/pipeline.py:17,68,77-81`: no synchronization between
       `start()`/`stop()` and `_on_new_sample`; the callback never checks
       `running`. **Fixed**: a `threading.Lock` guards `pipeline`/`running`; the
       callback checks `running` under it; `start()` publishes the new pipeline
       only once fully wired, and `stop()` swaps the reference under the lock
       before calling `set_state(NULL)` outside it.
-- [x] `nodes/core/pipeline.py:41-45`: `queue.Full` → `get_nowait()` can raise
+- [x] `nodes/lib/core/pipeline.py:41-45`: `queue.Full` → `get_nowait()` can raise
       `queue.Empty` on the GStreamer thread. **Fixed**: both the drop-stale
       `get_nowait()` and the `put_nowait()` are individually wrapped, and the
       dance happens outside the lock.
@@ -640,12 +642,12 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       `insert_one` → a transient pymongo error exits the whole node process;
       `frame_worker` likewise has none (dies silently while `running` stays
       true). **Fixed**: both are wrapped and logged.
-- [x] `nodes/core/router.py:50,132-139`: a late reply after a `recv` timeout is
+- [x] `nodes/lib/core/router.py:50,132-139`: a late reply after a `recv` timeout is
       mis-dispatched as an inbound request (the trackID is popped in `finally`).
       **Fixed**: a cancelled `recv` records the trackID in `_abandoned`
       (TTL 60s, capped at 1024); `_handle_delivery` acks and drops a late reply
       for an abandoned trackID instead of handing it to a command handler.
-- [x] `nodes/core/ticker.py`: `interval <= 0` degenerates to a `call_later(0)`
+- [x] `nodes/lib/core/ticker.py`: `interval <= 0` degenerates to a `call_later(0)`
       hot loop. **Fixed**: the interval is floored at `MIN_INTERVAL = 0.001`.
 - [x] `nodes/lib/bustle/handlers.py:79-80`: blocking pymongo aggregation on the
       event loop (up to 5 weeks of timeseries). **Fixed**: moved to
@@ -716,18 +718,18 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
 **Fixed.** The root `pyproject.toml` now carries the dependency list and the
 pyright configuration, `uv.lock` records the resolved transitive graph, `uv
 sync` is the one setup command, and `make typecheck` runs the gate — `0 errors,
-0 warnings` in `standard` mode over `bustle.py`, `core/`, `lib/` and `tests/`.
+0 warnings` in `standard` mode over `bustle.py`, `lib/` and `tests/`.
 The venv is `./.venv` at the repo root, while all the node code stays in
 `nodes/`.
 
 - [x] Pyright is not installed in the node venv and there is no
       `pyrightconfig.json`; default mode reports 7 errors + 1 warning (all
-      PyGObject stub attribute issues in `nodes/core/pipeline.py`), strict mode
+      PyGObject stub attribute issues in `nodes/lib/core/pipeline.py`), strict mode
       111. Either add the config + dependency (TODO A0) or drop the claim.
       **Fixed**: `pyright` and `PyGObject-stubs` are in the `dev` dependency
       group and the config
       lives in the root `pyproject.toml` rather than a `pyrightconfig.json`
-      (`include = ["nodes/bustle.py", "nodes/core", "nodes/lib",
+      (`include = ["nodes/bustle.py", "nodes/lib/core", "nodes/lib",
       "nodes/tests"]`, `exclude`, `venvPath = "."`, `venv = ".venv"`,
       `extraPaths = ["nodes"]`, `pythonVersion = "3.14"`,
       `typeCheckingMode = "standard"`, `reportMissingModuleSource = "none"`
@@ -762,13 +764,13 @@ The venv is `./.venv` at the repo root, while all the node code stays in
       is committed, so the transitive graph is reproducible rather than
       floating. (The list changed again with the detector swap — see D.)
 - [x] Lint hygiene (re-checked against the current tree): missing type args on
-      `queue.Queue` (`nodes/core/pipeline.py:19`) and `collection.Collection`
+      `queue.Queue` (`nodes/lib/core/pipeline.py:19`) and `collection.Collection`
       (`nodes/lib/bustle/handlers.py:35,48`,
       `nodes/lib/bustle/processing.py:28`); an untyped `obj` parameter
-      (`nodes/core/handlers.py:9`); the unused `Pipeline` Protocol
+      (`nodes/lib/core/handlers.py:9`); the unused `Pipeline` Protocol
       (`nodes/lib/bustle/handlers.py:15`, declared and never referenced). Two
       earlier claims were wrong and are dropped: `import threading` *is* used
-      (`nodes/core/pipeline.py:2`), and `_coll`/`_node_id` *are* declared as
+      (`nodes/lib/core/pipeline.py:2`), and `_coll`/`_node_id` *are* declared as
       class attributes (`nodes/lib/bustle/handlers.py:35-36`).
       **Fixed**: `queue.Queue[numpy.ndarray]`,
       `collection.Collection[dict[str, typing.Any]]` (both files),

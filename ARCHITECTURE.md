@@ -94,7 +94,7 @@ over a shared topic exchange (the "family", default `surr0`):
    broadcasts an `introduce` message (Type=`introduce`, ReplyTo=its direct
    routing key) whose body is the JSON `{"commands": [...]}` list of commands
    it serves. Peers store these in an in-memory siblings registry
-   (`internal/protocols/siblings.go`, `nodes/core/siblings.py`) keyed by
+   (`internal/protocols/siblings.go`, `nodes/lib/core/siblings.py`) keyed by
    routing key.
 3. **Request** — a caller resolves which sibling serves a command
    (`GetName(command)`), then `Send`s a request: new UUID `CorrelationId`
@@ -117,8 +117,8 @@ currently never delivered**: the error `Result` is set from a `[]byte` while
 discarded. Callers time out instead. See "Known defects".
 
 Go implementation: `internal/protocols/rabbitmq/router.go` +
-`internal/protocols/handlers.go`. Python mirror: `nodes/core/router.py` +
-`nodes/core/handlers.py`. Python serializes `RouterResponse` with
+`internal/protocols/handlers.go`. Python mirror: `nodes/lib/core/router.py` +
+`nodes/lib/core/handlers.py`. Python serializes `RouterResponse` with
 base64-encoded bytes; Go mirrors this in `RouterResponse.GetBytes`, and the
 hub's adapter relies on `json.Unmarshal` into `*[]byte` happening to
 base64-decode Python's JSON string.
@@ -153,7 +153,7 @@ data-plane identity that survives a rename or restart.
 ### Node lifecycle
 
 - On boot a node retries `nodes.add` until the hub is discovered (the RPC call
-  retries forever until it succeeds — see `nodes/core/rpc.py`). There is no
+  retries forever until it succeeds — see `nodes/lib/core/rpc.py`). There is no
   backoff, so an error reply that never arrives becomes a 1 Hz retry loop.
 - The hub upserts idempotently (`ON CONFLICT(id) DO UPDATE`), so
   re-registration after restart is safe.
@@ -305,7 +305,7 @@ Same layering as hub minus HTTP.
 - `bustle.py` — CLI entrypoint (argparse), wiring, signal handling, graceful
   shutdown (stop streamer → cancel background tasks → `nodes.remove` → stop
   router listen).
-- `core/` — protocol runtime mirroring the Go side: `router.py`,
+- `lib/core/` — protocol runtime mirroring the Go side: `router.py`,
   `siblings.py`, `handlers.py`, `rpc.py` (retrying command-resolving call),
   `pipeline.py` (`SRTStreamer`, the appsink pipeline), `ticker.py`,
   `logging_setup.py` (stdlib logging with a `node_id` filter).
@@ -328,7 +328,7 @@ Same layering as hub minus HTTP.
   NMS, so overlapping low-confidence boxes are counted separately. Tracking is
   deliberately not used (LibreYOLO's `predict` reports no ids, and the counter
   never read them).
-- Pipeline string (`nodes/core/pipeline.py`):
+- Pipeline string (`nodes/lib/core/pipeline.py`):
   `srtsrc name=src poll-timeout=10000 ! tsdemux ! h264parse ! avdec_h264 !
   videoconvert ! video/x-raw, format=BGR ! appsink name=app_sink
   emit-signals=true max-buffers=1 drop=true`, connected with
@@ -341,10 +341,10 @@ Same layering as hub minus HTTP.
   through `[tool.uv.sources]`. `uv.lock` holds the full transitive graph.
   `[tool.uv] package = false` keeps `uv sync` to dependencies, because there is
   no packaging step: `nodes/` is a directory of scripts, not a package, so the
-  imports are `from core import ...` / `from lib.bustle import ...` with `nodes/`
+  imports are `from lib.core import ...` / `from lib.bustle import ...` with `nodes/`
   as the root, and the node runs as `uv run python nodes/bustle.py` from the repo
   root.
-- Tests: `nodes/tests/` (stdlib `unittest`, no pytest) covers the `nodes/core`
+- Tests: `nodes/tests/` (stdlib `unittest`, no pytest) covers the `nodes/lib/core`
   runtime and the detector seam (`lib/detector.py`, with a faked `libreyolo`);
   run it with `make test-nodes`, or from the repo root with
   `.venv/bin/python -m unittest discover -s nodes/tests -t nodes` (the `-t nodes`
@@ -402,7 +402,7 @@ source; TODO.md section E is the tracker for their status.
 | frame path: `reshape((height, width, 3))` assumed tightly packed rows, and `get_frame()` lost its non-blocking default when it moved to `get(timeout=...)` | any `video/x-raw` width whose row was not 4-byte aligned (e.g. 1279) raised `ValueError` on the GStreamer streaming thread; an argument-less `get_frame()` blocked the caller forever | `_frame_view` strides rows from `GstVideo.VideoInfo.new_from_caps`, falls back to packed rows and returns `None` when the layout does not fit; the redundant full-frame `.copy()` is gone; `get_frame(timeout=None)` is non-blocking again |
 | hub security: committed JWT secret, any-HMAC validation, no signin rate limit, email logged, no ownership check on removal, unbounded bodies, only `ReadHeaderTimeout`, `Secure:true` cookies, unauthenticated DASH control routes | token forgery, brute force, cross-user deletion, slowloris, broken local dev, unauthenticated stream deletion | ephemeral secret + warning, pinned HS256 and issuer, 10/min per-address limiter, ownership enforced inside the `DELETE`, 1 MiB `MaxBytesReader` + Read/Write/Idle timeouts, `--cookie-secure`, `requireDashToken` (loopback-only without a token) |
 | detector: ultralytics was the inference engine, and it is **AGPL-3.0** while this repository is MIT; its `Results` object also leaked into the counting code (`boxes.cls`, `isinstance(..., torch.Tensor)`, `model.names`) | publishing the node would have imposed AGPL on the whole repository, and the leak made any swap a cross-cutting edit | a narrow `Detector` Protocol in `nodes/lib/detector.py` (`detect(frame) -> list[Detection]`) with `LibreYOLODetector` behind it, on **LibreYOLO** (MIT code) with **`LibreDEIMm.pt`** weights (Apache-2.0, 55.4 mAP50-95, 19.6 M params, 640 px); DEIM v2 S/M/L/X was rejected because those checkpoints add Meta's non-OSI DINOv3 licence. `--conf` replaces ultralytics' NMS as the only filter, and unused tracking was dropped |
-| Python typing/packaging: no `pyproject.toml`, no type-checker config, `requirements.txt` a `pip freeze` dump already divergent from the venv; missing type args on `queue.Queue`/`pymongo.Collection`, untyped `json_serializer(obj)`, an unused `Pipeline` Protocol | the documented type-check gate did not run, so the `None`-returning `GstVideo.VideoInfo.new_from_caps` was unguarded and a fresh venv could resolve different dependency versions | root `pyproject.toml` (exact pins, the torch CPU index, `typeCheckingMode = "standard"`, `venvPath`/`venv`/`extraPaths` pinned) plus `uv.lock` for the transitive graph, and `uv sync` as the one setup command; `make typecheck` (0 errors); `_frame_view` guards `None`; `RouterLike` Protocol in `core/rpc.py`; the type args and the dead Protocol are gone. Never install `gst-python-stubs` — it clobbers the real `Gst.pyi` |
+| Python typing/packaging: no `pyproject.toml`, no type-checker config, `requirements.txt` a `pip freeze` dump already divergent from the venv; missing type args on `queue.Queue`/`pymongo.Collection`, untyped `json_serializer(obj)`, an unused `Pipeline` Protocol | the documented type-check gate did not run, so the `None`-returning `GstVideo.VideoInfo.new_from_caps` was unguarded and a fresh venv could resolve different dependency versions | root `pyproject.toml` (exact pins, the torch CPU index, `typeCheckingMode = "standard"`, `venvPath`/`venv`/`extraPaths` pinned) plus `uv.lock` for the transitive graph, and `uv sync` as the one setup command; `make typecheck` (0 errors); `_frame_view` guards `None`; `RouterLike` Protocol in `lib/core/rpc.py`; the type args and the dead Protocol are gone. Never install `gst-python-stubs` — it clobbers the real `Gst.pyi` |
 
 ### Open (E7, E11)
 
@@ -426,7 +426,7 @@ source; TODO.md section E is the tracker for their status.
 - `make typecheck` — pyright over `nodes/`, configured by the root
   `pyproject.toml` (`typeCheckingMode = "standard"`, `venvPath`/`venv` pinned to
   `.venv` so the third-party imports and the `gi.repository` stubs resolve, and
-  `extraPaths = ["nodes"]` so the nodes' `from core import ...` imports resolve
+  `extraPaths = ["nodes"]` so the nodes' `from lib.core import ...` imports resolve
   from a config one level above them). It needs `pyright` and `PyGObject-stubs`
   in that venv (both in the `dev` dependency group, so `uv sync` installs them)
   and must not have `gst-python-stubs`, which ships an overrides-only `Gst.pyi`
@@ -446,7 +446,7 @@ source; TODO.md section E is the tracker for their status.
   automated checks for everything else. The two `handlers` tests enumerate the
   commands the service advertises (`AvailableCommand`) and fail when one has no
   case, so registering a handler without covering its reply breaks the build.
-- The Python node is covered by `nodes/tests/` (over `nodes/core`: the
+- The Python node is covered by `nodes/tests/` (over `nodes/lib/core`: the
   wire shapes, the router's delivery/ack/abandoned-trackID paths, the RPC retry
   ladder, the ticker, logging setup and the GStreamer frame path) and type
   checked by `make typecheck`.
@@ -461,7 +461,9 @@ shape; TODO.md tracks execution.
 > abandoned `feat/analytics-service` branch (surviving only as dangling
 > commits and a stash) contains a first `analytics/` Go module, and
 > `refs/remotes/gitea/main` contains commit `66e308b "nodes: pythonic refactor"`
-> which implements roughly workstream 2 (`nodes/core/{cli,config,detector,registry,service,storage,stream,worker}.py`,
+> which implements roughly workstream 2 (its runtime package
+> `nodes/core/{cli,config,detector,registry,service,storage,stream,worker}.py`
+> — the same modules workstream 2 now targets under `nodes/lib/core/` — plus
 > `nodes/node.py`, `nodes/workers/bustle/*`, deleting `nodes/lib/bustle/*`).
 > `main` is the canonical line and everything below is absent from it.
 
@@ -517,7 +519,7 @@ Consequences:
 
 Staged internal refactor of `nodes/` — no architecture change, wire-compatible
 throughout (see TODO.md for the ordered stages). Highlights: de-singleton
-`BustleHandlers`, extract the generic `Node` runtime into `core/node.py`
+`BustleHandlers`, extract the generic `Node` runtime into `lib/core/node.py`
 (owning boot/registration/declare/shutdown), parameterize the decode chain,
 fix the frame-worker busy-loop, add a `nodes/` test suite. The Node runtime
 gains the `analytics.declare` post-registration hook as part of this work.
@@ -530,5 +532,5 @@ loggers, a documented level and field policy, and a strict never-log list
 (credentials, tokens, credential-bearing URIs, full payloads). `internal/logging`
 also provides `Cleanups`, the mutex-guarded replacement for the old
 `beforeExit` slice that removed the shutdown data races. Python nodes keep
-stdlib `logging` (`nodes/core/logging_setup.py`). See DESIGN.md §13 and
+stdlib `logging` (`nodes/lib/core/logging_setup.py`). See DESIGN.md §13 and
 TODO.md section C.
