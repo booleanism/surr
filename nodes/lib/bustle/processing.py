@@ -8,10 +8,9 @@ import uuid
 
 import pandas as pd
 from pymongo import collection
-import torch
-from ultralytics.models import YOLO
 from core import ticker
 from core import pipeline
+from lib.detector import Detector
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +74,14 @@ async def normalizer(
 
 def frame_worker(
     receiver: pipeline.SRTStreamer,
-    model: YOLO,
+    detector: Detector,
     chosen_classes: list[int],
     loop: asyncio.AbstractEventLoop,
     async_q: asyncio.Queue[dict[str, int]],
 ):
+    # Read once: the mapping only changes when the model does.
+    names = detector.names
+
     while receiver.running:
         # Blocking get with a timeout: a non-blocking poll here spun at 100%
         # CPU for every frame interval that produced no frame at all.
@@ -91,22 +93,11 @@ def frame_worker(
         # worker: it used to exit the thread while running stayed true, so the
         # node looked healthy but counted nothing.
         try:
-            res = model.track(frame, verbose=False)
-            if not res or len(res) < 1:
-                continue
+            detections = detector.detect(frame)
 
-            boxes = res[0].boxes
-            if boxes is None or boxes.cls is None:
-                continue
-
-            if isinstance(boxes.cls, torch.Tensor):
-                class_ids = boxes.cls.cpu().numpy().astype(int)
-            else:
-                class_ids = boxes.cls
-
-            counts: Counter[int] = Counter(class_ids)
+            counts: Counter[int] = Counter(d.class_id for d in detections)
             frame_data: dict[str, int] = {
-                model.names[c]: counts.get(c, 0) for c in chosen_classes if c in model.names
+                names[c]: counts.get(c, 0) for c in chosen_classes if c in names
             }
         except Exception as e:
             logger.error("processing frame: %s", e, exc_info=e)

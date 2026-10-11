@@ -12,7 +12,6 @@ import aio_pika
 import pymongo
 from pymongo import collection
 from pymongo.errors import CollectionInvalid
-from ultralytics.models import YOLO
 
 from core import handlers as core_handlers
 from core import logging_setup
@@ -21,6 +20,7 @@ from core import rpc as core_rpc
 from core import router as core_router
 from core import siblings as core_siblings
 from core import ticker as core_ticker
+from lib import detector as lib_detector
 from lib.bustle import handlers as bustle_handlers
 from lib.bustle import processing as bustle_processing
 
@@ -37,7 +37,7 @@ DEFAULT_FAMILY = "surr0"
 DEFAULT_BROKER = "amqp://guest:guest@localhost/"
 DEFAULT_MONGO_URL = "mongodb://root:root@127.0.0.1:27017/"
 DEFAULT_MONGO_DB = "nodes"
-DEFAULT_MODEL = "yolo26s.pt"
+DEFAULT_MODEL = lib_detector.DEFAULT_WEIGHTS
 DEFAULT_CHOSEN_CLASSES = "0,1,2,3"
 DEFAULT_INTRO_INTERVAL = 1.0
 DEFAULT_DRAIN_INTERVAL = 2.0
@@ -115,14 +115,21 @@ def parse_args(argv: typing.Optional[typing.List[str]] = None) -> argparse.Names
         "-m", "--model",
         dest="model",
         default=DEFAULT_MODEL,
-        help="path to the YOLO weights used for inference",
+        help="detector weights: a path, or a bare name resolved under ./weights and downloaded on first use",
+    )
+    parser.add_argument(
+        "--conf",
+        dest="confidence",
+        type=float,
+        default=lib_detector.DEFAULT_CONFIDENCE,
+        help="drop detections below this score; the decoder applies no NMS, so low-confidence boxes are counted too",
     )
     parser.add_argument(
         "-c", "--chosen-classes",
         dest="chosen_classes",
         type=parse_classes,
         default=DEFAULT_CHOSEN_CLASSES,
-        help="comma separated class ids to count (see YOLO model.names)",
+        help="comma separated class ids to count (see the detector's COCO class names)",
     )
     parser.add_argument(
         "--intro-interval",
@@ -242,13 +249,13 @@ async def main() -> int:
     siblings = core_siblings.Siblings()
     streamer = core_pipeline.SRTStreamer(args.node_id)
     async_q: asyncio.Queue[dict[str, int]] = asyncio.Queue()
-    model = YOLO(args.model)
+    detector = lib_detector.LibreYOLODetector(args.model, args.confidence)
 
     bustle_handlers.BustleHandlers.setup(
         args.node_id,
         handlers,
         streamer,
-        model,
+        detector,
         args.chosen_classes,
         async_q,
         coll,

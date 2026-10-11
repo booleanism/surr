@@ -88,8 +88,9 @@ class SRTStreamer:
         frame memcpy (~420us at 1280x720) on the GStreamer streaming thread,
         protecting nothing.
 
-        The array is read-only, being backed by an immutable bytes.
-        ultralytics' LetterBox accepts that: it resizes into a fresh array.
+        The array is read-only, being backed by an immutable bytes. The
+        detector accepts a read-only input: preprocessing resizes into a fresh
+        array before inference.
 
         Rows are strided rather than reshaped. videoconvert pads each row to an
         alignment, so the stride is not `width * 3` whenever a row is not

@@ -6,9 +6,9 @@ import typing
 import uuid
 
 from pymongo import collection
-from ultralytics.models import YOLO
 from core import handlers
 from core import pipeline
+from lib.detector import Detector
 from lib.bustle.analytics import detail_line_chart_pipeline, summary_bar_chart_pipeline
 from . import processing
 
@@ -22,7 +22,7 @@ class NodeSource:
 
 class BustleHandlers:
     _pipeline: pipeline.SRTStreamer
-    _model: YOLO
+    _detector: Detector
     _chosen_classes: list[int]
     _async_q: asyncio.Queue[dict[str, int]]
     _coll: collection.Collection[dict[str, typing.Any]]
@@ -35,13 +35,13 @@ class BustleHandlers:
         node_id: uuid.UUID,
         handlers_mgr: handlers.Handlers,
         pipeline: typing.Any,
-        model: YOLO,
+        detector: Detector,
         chosen_classes: list[int],
         async_q: asyncio.Queue[dict[str, int]],
         coll: collection.Collection[dict[str, typing.Any]]
     ) -> None:
         cls._pipeline = pipeline
-        cls._model = model
+        cls._detector = detector
         cls._chosen_classes = chosen_classes
         cls._async_q = async_q
         cls._coll = coll
@@ -133,7 +133,7 @@ class BustleHandlers:
             asyncio.to_thread(
                 processing.frame_worker,
                 cls._pipeline,
-                cls._model,
+                cls._detector,
                 cls._chosen_classes,
                 loop,
                 cls._async_q,
