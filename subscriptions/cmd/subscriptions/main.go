@@ -102,7 +102,13 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	if err != nil {
 		return err
 	}
-	defer sqliteDB.Close() //nolint:errcheck
+
+	// Registered, not deferred. run() does not block -- it starts the listener
+	// goroutines and returns -- so a deferred close would shut the database
+	// immediately after startup, and every command after that would fail with
+	// "sql: database is closed". The hub registers its own handle the same way
+	// (see cleanups.Register(sqliteDB.Close) in hub/cmd/hub/main.go).
+	cleanups.Register(sqliteDB.Close)
 
 	err = db.VerifySchema(ctx, sqliteDB, MigrationsPath, "subscriptions", "subscribed_nodes")
 	if err != nil {
