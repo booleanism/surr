@@ -77,7 +77,7 @@ Ordered stages; each lands independently and is wire-compatible.
 
 Out of scope for A (deliberate): sibling-registry TTL/sweep (cross-language,
 Go + Python, its own branch); renames of lib/ layout; async rewrite of the
-GStreamer/YOLO path.
+GStreamer/inference path.
 
 ## B. Analytics service (writer-owned queries) — DESIGN.md §11
 
@@ -216,13 +216,36 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       Ownership is now enforced too (E9): the `DELETE` binds
       `(id = ? AND user_id = ?)` and a refusal comes back as
       `protocols.CodeNotFound`, which the handler answers with 403.
+- [x] Detector licensing and coupling. The node inferred through
+      `ultralytics` (**AGPL-3.0**) while this repository is MIT, and
+      ultralytics' `Results` object leaked into the counting code
+      (`nodes/lib/bustle/processing.py`: `boxes.cls`,
+      `isinstance(boxes.cls, torch.Tensor)`, `model.names`), so the licence was
+      not the only obstacle to replacing it. **Fixed**: `nodes/lib/detector.py`
+      defines a narrow `Detector` Protocol (`names: Mapping[int, str]`,
+      `detect(frame) -> list[Detection]`) with `Detection` a frozen dataclass of
+      `class_id`/`confidence`/`xyxy`; `LibreYOLODetector` implements it over
+      **LibreYOLO** (MIT code, no `py.typed`) with **`LibreDEIMm.pt`** weights
+      (**Apache-2.0**, 55.4 mAP50-95 at 19.6 M params, 640 px). DEIM v2 at
+      S/M/L/X was rejected because those checkpoints add Meta's DINOv3 licence,
+      which is not OSI-approved and forbids military/ITAR uses; DEIM v1 is a
+      HGNetv2 backbone and carries none of that. `ultralytics` and `lap` are out
+      of `pyproject.toml`, `libreyolo==1.6.0` is in. Two behaviour changes:
+      DEIM decodes top-K with **no NMS**, so `--conf` (default `0.25`) is the
+      only filter between raw output and the count (overlapping low-confidence
+      boxes are counted separately, unlike ultralytics' NMS); and tracking was
+      dropped — `model.track()` was called but only `boxes.cls` was ever read,
+      and LibreYOLO's `predict` reports no ids. Cost: ~546 ms/frame on CPU at
+      1280x720. Covered by `nodes/tests/test_lib_detector.py` (17 tests against
+      a faked `libreyolo`).
 - [ ] Go test suite. **Partly done**: `make test` runs `go test ./...` in every
       module and covers the RPC reply layer
       (`internal/protocols/handlers_test.go`, the `hub` and `subscriptions`
       `handlers` packages) plus `internal/backoff`; the two `handlers` tests
       enumerate the commands their service advertises and fail when one has no
-      case. The Python side is covered as well: `nodes/tests/` (100 tests, stdlib
-      `unittest`) exercises the `nodes/core` runtime and runs from
+      case. The Python side is covered as well: `nodes/tests/` (117 tests, stdlib
+      `unittest`) exercises the `nodes/core` runtime and the detector seam and
+      runs from
       `make test-nodes`, wired into `make test`, and `make typecheck` gates it
       with pyright. Still untested: the SRT data plane, the SQLite layer and the
       tx pipelines.
@@ -727,18 +750,17 @@ The venv is `./.venv` at the repo root, while all the node code stays in
       10.1.0/4.18.2). Replace with a real dependency list + `pyproject.toml`.
       **Fixed**: the file is deleted. The root `pyproject.toml` lists what the
       code imports (`PyGObject`, `aio-pika`, `pymongo`, `numpy`, `pandas`,
-      `torch`, `torchvision`, `ultralytics`) plus `lap`, which ultralytics does
-      not declare but `model.track()` needs, pinned exactly to the versions the
-      runtime was tested against; the type-check dependencies sit in the `dev`
+      `libreyolo`) pinned exactly to the versions the runtime was tested
+      against; the type-check dependencies sit in the `dev`
       dependency group. `torchvision` is pinned even though nothing imports it
-      directly: ultralytics pulls it in, and its PyPI build is compiled against
+      directly: libreyolo pulls it in, and its PyPI build is compiled against
       a different torch ABI than the CPU wheel, so the pair has to come from the
       same release or importing it dies with `RuntimeError: operator
       torchvision::nms does not exist`. The torch CPU wheel needs
       `[[tool.uv.index]]` + `[tool.uv.sources]` — PEP 621 has no index-URL field,
       so it is the one thing a dependency list alone cannot express. `uv.lock`
       is committed, so the transitive graph is reproducible rather than
-      floating.
+      floating. (The list changed again with the detector swap — see D.)
 - [x] Lint hygiene (re-checked against the current tree): missing type args on
       `queue.Queue` (`nodes/core/pipeline.py:19`) and `collection.Collection`
       (`nodes/lib/bustle/handlers.py:35,48`,

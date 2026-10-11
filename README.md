@@ -1,7 +1,7 @@
 # surr
 
-Event-driven microservices AI surveillance system, built on GStreamer, SRT, YOLO,
-MongoDB, SQLite3 and RabbitMQ.
+Event-driven microservices AI surveillance system, built on GStreamer, SRT,
+LibreYOLO, MongoDB, SQLite3 and RabbitMQ.
 
 `surr` moves live camera video from an RTSP source to AI workers and stores the
 results as time-series analytics. The media path uses SRT for transport and
@@ -20,7 +20,7 @@ central orchestrator.
 ## How it fits together
 
 ```
-camera (RTSP) ──→ tx ──── SRT ────→ rx ──── SRT ────→ nodes (YOLO)
+camera (RTSP) ──→ tx ──── SRT ────→ rx ──── SRT ────→ nodes (DEIM)
                                      │                      │
                                      │                      ↓
                                      │                   MongoDB
@@ -55,7 +55,8 @@ nodes. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 - **GStreamer 1.0 + development headers** — required to build `tx` (go-gst) and
   to run the Python nodes.
 - **MongoDB** — analytics storage for nodes.
-- **Python 3** with GObject/GStreamer bindings, `ultralytics` (YOLO), `pymongo`
+- **Python 3** with GObject/GStreamer bindings, `libreyolo` (object
+  detection), `pymongo`
   and `aio-pika` — for the nodes runtime. The dependencies are declared in the
   root `pyproject.toml`, pinned exactly, with `uv.lock` holding the full
   transitive graph. The venv lives at the repo root as `.venv/`.
@@ -209,10 +210,15 @@ and `lib` as top-level names, and Python puts a script's own directory on
 uv run python nodes/bustle.py --node-id <uuid>
 ```
 
-The node needs YOLO weights — pass `-m/--model <path>`, and note that weight
-files are not committed to this repository. `--mongo-url`, `--mongo-db`,
-`--broker`, `-f/--family`, `-c/--chosen-classes` and `--drain-interval` are the
-other knobs; `uv run python nodes/bustle.py --help` lists them all.
+The node needs detector weights. The default, `LibreDEIMm.pt`, is resolved
+relative to `./weights/` and downloaded from Hugging Face on first use; pass
+`-m/--model <path>` to point somewhere else, and note that weight files are not
+committed to this repository. `--conf` (default `0.25`) drops detections below a
+score and matters more than it looks: DEIM decodes top-K with **no NMS**, so
+every box the model reports above the threshold is counted. `--mongo-url`,
+`--mongo-db`, `--broker`, `-f/--family`, `-c/--chosen-classes` and
+`--drain-interval` are the other knobs; `uv run python nodes/bustle.py --help`
+lists them all.
 
 The node self-registers with `hub` on boot (`nodes.add`) and deregisters on
 graceful shutdown (`nodes.remove`). It retries registration until the hub
@@ -242,7 +248,7 @@ that ID is what goes into the `tx --sink` streamid.
 
 | Node | Description |
 | --- | --- |
-| **Bustle** | Object counter. Runs YOLO over the SRT stream, counts chosen classes per frame, takes a per-interval median, and writes one document per interval into a MongoDB time-series collection named after the node. |
+| **Bustle** | Object counter. Runs LibreYOLO's `LibreDEIMm` detector over the SRT stream, counts chosen classes per frame, takes a per-interval median, and writes one document per interval into a MongoDB time-series collection named after the node. |
 
 ## Documentation
 
@@ -254,5 +260,14 @@ that ID is what goes into the `tx --sink` streamid.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+This covers the code in this repository. The node's default detector weights
+(`LibreDEIMm.pt`) are published by the LibreYOLO project under Apache-2.0, and
+the `libreyolo` package itself is MIT. The detector runs behind the `Detector`
+Protocol in `nodes/lib/detector.py`, so the weights and the library are both
+replaceable — but note that LibreYOLO's own checkpoint catalogue is mixed:
+licences are per checkpoint, and some families (DEIMv2 at S/M/L/X, among
+others) carry Meta's DINOv3 licence, which is not OSI-approved. Check the
+checkpoint's licence before swapping one in.
 
 Copyright (c) 2026 Mambaul Hisam. Reach me at `me [at] ulhism [dot] id`.

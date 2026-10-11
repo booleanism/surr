@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents working in this repository. It i
 
 ## Overview
 
-Event-driven AI surveillance system built on GStreamer, SRT, YOLO, MongoDB, SQLite3 and RabbitMQ. Four Go service modules plus a Python "nodes" runtime, all communicating over a RabbitMQ topic exchange.
+Event-driven AI surveillance system built on GStreamer, SRT, LibreYOLO, MongoDB, SQLite3 and RabbitMQ. Four Go service modules plus a Python "nodes" runtime, all communicating over a RabbitMQ topic exchange.
 
 Deep-dive docs: [ARCHITECTURE.md](ARCHITECTURE.md) (services, data flow, protocol, storage), [DESIGN.md](DESIGN.md) (rationale, trade-offs, invariants), and [TODO.md](TODO.md) (staged execution tracker and fix status). Consult them before non-trivial changes.
 
@@ -49,7 +49,7 @@ There is no `go.work` file; each Go module is self-contained. All four service m
 ### Services and data flow
 
 ```
-camera (RTSP) → tx ──SRT──→ rx ──SRT──→ nodes (Python, YOLO) ──→ MongoDB (analytics)
+camera (RTSP) → tx ──SRT──→ rx ──SRT──→ nodes (Python, DEIM) ──→ MongoDB (analytics)
                                 ↑____________ RabbitMQ ____________↓
                     hub (HTTP API, auth)   subscriptions (SQLite)
 ```
@@ -58,7 +58,7 @@ camera (RTSP) → tx ──SRT──→ rx ──SRT──→ nodes (Python, YOL
 - **rx** (`rx/`): receiver/relay. Terminates SRT ingress (where tx publishes), exposes SRT egress that nodes pull frames from. Talks to the broker to look up which nodes are subscribed.
 - **hub** (`hub/`): control plane. HTTP API (JWT auth w/ argon2, users, nodes, subscriptions handlers) backed by SQLite, plus RabbitMQ handlers.
 - **subscriptions** (`subscriptions/`): SQLite-backed service answering which nodes belong to a subscription (e.g. the `subscriptions.nodes.get` command).
-- **nodes** (`nodes/`): Python workers. `bustle.py` is the object counter (YOLO via ultralytics): a GStreamer pipeline (`nodes/core/pipeline.py`) pulls SRT frames, YOLO counts chosen classes, results are stored in MongoDB and served back over the broker. Long-running: SIGTERM/SIGINT trigger a graceful path that stops workers, deregisters the node from the hub (`nodes.remove`), then closes the broker connection. Logging is stdlib `logging` configured by `nodes/core/logging_setup.py`. `nodes/` is not a package (no `nodes/__init__.py`): the imports are `from core import ...` / `from lib.bustle import ...` with `nodes/` as the root, and Python puts a script's own directory on `sys.path`, so `uv run python nodes/bustle.py` from the repo root resolves them as-is. The dependencies and the pyright configuration live in the root `./pyproject.toml`, and the venv is the root `./.venv`.
+- **nodes** (`nodes/`): Python workers. `bustle.py` is the object counter (object detection via LibreYOLO): a GStreamer pipeline (`nodes/core/pipeline.py`) pulls SRT frames, the detector counts chosen classes, results are stored in MongoDB and served back over the broker. The detector sits behind a narrow `Detector` Protocol in `nodes/lib/detector.py` (`detect(frame) -> list[Detection]`) whose only implementation loads LibreYOLO's `LibreDEIMm.pt`; keep it that way — nothing outside that file may import `libreyolo` or touch torch types. Long-running: SIGTERM/SIGINT trigger a graceful path that stops workers, deregisters the node from the hub (`nodes.remove`), then closes the broker connection. Logging is stdlib `logging` configured by `nodes/core/logging_setup.py`. `nodes/` is not a package (no `nodes/__init__.py`): the imports are `from core import ...` / `from lib.bustle import ...` with `nodes/` as the root, and Python puts a script's own directory on `sys.path`, so `uv run python nodes/bustle.py` from the repo root resolves them as-is. The dependencies and the pyright configuration live in the root `./pyproject.toml`, and the venv is the root `./.venv`.
 
 ### Sibling discovery protocol (the core pattern)
 

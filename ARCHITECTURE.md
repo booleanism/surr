@@ -12,7 +12,7 @@ SRT ("data plane"). Analytics land in MongoDB; control state lives in SQLite.
 ┌──┴───┐    ┌───┴──┐    ┌──────┴──────┐   ┌────┴───────┐      ┌──────┴─────┐
 │  tx  │    │  rx  │    │    hub      │   │subscriptions│     │   nodes    │
 │      │    │      │    │ (HTTP+JWT,  │   │            │     │ (bustle:   │
-│      │    │      │    │  SQLite)    │   │ (SQLite)   │     │  YOLO)     │
+│      │    │      │    │  SQLite)    │   │ (SQLite)   │     │  DEIM)     │
 └──┬───┘    └──┬───┘    └─────────────┘   └────────────┘     └──────┬─────┘
    │           │                                                   │
    │  SRT      │  SRT                                              │ MongoDB
@@ -30,7 +30,7 @@ SRT ("data plane"). Analytics land in MongoDB; control state lives in SQLite.
 | rx       | Go       | `rx/`             | SRT ingress/egress relay and fan-out broker between publishers and AI nodes |
 | hub      | Go       | `hub/`            | Control plane: HTTP API (JWT auth, users, nodes, subscriptions, analytics proxy) + broker commands |
 | subscriptions | Go  | `subscriptions/`  | SQLite-backed subscription registry answering node-membership queries |
-| nodes    | Python   | `nodes/`          | AI workers; `bustle.py` is the YOLO object counter |
+| nodes    | Python   | `nodes/`          | AI workers; `bustle.py` is the object counter (LibreDEIMm) |
 
 There is **no go.work**; each Go module is self-contained. All four service
 modules (`hub`, `rx`, `subscriptions`, `tx`) reach the shared root packages
@@ -59,8 +59,9 @@ it remains broker-free at runtime, but does import shared root packages
    `streamid=subscribe:<node-id>`.
 5. `rx` fans every inbound chunk out to all subscribers of that subscription
    (zero-copy, ref-counted buffers).
-6. The node's GStreamer pipeline pulls BGR frames; YOLO counts chosen classes
-   per frame; a periodic "normalizer" drains per-frame counts, takes the median,
+6. The node's GStreamer pipeline pulls BGR frames; the detector (LibreDEIMm,
+   loaded through LibreYOLO) counts chosen classes per frame; a periodic
+   "normalizer" drains per-frame counts, takes the median,
    and inserts one document per interval into a MongoDB timeseries collection
    named after the node ID.
 7. Analytics are read back through the hub (`GET /nodes/analytics`) which
@@ -310,22 +311,33 @@ Same layering as hub minus HTTP.
   `logging_setup.py` (stdlib logging with a `node_id` filter).
 - `lib/bustle/` — the actual worker: `handlers.py`
   (`<node-id>.sink.start/stop/analytics`), `processing.py` (frame_worker thread
-  running `model.track` + async normalizer draining into MongoDB),
+  running `detector.detect` + async normalizer draining into MongoDB),
   `analytics.py` (MongoDB aggregation pipelines producing chart series —
   currently ECharts-shaped, a known flaw the planned analytics service fixes
   by returning generic chart data instead).
   `sink.analytics` and `analytics.py` are planned for removal once the
   analytics service lands (see below).
+- `lib/detector.py` — the detector seam. `Detector` is a `Protocol`
+  (`names: Mapping[int, str]`, `detect(frame) -> list[Detection]`) and
+  `LibreYOLODetector` implements it over LibreYOLO's `LibreDEIMm.pt`. Nothing
+  downstream sees a LibreYOLO or torch type: `Detection` is a frozen dataclass
+  of `class_id`/`confidence`/`xyxy`, so `processing.py` counts plain Python
+  values. The library import is inside `LibreYOLODetector.__init__`, so
+  importing the module never needs the detector installed. `--conf` is
+  forwarded to the model and is the only filter — DEIM decodes top-K with no
+  NMS, so overlapping low-confidence boxes are counted separately. Tracking is
+  deliberately not used (LibreYOLO's `predict` reports no ids, and the counter
+  never read them).
 - Pipeline string (`nodes/core/pipeline.py`):
   `srtsrc name=src poll-timeout=10000 ! tsdemux ! h264parse ! avdec_h264 !
   videoconvert ! video/x-raw, format=BGR ! appsink name=app_sink
   emit-signals=true max-buffers=1 drop=true`, connected with
   `srt://<addr>?mode=caller&streamid=subscribe:<node-id>`.
-- Environment: `.venv` at the repo root (PyGObject/GStreamer, ultralytics YOLO,
+- Environment: `.venv` at the repo root (PyGObject/GStreamer, LibreYOLO,
   pymongo, aio-pika, torch), created by `uv sync` from the root
   `pyproject.toml` — which pins the direct dependencies exactly (plus
-  `torchvision` and `lap`, neither imported directly: ultralytics pulls the
-  former in and `model.track()` needs the latter) and wires the torch CPU wheel
+  `torchvision`, which nothing imports directly but LibreYOLO pulls in, so it is
+  pinned to the same release as the CPU torch wheel) and wires the torch CPU wheel
   through `[tool.uv.sources]`. `uv.lock` holds the full transitive graph.
   `[tool.uv] package = false` keeps `uv sync` to dependencies, because there is
   no packaging step: `nodes/` is a directory of scripts, not a package, so the
@@ -333,7 +345,8 @@ Same layering as hub minus HTTP.
   as the root, and the node runs as `uv run python nodes/bustle.py` from the repo
   root.
 - Tests: `nodes/tests/` (stdlib `unittest`, no pytest) covers the `nodes/core`
-  runtime; run it with `make test-nodes`, or from the repo root with
+  runtime and the detector seam (`lib/detector.py`, with a faked `libreyolo`);
+  run it with `make test-nodes`, or from the repo root with
   `.venv/bin/python -m unittest discover -s nodes/tests -t nodes` (the `-t nodes`
   is what puts `nodes/` on `sys.path`). Classes that need the GStreamer bindings
   skip themselves where those are absent.
@@ -385,9 +398,10 @@ source; TODO.md section E is the tracker for their status.
 | `tx run` aborted without a reachable `tx serve` | a relay/recording could not start on its own | `registDashStream` logs a warning and continues; registration is best effort |
 | audio pad probe emitted EOS per buffer; three `go func()` closures shared the named `err` | recording could be EOS'd early; racy lost errors | probe is buffer-only and returns per-link results; each closure uses a local error |
 | `h264enc` lacked `videoconvert`/`format=I420`/`config-interval`; `srtsink` had `auto-reconnect:false` | non-I420 sources failed to negotiate, late SRT joiners missed SPS/PPS, an rx restart killed tx | `videoconvert` + pinned I420 + `config-interval=-1`; `auto-reconnect:true` |
-| Python node: dropped `await rep(...)`, blocking GStreamer/pymongo calls on the loop, 100% CPU frame loop, unsynchronized pipeline start/stop, unhandled `insert_one`/`model.track` failures, late replies mis-dispatched as requests, naive timestamps | a caller blocked forever; a transient error silently killed counting or persistence | awaited reply + `Coroutine`-typed `ReplyFunc`; `asyncio.to_thread` for blocking calls; blocking `get_frame(timeout=...)`; a lock around the pipeline; logged failures; an abandoned-trackID set; UTC timestamps |
+| Python node: dropped `await rep(...)`, blocking GStreamer/pymongo calls on the loop, 100% CPU frame loop, unsynchronized pipeline start/stop, unhandled `insert_one`/detector failures, late replies mis-dispatched as requests, naive timestamps | a caller blocked forever; a transient error silently killed counting or persistence | awaited reply + `Coroutine`-typed `ReplyFunc`; `asyncio.to_thread` for blocking calls; blocking `get_frame(timeout=...)`; a lock around the pipeline; logged failures; an abandoned-trackID set; UTC timestamps |
 | frame path: `reshape((height, width, 3))` assumed tightly packed rows, and `get_frame()` lost its non-blocking default when it moved to `get(timeout=...)` | any `video/x-raw` width whose row was not 4-byte aligned (e.g. 1279) raised `ValueError` on the GStreamer streaming thread; an argument-less `get_frame()` blocked the caller forever | `_frame_view` strides rows from `GstVideo.VideoInfo.new_from_caps`, falls back to packed rows and returns `None` when the layout does not fit; the redundant full-frame `.copy()` is gone; `get_frame(timeout=None)` is non-blocking again |
 | hub security: committed JWT secret, any-HMAC validation, no signin rate limit, email logged, no ownership check on removal, unbounded bodies, only `ReadHeaderTimeout`, `Secure:true` cookies, unauthenticated DASH control routes | token forgery, brute force, cross-user deletion, slowloris, broken local dev, unauthenticated stream deletion | ephemeral secret + warning, pinned HS256 and issuer, 10/min per-address limiter, ownership enforced inside the `DELETE`, 1 MiB `MaxBytesReader` + Read/Write/Idle timeouts, `--cookie-secure`, `requireDashToken` (loopback-only without a token) |
+| detector: ultralytics was the inference engine, and it is **AGPL-3.0** while this repository is MIT; its `Results` object also leaked into the counting code (`boxes.cls`, `isinstance(..., torch.Tensor)`, `model.names`) | publishing the node would have imposed AGPL on the whole repository, and the leak made any swap a cross-cutting edit | a narrow `Detector` Protocol in `nodes/lib/detector.py` (`detect(frame) -> list[Detection]`) with `LibreYOLODetector` behind it, on **LibreYOLO** (MIT code) with **`LibreDEIMm.pt`** weights (Apache-2.0, 55.4 mAP50-95, 19.6 M params, 640 px); DEIM v2 S/M/L/X was rejected because those checkpoints add Meta's non-OSI DINOv3 licence. `--conf` replaces ultralytics' NMS as the only filter, and unused tracking was dropped |
 | Python typing/packaging: no `pyproject.toml`, no type-checker config, `requirements.txt` a `pip freeze` dump already divergent from the venv; missing type args on `queue.Queue`/`pymongo.Collection`, untyped `json_serializer(obj)`, an unused `Pipeline` Protocol | the documented type-check gate did not run, so the `None`-returning `GstVideo.VideoInfo.new_from_caps` was unguarded and a fresh venv could resolve different dependency versions | root `pyproject.toml` (exact pins, the torch CPU index, `typeCheckingMode = "standard"`, `venvPath`/`venv`/`extraPaths` pinned) plus `uv.lock` for the transitive graph, and `uv sync` as the one setup command; `make typecheck` (0 errors); `_frame_view` guards `None`; `RouterLike` Protocol in `core/rpc.py`; the type args and the dead Protocol are gone. Never install `gst-python-stubs` — it clobbers the real `Gst.pyi` |
 
 ### Open (E7, E11)

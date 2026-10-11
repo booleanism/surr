@@ -109,7 +109,7 @@ refcount; the last release returns it to the bytes pool. Subscriber channels
 are buffered (256) and sends are non-blocking — a slow node silently drops
 chunks (release decrements the refcount so memory is still reclaimed). This
 chooses *freshness over completeness*, which is the right call for live
-surveillance inference: YOLO counting tolerates dropped frames; a stalled
+surveillance inference: object counting tolerates dropped frames; a stalled
 publisher does not.
 
 Related memory discipline (shared root `internal/pools/`): all hot-path
@@ -498,7 +498,7 @@ is the tracker for these findings and their status.
    `_on_new_sample` with a lock, checks `running` in the callback and tolerates
    `queue.Empty`; `_start_sink` stops the old pipeline before starting the new
    one; the GStreamer state changes and the pymongo aggregation run through
-   `asyncio.to_thread`; `insert_one` and `model.track` failures are logged
+   `asyncio.to_thread`; `insert_one` and detector failures are logged
    instead of killing the task; a `recv` timeout records its trackID so a late
    reply is dropped rather than mis-dispatched as an inbound request; `ticker`
    floors its interval; timestamps are `datetime.now(timezone.utc)`; and
@@ -571,12 +571,33 @@ is the tracker for these findings and their status.
     carries a JSON-serializable `Passwd`, duplicate signup email surfaces as
     500 rather than 409, `rx` cannot bind an IPv6 listen address, and two local
     variables still shadow the `dash` and `net/url` package names in tx.
+12. **Detector licensing and coupling (fixed)**: the node ran inference through
+    `ultralytics`, which is **AGPL-3.0** while this repository is MIT — a
+    copyleft obligation on the whole distribution for anyone who published it —
+    and its `Results` object leaked into the counting code (`boxes.cls`,
+    `isinstance(boxes.cls, torch.Tensor)`, `model.names` in
+    `nodes/lib/bustle/processing.py`), so the licence was not the only thing
+    making a swap expensive. `nodes/lib/detector.py` now defines a narrow
+    `Detector` Protocol — `names: Mapping[int, str]` and
+    `detect(frame) -> list[Detection]`, where `Detection` is a frozen dataclass
+    of `class_id`/`confidence`/`xyxy` — and `LibreYOLODetector` implements it
+    over **LibreYOLO** (MIT code) with **`LibreDEIMm.pt`** weights (Apache-2.0,
+    55.4 mAP50-95 at 19.6 M params, 640 px). DEIM v2 at S/M/L/X was rejected:
+    those checkpoints add Meta's DINOv3 licence, which is not OSI-approved and
+    forbids military/ITAR uses. Two behaviour changes came with it. First, DEIM
+    is a DETR-style top-K decoder with **no NMS**, so overlapping
+    low-confidence boxes are counted separately; `--conf` (default `0.25`) is
+    now the only filter between raw output and the count. Second, tracking was
+    dropped — `model.track()` was called but only `boxes.cls` was ever read, and
+    LibreYOLO's `predict` reports no ids. Cost: ~546 ms/frame on CPU at
+    1280x720, slower than the `yolo26s.pt` it replaced.
 
 ### B. Operational / robustness gaps
 
 1. **Tests are still thin.** The Python `nodes/core` runtime now has a suite
    (`nodes/tests/`, run by `make test-nodes` and wired into
-   `make test`), and the Go tests cover the RPC reply layer
+   `make test`), including the detector seam (`lib/detector.py`, exercised
+   against a faked `libreyolo`), and the Go tests cover the RPC reply layer
    (`internal/protocols/handlers_test.go`, the `hub` and `subscriptions`
    `handlers` packages) and `internal/backoff`. The two `handlers` packages
    enumerate the commands they advertise and fail when one has no case, so the
