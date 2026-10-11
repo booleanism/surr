@@ -37,6 +37,13 @@ type NodeSource struct {
 	SourceAddr string `json:"source_address"`
 }
 
+// StartSink tells every node in the set to pull frames from sourceAddr. It
+// tries all of them and returns the first failure, because the caller cannot
+// recover from a sink that never started: rx has already accepted the
+// publisher, and a node that was not told to start is never told again. The
+// concrete case is a cold start where tx connects before the node has
+// introduced itself -- the sibling lookup finds nothing, and swallowing that
+// leaves every component reporting healthy while no frames move.
 func (n nodes) StartSink(ctx context.Context, nodes []models.Node, sourceAddr string) error {
 	log := zerolog.Ctx(ctx)
 
@@ -47,18 +54,25 @@ func (n nodes) StartSink(ctx context.Context, nodes []models.Node, sourceAddr st
 		return err
 	}
 
+	var firstErr error
 	for _, node := range nodes {
 		cmd := protocols.Command(fmt.Sprintf("%s.sink.start", node.ID.String()))
 		log.Info().Str("command", string(cmd)).Str("node_id", node.ID.String()).Msg("sink start dispatched")
 		err = n.do(ctx, cmd, payload)
 		if err != nil {
 			log.Error().Str("command", string(cmd)).Str("node_id", node.ID.String()).Err(err).Msg("nodes sink start broadcast")
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 
-	return nil
+	return firstErr
 }
 
+// StopSink tells every node in the set to stop. It reports the first failure
+// for the same reason StartSink does, though a caller there is already tearing
+// the publisher down and only logs the result.
 func (n nodes) StopSink(ctx context.Context, nodes []models.Node) error {
 	log := zerolog.Ctx(ctx)
 
@@ -67,16 +81,20 @@ func (n nodes) StopSink(ctx context.Context, nodes []models.Node) error {
 		return err
 	}
 
+	var firstErr error
 	for _, node := range nodes {
 		cmd := protocols.Command(fmt.Sprintf("%s.sink.stop", node.ID.String()))
 		log.Info().Str("command", string(cmd)).Str("node_id", node.ID.String()).Msg("sink stop dispatched")
 		err = n.do(ctx, cmd, payload)
 		if err != nil {
 			log.Error().Str("command", string(cmd)).Str("node_id", node.ID.String()).Err(err).Msg("nodes sink stop broadcast")
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 
-	return nil
+	return firstErr
 }
 
 func (n nodes) do(ctx context.Context, c protocols.Command, payload []byte) error {
