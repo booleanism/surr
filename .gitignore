@@ -1,5 +1,5 @@
 .cache
-nodes/.venv
+.venv
 bin/
 
 *.db

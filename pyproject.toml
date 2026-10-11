@@ -1,0 +1,93 @@
+# The Python side of surr: the `nodes/` runtime (SRT frame ingestion, YOLO
+# analysis, broker RPC). The Go services are built by the Makefile, not here.
+#
+# Everything is driven by uv:
+#
+#   uv sync                      # create .venv/ at the repo root and install
+#   uv run python nodes/bustle.py --help
+#
+# The venv lives at the repo root but the code lives in nodes/, which is not a
+# package (there is no nodes/__init__.py: the imports are `from core import
+# ...` with nodes/ as the root). So `package = false` below: uv syncs the
+# dependencies and never tries to build or install the project itself.
+
+[project]
+name = "surr"
+version = "0.0.0"
+description = "surr node runtime: SRT frame ingestion, YOLO analysis, broker RPC"
+requires-python = ">=3.12"
+# Pinned exactly, on purpose: a fresh install must resolve the versions the
+# runtime was tested against, so a bump here is a decision rather than an
+# accident of resolution. The full transitive graph is in uv.lock.
+#
+# torch is imported directly (nodes/lib/bustle/processing.py) as well as pulled
+# in by ultralytics. lap is not declared by ultralytics but model.track() needs
+# it. PyGObject needs the system GObject-Introspection stack (libgirepository,
+# GStreamer and the typelibs) -- a wheel only provides the bindings.
+#
+# torchvision is pinned here even though nothing imports it directly, because
+# ultralytics pulls it in and its PyPI build is compiled against a different
+# torch ABI than the CPU wheel: the pair has to come from the same release
+# (torch 2.14.x <-> torchvision 0.29.x), or importing it dies with
+# "RuntimeError: operator torchvision::nms does not exist".
+dependencies = [
+    "PyGObject==3.58.0",
+    "aio-pika==10.1.0",
+    "pymongo==4.18.2",
+    "numpy==2.5.2",
+    "pandas==3.0.6",
+    "torch==2.14.0+cpu",
+    "torchvision==0.29.0+cpu",
+    "ultralytics==8.4.163",
+    "lap==0.5.13",
+]
+
+[dependency-groups]
+# The type-check gate (`make typecheck`). Pyright is a wrapper around the npm
+# package, so its first run downloads a private Node runtime. PyGObject-stubs
+# supplies the gi.repository stubs; without it pyright cannot resolve
+# `gi.repository.Gst` at all.
+#
+# Do NOT add gst-python-stubs: it ships an overrides-only Gst.pyi at the same
+# path as the real PyGObject-stubs file and silently clobbers it, which turns
+# every GStreamer enum and constructor into an unknown-attribute error.
+dev = ["pyright==1.1.414", "PyGObject-stubs==2.17.0"]
+
+[tool.uv]
+# nodes/ is a directory of scripts, not an installable package.
+package = false
+
+# torch's CPU wheels are not on PyPI: the `+cpu` local version tag only exists
+# on the PyTorch index. The index is `explicit`, so it is consulted only for
+# packages that name it in [tool.uv.sources] -- everything else comes from
+# PyPI. Drop this to build against a CUDA wheel instead.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[tool.pyright]
+include = ["nodes/bustle.py", "nodes/core", "nodes/lib", "nodes/tests"]
+exclude = [".venv", "**/__pycache__"]
+# The code lives in nodes/ and imports `core`/`lib` as top-level names, so that
+# directory has to be on the search path or every import reads as unresolved.
+extraPaths = ["nodes"]
+# Pinning the venv is what makes the third-party imports (aio_pika, pymongo,
+# ultralytics, torch, pandas) and the PyGObject-stubs resolvable: pyright does
+# not pick up the venv just because it was launched from its own bin/.
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"
+# "standard" is the level the runtime is actually held to: no implicit Any in
+# the protocol code, no unbound variables, no unchecked Optional access. The
+# few places where the PyGObject stubs are wrong or silent carry a narrow
+# `# pyright: ignore[...]` with a reason rather than being silenced here.
+typeCheckingMode = "standard"
+# PyGObject and GStreamer are compiled extensions whose stubs come from the
+# PyGObject-stubs package, so there is deliberately no Python source behind
+# `gi.repository.*` for pyright to fall back to.
+reportMissingModuleSource = "none"

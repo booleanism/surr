@@ -3,17 +3,19 @@ CONFIG_FILE := $(ROOT_DIR).golangci.yml
 
 CACHE_DIR := $(ROOT_DIR).cache
 BIN_DIR := $(ROOT_DIR)bin
-NODES_DIR := $(ROOT_DIR)nodes
+VENV_DIR := $(ROOT_DIR).venv
 
 # The nodes tests run against the node venv when it exists, so the Python side
 # is exercised with the same interpreter (and the same GStreamer bindings) the
-# node itself runs on. Override with PYTHON=... to use another interpreter.
-PYTHON ?= $(if $(wildcard $(NODES_DIR)/.venv/bin/python),$(NODES_DIR)/.venv/bin/python,python3)
+# node itself runs on. The venv lives at the repo root but the code lives in
+# nodes/; create it with `uv sync`. Override with PYTHON=... to use another
+# interpreter.
+PYTHON ?= $(if $(wildcard $(VENV_DIR)/bin/python),$(VENV_DIR)/bin/python,python3)
 
-# pyright reads nodes/pyproject.toml, which pins the venv it resolves imports
-# against, so it has to run from nodes/ with that venv's copy. Override with
-# PYRIGHT=... to use another install.
-PYRIGHT ?= $(if $(wildcard $(NODES_DIR)/.venv/bin/pyright),$(NODES_DIR)/.venv/bin/pyright,pyright)
+# pyright reads the root pyproject.toml, which pins the venv it resolves imports
+# against, so it has to run from the repo root with that venv's copy. Override
+# with PYRIGHT=... to use another install.
+PYRIGHT ?= $(if $(wildcard $(VENV_DIR)/bin/pyright),$(VENV_DIR)/bin/pyright,pyright)
 
 export GOCACHE := $(CACHE_DIR)/go-build
 export GOLANGCI_LINT_CACHE := $(CACHE_DIR)/golangci-lint
@@ -79,32 +81,36 @@ $(TEST_TARGETS): test-%: prep-cache
 # bare ImportError when they are missing. Tests that need the GStreamer
 # bindings skip themselves on a host without them. Pass NODESTESTFLAGS=-v for
 # per-test output, and PYTHON=... to use another interpreter.
+#
+# `-t nodes` is load-bearing: it is what puts nodes/ on sys.path, so the tests'
+# `from core import ...` resolves without nodes/ being a package.
 test-nodes:
 	@echo "==> running python tests in nodes/ (interpreter: $(PYTHON))"
-	@cd $(NODES_DIR) && $(PYTHON) -c "import aio_pika, numpy" 2>/dev/null || { \
+	@$(PYTHON) -c "import aio_pika, numpy" 2>/dev/null || { \
 		echo "error: '$(PYTHON)' cannot import aio_pika and numpy"; \
-		echo "       create the node venv: python3 -m venv nodes/.venv && nodes/.venv/bin/pip install -r nodes/requirements.txt"; \
+		echo "       create the node venv from the repo root: uv sync"; \
 		echo "       or run 'make test-nodes PYTHON=<interpreter>' with those packages installed"; \
 		exit 1; \
 	}
-	@cd $(NODES_DIR) && $(PYTHON) -m unittest discover -s tests -t . $(NODESTESTFLAGS)
+	@cd $(ROOT_DIR) && $(PYTHON) -m unittest discover -s nodes/tests -t nodes $(NODESTESTFLAGS)
 
 build: prep-cache $(CMD_TARGETS)
 
-# Static analysis for the Python side, configured in nodes/pyproject.toml
-# (typeCheckingMode = "standard", venvPath = ".venv"). It covers bustle.py,
-# core/, lib/ and tests/, and needs the gi stubs from PyGObject-stubs -- see
-# nodes/requirements.txt for why gst-python-stubs must not be installed.
+# Static analysis for the Python side, configured in the root pyproject.toml
+# (typeCheckingMode = "standard", venvPath = ".venv", extraPaths = ["nodes"]).
+# It covers nodes/bustle.py, nodes/core/, nodes/lib/ and nodes/tests/, and needs
+# the gi stubs from PyGObject-stubs -- see pyproject.toml for why
+# gst-python-stubs must not be installed.
 # Pass TYPECHECKFLAGS=--outputjson for machine-readable output.
 typecheck:
 	@echo "==> type checking nodes/ (pyright: $(PYRIGHT))"
 	@command -v $(PYRIGHT) >/dev/null 2>&1 || { \
 		echo "error: pyright not found ('$(PYRIGHT)')"; \
-		echo "       install it in the node venv: nodes/.venv/bin/pip install pyright PyGObject-stubs"; \
+		echo "       install it in the node venv: uv sync"; \
 		echo "       or run 'make typecheck PYRIGHT=<path to pyright>'"; \
 		exit 1; \
 	}
-	@cd $(NODES_DIR) && $(PYRIGHT) $(TYPECHECKFLAGS)
+	@cd $(ROOT_DIR) && $(PYRIGHT) $(TYPECHECKFLAGS)
 
 # Pattern rule for individual binary builds
 $(CMD_TARGETS): build-%: prep-cache
