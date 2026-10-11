@@ -1,0 +1,23 @@
+# The build context for every deploy/ Dockerfile is the repository root, not
+# the module directory: each service module declares
+# `replace github.com/booleanism/surr => ../`, so building `hub/` needs the
+# root module's internal/ tree sitting next to it. That makes this file the
+# only thing standing between a build and a multi-gigabyte context.
+.git
+.github
+.cache
+.venv
+bin
+**/__pycache__
+*.py[cod]
+# Model weights are downloaded by the node on first use and live in a volume,
+# so they are never baked into an image (and .gitignore keeps them out of the
+# repository too).
+weights
+*.pt
+# Local databases. The containers use their own volume-mounted files.
+*.db
+*.db-shm
+*.db-wal
+# The deploy directory itself is not needed inside any image.
+deploy

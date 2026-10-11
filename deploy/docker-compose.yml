@@ -1,0 +1,276 @@
+# The whole system in one file, in three layers:
+#
+#   1. infrastructure  -- rabbitmq (the bus) and mongo (where nodes write analytics)
+#   2. control plane   -- migrate, hub, subscriptions
+#   3. data plane      -- rx, and behind profiles: tx (the camera side) and bustle (a node)
+#
+# `docker compose up -d` starts layers 1 and 2 and gives you a working control
+# plane with no camera attached. tx and bustle are behind profiles because they
+# are the two pieces that need something from the outside world -- a real RTSP
+# source, and a subscription to publish into -- so `up` should not fail just
+# because neither exists yet:
+#
+#   docker compose --profile tx up -d
+#   docker compose --profile nodes up -d
+#   docker compose --profile tx --profile nodes up -d
+#
+# Build context is the repository root (`..`) for every image, not the module
+# directory: each service module carries `replace github.com/booleanism/surr =>
+# ../`, so building hub/ needs the root module's internal/ tree beside it. The
+# .dockerignore at the root is what keeps that context small.
+#
+# The build id is injected, not discovered: every image takes it as a build arg
+# and bakes it in, so `docker compose exec hub surr-hub --version` and the
+# `version=` field on every log line agree, across Go services and the Python
+# node alike. Export VERSION before building to stamp it:
+#
+#   VERSION=$(git describe --tags --always --dirty) docker compose build
+
+name: surr
+
+services:
+  # ---------------------------------------------------------------- infrastructure
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-surr}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-surr}
+    ports:
+      # The management UI. Handy while bringing a stack up; drop this mapping
+      # if the host is not trusted.
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      # The services all reconnect in a loop, but the migrations below do not,
+      # so this is what makes `depends_on` meaningful.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:8
+    environment:
+      # These are the credentials the node's default MONGO_URL expects, so the
+      # stack works with the repository's own defaults rather than a second set
+      # of conventions.
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-root}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    # No ports: nothing outside the compose network needs to read analytics
+    # directly, and the hub is the only supported way in.
+
+  # ----------------------------------------------------------------- control plane
+
+  # The databases are created by the migrator, not by the services. The services
+  # only VERIFY their schema at startup (internal/db/schema.go) and exit with
+  # "database schema is missing" if a table is absent -- so these two jobs are
+  # load-bearing, and `depends_on: service_completed_successfully` is what keeps
+  # the services from racing them.
+  #
+  # This image is built here rather than pulled because the official
+  # migrate/migrate one cannot talk to SQLite at all; see migrate.Dockerfile for
+  # why, and note that the hub and subscriptions binaries link the same
+  # mattn/go-sqlite3 driver, so the writer and the readers share one engine.
+  migrate-hub:
+    build:
+      context: ..
+      dockerfile: deploy/migrate.Dockerfile
+    command:
+      - -database
+      - sqlite3:///data/hub.db
+      - -path
+      - /migrations/hub
+      - up
+    volumes:
+      - hub-db:/data
+      - ../hub/internal/migrations/sqlite:/migrations/hub:ro
+    restart: "no"
+
+  migrate-subscriptions:
+    build:
+      context: ..
+      dockerfile: deploy/migrate.Dockerfile
+    command:
+      - -database
+      - sqlite3:///data/subscriptions.db
+      - -path
+      - /migrations/subscriptions
+      - up
+    volumes:
+      - subscriptions-db:/data
+      - ../subscriptions/internal/migrations/sqlite:/migrations/subscriptions:ro
+    restart: "no"
+
+  hub:
+    build:
+      context: ..
+      dockerfile: deploy/hub.Dockerfile
+      args:
+        VERSION: ${VERSION:-unknown}
+    command:
+      - run
+      # 0.0.0.0, not the 127.0.0.1 default: bound to loopback inside the
+      # container the published port would accept the connection and then have
+      # nothing behind it.
+      - --http=0.0.0.0:9000
+      # The refresh cookie is HttpOnly+Secure+SameSite=Lax by default, which a
+      # plain-HTTP stack cannot satisfy -- the browser would drop the cookie and
+      # every refresh would look like an expired session. Turn this back on (or
+      # terminate TLS in front) before exposing the hub.
+      - --cookie-secure=${HUB_COOKIE_SECURE:-false}
+    environment:
+      DSN: /data/hub.db
+      JWT_SECRET: ${JWT_SECRET:-change-me-before-you-expose-this}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
+    ports:
+      - "${HUB_HTTP_PORT:-9000}:9000"
+    volumes:
+      - hub-db:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      migrate-hub:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  subscriptions:
+    build:
+      context: ..
+      dockerfile: deploy/subscriptions.Dockerfile
+      args:
+        VERSION: ${VERSION:-unknown}
+    command: ["run"]
+    environment:
+      DSN: /data/subscriptions.db
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
+    volumes:
+      - subscriptions-db:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      migrate-subscriptions:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------- data plane
+
+  rx:
+    build:
+      context: ..
+      dockerfile: deploy/rx.Dockerfile
+      args:
+        VERSION: ${VERSION:-unknown}
+    command:
+      - run
+      # Bind the wildcard so the published ingress port has something behind
+      # it, and name the egress explicitly.
+      #
+      # The egress value is not cosmetic: rx sends it to the node as
+      # source_address when it answers `<node-id>.sink.start`, and the node
+      # builds `srt://<that address>?...&streamid=subscribe:<node id>` from it.
+      # A node inside this network must therefore be told a name it can resolve
+      # (`rx`), not 127.0.0.1, which would send it to itself.
+      #
+      # (Binding a hostname works because srtgo resolves it and the kernel
+      # requires the result to be an interface of this machine -- which `rx`
+      # is, from inside this container.)
+      - --ingress=0.0.0.0:4200
+      - --egress=rx:4201
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
+    ports:
+      # Publish the ingress so a tx running outside this stack can still push
+      # into it. Both sockets are UDP.
+      - "${RX_INGRESS_PORT:-4200}:4200/udp"
+      - "${RX_EGRESS_PORT:-4201}:4201/udp"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      subscriptions:
+        condition: service_started
+    restart: unless-stopped
+
+  # The camera side. Needs an RTSP source and a subscription id to publish into.
+  #
+  #   TX_SUBSCRIPTION_ID   the id POST /subscriptions/add returned (a UUID)
+  #   TX_SRC               an RTSP URL (see README.md -- mediamtx is the easy way)
+  tx:
+    profiles: ["tx"]
+    build:
+      context: ..
+      dockerfile: deploy/tx.Dockerfile
+      args:
+        VERSION: ${VERSION:-unknown}
+    command:
+      - run
+      - --src=${TX_SRC:-rtsp://mediamtx:8554/cam1}
+      # The streamid is the whole contract with rx: it is how rx knows which
+      # subscription this publisher belongs to, and it must match a row in the
+      # subscriptions database or the ingress is refused.
+      - --sink=srt://rx:4200?mode=caller&streamid=publish:${TX_SUBSCRIPTION_ID:-set-TX_SUBSCRIPTION_ID-in-.env}
+      - --name=${TX_NAME:-cam1}
+      - --downstream=${TX_DOWNSTREAM:-1280,720,300}
+    depends_on:
+      rx:
+        condition: service_started
+    restart: unless-stopped
+
+  # A node. Registers itself with the hub (`nodes.add`), then waits to be told
+  # to start a sink. It pulls frames from rx's egress and writes counts to mongo.
+  #
+  # The node id is the handle everything else uses -- the hub's nodes table, the
+  # subscription's node list, and the `<node-id>.sink.*` commands -- so it is
+  # pinned here rather than left to the script's default, which would silently
+  # re-register a different node on every recreate.
+  bustle:
+    profiles: ["nodes"]
+    build:
+      context: ..
+      dockerfile: deploy/nodes.Dockerfile
+      args:
+        VERSION: ${VERSION:-unknown}
+    command:
+      - --node-id=${BUSTLE_NODE_ID:-50154422-fd3b-4cf0-a761-908fcbe98a1e}
+      - --name=${BUSTLE_NODE_NAME:-bustle0}
+      - --chosen-classes=${BUSTLE_CLASSES:-0,1,2,3}
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
+      MONGO_URL: mongodb://${MONGO_USER:-root}:${MONGO_PASSWORD:-root}@mongo:27017/
+      MONGO_DB: ${MONGO_DB:-nodes}
+    volumes:
+      # The detector weights are downloaded on first run and are far too large
+      # to bake into an image; a named volume keeps them across rebuilds.
+      - weights:/app/weights
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      rx:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  rabbitmq-data:
+  mongo-data:
+  hub-db:
+  subscriptions-db:
+  weights:
