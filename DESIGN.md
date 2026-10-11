@@ -533,11 +533,17 @@ is the tracker for these findings and their status.
    `pyproject.toml`/`setup.py` and no type-checker configuration, and
    `requirements.txt` was a `pip freeze` dump that had already drifted from the
    installed venv (it pinned `aio-pika==10.0.1`/`pymongo==4.18.1` against
-   10.1.0/4.18.2). `nodes/pyproject.toml` now declares the direct dependencies
-   and configures Pyright (`typeCheckingMode = "standard"`, `venvPath`/`venv`
-   pinned to `nodes/.venv`, `reportMissingModuleSource = "none"` for the
-   compiled `gi.repository` bindings), `requirements.txt` pins what the code
-   imports, and `make typecheck` runs the gate (0 errors). The typing fixes it
+   10.1.0/4.18.2). The root `pyproject.toml` now declares the direct
+   dependencies (pinned exactly, with the torch CPU wheel wired through
+   `[tool.uv.sources]` — PEP 621 has no index-URL field, so a plain
+   dependency list cannot express the `+cpu` pin that `requirements.txt` got
+   from `--extra-index-url`) and configures Pyright
+   (`typeCheckingMode = "standard"`, `venvPath`/`venv` pinned to the root
+   `.venv`, `extraPaths = ["nodes"]` for the nodes' top-level `core`/`lib`
+   imports, `reportMissingModuleSource = "none"` for the compiled
+   `gi.repository` bindings). `uv.lock` records the resolved transitive graph
+   and `uv sync` is the one setup command; `requirements.txt` is gone, and
+   `make typecheck` runs the gate (0 errors). The typing fixes it
    required were real: a `RouterLike` Protocol so `core/rpc.py` no longer
    depends on the concrete `Router`, a `None` guard on
    `GstVideo.VideoInfo.new_from_caps` in `_frame_view`, and type arguments on
@@ -639,10 +645,11 @@ is the tracker for these findings and their status.
    plain-HTTP `127.0.0.1:9000` deployment can opt out, and one `refreshCookie`
    helper builds signin, refresh and logout cookies alike with
    `SameSite=Lax`.
-9. **Python typing/packaging** (fixed, E10): `nodes/pyproject.toml` declares
-   the dependencies and configures Pyright (`standard`, venv-pinned) and
-   `requirements.txt` pins the direct dependencies of the working venv instead
-   of dumping it; `make typecheck` is the gate.
+9. **Python typing/packaging** (fixed, E10): the root `pyproject.toml` declares
+   the dependencies (exact pins, torch CPU index via `[tool.uv.sources]`) and
+   configures Pyright (`standard`, venv-pinned, `extraPaths = ["nodes"]`);
+   `uv.lock` records the transitive graph and `uv sync` is the setup step, so
+   `requirements.txt` is gone; `make typecheck` is the gate.
 10. **`BustleHandlers` is a class-attribute singleton** (`setup()` classmethod):
     one node instance per process, global mutable state. Resolved by the
     planned nodes refactor — see §12 and TODO.md.

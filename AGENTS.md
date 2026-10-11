@@ -13,7 +13,7 @@ Deep-dive docs: [ARCHITECTURE.md](ARCHITECTURE.md) (services, data flow, protoco
 ```sh
 make lint          # golangci-lint every module (config: .golangci.yml at repo root)
 make test          # go test ./... in every module, then the nodes/ python suite
-make typecheck     # pyright over nodes/ (config: nodes/pyproject.toml; needs nodes/.venv)
+make typecheck     # pyright over nodes/ (config: ./pyproject.toml; needs ./.venv)
 make build         # build every cmd/ entrypoint into bin/surr-<name>
 make               # lint + test + typecheck + build
 make clean         # remove .cache/ and bin/
@@ -21,7 +21,7 @@ make clean         # remove .cache/ and bin/
 # One module / one binary
 make build-tx      # also: build-rx, build-hub, build-subscriptions
 make test-hub      # also: test-rx, test-subscriptions, test-tx, test-root
-make test-nodes    # python tests for nodes/core (nodes/tests; needs nodes/.venv)
+make test-nodes    # python tests for nodes/core (nodes/tests; needs ./.venv)
 
 # Build a release binary (stripped, trimpath)
 make build-tx RELEASE_TYPE=release
@@ -29,15 +29,18 @@ make build-tx RELEASE_TYPE=release
 # Run a single service (each is a urfave/cli v3 app; see its cmd/<name>/cmdline.go for flags)
 cd hub && go run ./cmd/hub run --help
 
-# Python node (from nodes/)
-python bustle.py --help
+# Python node (from the repo root; uv sync creates .venv/)
+uv sync
+uv run python nodes/bustle.py --help
 ```
 
 Knobs: `RELEASE_TYPE=release` (adds `-s -w -trimpath`), `TAGS` (build tags), `GOFLAGS`, `LDFLAGS`, `TESTFLAGS` (e.g. `-race`, `-count=1`), `NODESTESTFLAGS`, `PYTHON`, `PYRIGHT`, `TYPECHECKFLAGS`.
 
-`make build-<name>` builds the module directory whose `cmd/<name>/` contains `main.go`, running `go build` from inside that directory (so the module's own `go.mod` applies) and writing `bin/surr-<name>`. `make test` discovers modules the same way, so a failure in any module fails the target. `make test-nodes` uses `nodes/.venv/bin/python` when it exists (`PYTHON=...` overrides) and fails with instructions when that interpreter cannot import `aio_pika`/`numpy`.
+`make build-<name>` builds the module directory whose `cmd/<name>/` contains `main.go`, running `go build` from inside that directory (so the module's own `go.mod` applies) and writing `bin/surr-<name>`. `make test` discovers modules the same way, so a failure in any module fails the target. `make test-nodes` uses `./.venv/bin/python` when it exists (`PYTHON=...` overrides) and fails with instructions when that interpreter cannot import `aio_pika`/`numpy`.
 
-`make typecheck` runs pyright from inside `nodes/` against `nodes/pyproject.toml`. `venvPath`/`venv` in that file are load-bearing — pyright does not pick the venv up merely because it was launched from the venv's own `bin/` — and `typeCheckingMode = "standard"` is the level the runtime is actually held to. The gate is in `make` but deliberately not in `lint`/`test`, which stay usable on a Go-only checkout.
+`make typecheck` runs pyright from the repo root against `./pyproject.toml`. `venvPath`/`venv` in that file are load-bearing — pyright does not pick the venv up merely because it was launched from the venv's own `bin/` — and so is `extraPaths = ["nodes"]`, which is what resolves the nodes' `from core import ...` imports from a config file that lives one level above them. `typeCheckingMode = "standard"` is the level the runtime is actually held to. The gate is in `make` but deliberately not in `lint`/`test`, which stay usable on a Go-only checkout.
+
+The Python side is a uv project: `./pyproject.toml` declares the dependencies (pinned exactly, with the torch CPU index wired up through `[tool.uv.sources]`) and `./uv.lock` pins the full transitive graph. The venv is `./.venv` — at the repo root, not in `nodes/` — while all the node code stays in `nodes/`. `[tool.uv] package = false` is what lets `uv sync` install the dependencies without trying to build the project, since `nodes/` is a directory of scripts rather than an importable package.
 
 There is no `go.work` file; each Go module is self-contained. All four service modules (hub, rx, subscriptions, tx) reach the shared root packages via `replace github.com/booleanism/surr => ../` in their `go.mod`, so a new cross-module import needs no `go.mod` edit while a new third-party dependency does. tx never joins the broker at runtime, but does import the shared root `internal/logging` package at build time.
 
@@ -55,7 +58,7 @@ camera (RTSP) → tx ──SRT──→ rx ──SRT──→ nodes (Python, YOL
 - **rx** (`rx/`): receiver/relay. Terminates SRT ingress (where tx publishes), exposes SRT egress that nodes pull frames from. Talks to the broker to look up which nodes are subscribed.
 - **hub** (`hub/`): control plane. HTTP API (JWT auth w/ argon2, users, nodes, subscriptions handlers) backed by SQLite, plus RabbitMQ handlers.
 - **subscriptions** (`subscriptions/`): SQLite-backed service answering which nodes belong to a subscription (e.g. the `subscriptions.nodes.get` command).
-- **nodes** (`nodes/`): Python workers. `bustle.py` is the object counter (YOLO via ultralytics): a GStreamer pipeline (`nodes/core/pipeline.py`) pulls SRT frames, YOLO counts chosen classes, results are stored in MongoDB and served back over the broker. Long-running: SIGTERM/SIGINT trigger a graceful path that stops workers, deregisters the node from the hub (`nodes.remove`), then closes the broker connection. Logging is stdlib `logging` configured by `nodes/core/logging_setup.py`. There is no packaging: `nodes/pyproject.toml` exists only to describe the dependencies and configure pyright, `nodes/requirements.txt` pins the working venv, and the code runs as `python bustle.py` with `nodes/` as the project root (imports are `from core import ...`, `from lib.bustle import ...`).
+- **nodes** (`nodes/`): Python workers. `bustle.py` is the object counter (YOLO via ultralytics): a GStreamer pipeline (`nodes/core/pipeline.py`) pulls SRT frames, YOLO counts chosen classes, results are stored in MongoDB and served back over the broker. Long-running: SIGTERM/SIGINT trigger a graceful path that stops workers, deregisters the node from the hub (`nodes.remove`), then closes the broker connection. Logging is stdlib `logging` configured by `nodes/core/logging_setup.py`. `nodes/` is not a package (no `nodes/__init__.py`): the imports are `from core import ...` / `from lib.bustle import ...` with `nodes/` as the root, and Python puts a script's own directory on `sys.path`, so `uv run python nodes/bustle.py` from the repo root resolves them as-is. The dependencies and the pyright configuration live in the root `./pyproject.toml`, and the venv is the root `./.venv`.
 
 ### Sibling discovery protocol (the core pattern)
 
@@ -108,7 +111,7 @@ The `E`-numbered items in TODO.md section E are the historical record of how eac
 - **Both tx encoder build tags must compile.** The `va` and default variants of `encElementWithOptions` must keep the same signature (`bitrate uint32`); `make lint` and `make build` do not pass build tags, so check the `va` variant explicitly with `make test TAGS=va` (or `cd tx && go build -tags va ./... && go vet -tags va ./...`).
 - **The hub has no default JWT secret.** `--secret`/`JWT_SECRET` is empty by default and the hub then generates a random per-process secret with a warning (tokens do not survive a restart). Set it explicitly in any deployment.
 - **The DASH control routes need `--dash-token`.** `POST`/`DELETE /stream` are behind `requireDashToken`; with no token configured only a loopback caller may register or delete a stream, so widening the bind address cannot silently expose them.
-- **Never install `gst-python-stubs` in the node venv.** It ships an overrides-only `Gst.pyi` at the same path as the real `PyGObject-stubs` file and silently clobbers it, which turns every GStreamer enum and constructor into an unknown-attribute error. See `nodes/requirements.txt`.
+- **Never install `gst-python-stubs` in the node venv.** It ships an overrides-only `Gst.pyi` at the same path as the real `PyGObject-stubs` file and silently clobbers it, which turns every GStreamer enum and constructor into an unknown-attribute error. See `./pyproject.toml`.
 - The analytics pipelines in `nodes/lib/bustle/analytics.py` emit ECharts option objects from the DB, violating DESIGN invariant #8.
 
 ## Testing

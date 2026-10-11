@@ -29,8 +29,9 @@ fixed tree.
 Ordered stages; each lands independently and is wire-compatible.
 
 - [x] A0. Safety net (before touching anything)
-  - [x] nodes/pyproject.toml: pyright config (standard, exclude .venv),
-        proper dependency pins (requirements.txt was a venv dump)
+  - [x] pyproject.toml at the repo root: pyright config (standard, exclude
+        .venv, extraPaths nodes), proper dependency pins (requirements.txt was
+        a venv dump, and is gone; uv.lock carries the transitive graph)
   - [x] Unit tests for nodes/core (pure python, fakes, no broker):
     - [x] handlers: RouterResponse to_json/from_json round-trip incl.
           base64-bytes convention (guards the Go wire contract)
@@ -689,23 +690,30 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
 
 ### E10. Python typing / packaging (MEDIUM)
 
-**Fixed.** `nodes/pyproject.toml` now carries the dependency list and the
-pyright configuration, `nodes/requirements.txt` pins the direct dependencies of
-the working venv, and `make typecheck` runs the gate — `0 errors, 0 warnings` in
-`standard` mode over `bustle.py`, `core/`, `lib/` and `tests/`.
+**Fixed.** The root `pyproject.toml` now carries the dependency list and the
+pyright configuration, `uv.lock` records the resolved transitive graph, `uv
+sync` is the one setup command, and `make typecheck` runs the gate — `0 errors,
+0 warnings` in `standard` mode over `bustle.py`, `core/`, `lib/` and `tests/`.
+The venv is `./.venv` at the repo root, while all the node code stays in
+`nodes/`.
 
-- [x] Pyright is not installed in `nodes/.venv` and there is no
+- [x] Pyright is not installed in the node venv and there is no
       `pyrightconfig.json`; default mode reports 7 errors + 1 warning (all
       PyGObject stub attribute issues in `nodes/core/pipeline.py`), strict mode
       111. Either add the config + dependency (TODO A0) or drop the claim.
-      **Fixed**: `pyright` and `PyGObject-stubs` are in the venv and the config
-      lives in `nodes/pyproject.toml` rather than a `pyrightconfig.json`
-      (`include`, `exclude`, `venvPath = "."`, `venv = ".venv"`,
-      `pythonVersion = "3.14"`, `typeCheckingMode = "standard"`,
-      `reportMissingModuleSource = "none"` for the compiled `gi.repository`
-      bindings). `venvPath`/`venv` matter: pyright does not resolve the venv
-      just because it was launched from the venv's own `bin/`, so without them
-      every third-party import reports `reportMissingImports`. Two traps found
+      **Fixed**: `pyright` and `PyGObject-stubs` are in the `dev` dependency
+      group and the config
+      lives in the root `pyproject.toml` rather than a `pyrightconfig.json`
+      (`include = ["nodes/bustle.py", "nodes/core", "nodes/lib",
+      "nodes/tests"]`, `exclude`, `venvPath = "."`, `venv = ".venv"`,
+      `extraPaths = ["nodes"]`, `pythonVersion = "3.14"`,
+      `typeCheckingMode = "standard"`, `reportMissingModuleSource = "none"`
+      for the compiled `gi.repository` bindings). `venvPath`/`venv` matter:
+      pyright does not resolve the venv just because it was launched from the
+      venv's own `bin/`, so without them every third-party import reports
+      `reportMissingImports`. `extraPaths` matters for the same reason at one
+      level down: the nodes import `core`/`lib` as top-level names, and the
+      config now lives above them. Two traps found
       on the way: (a) the PyPI package `gst-python-stubs` ships an
       overrides-only 3.6 KB `gi-stubs/repository/Gst.pyi` at the same path as
       PyGObject-stubs' real 228 KB file and silently clobbers it, which is what
@@ -717,12 +725,20 @@ the working venv, and `make typecheck` runs the gate — `0 errors, 0 warnings` 
 - [x] `nodes/requirements.txt` is a full venv dump and already diverges from
       the installed venv (pins `aio-pika==10.0.1`/`pymongo==4.18.1`; venv has
       10.1.0/4.18.2). Replace with a real dependency list + `pyproject.toml`.
-      **Fixed**: `requirements.txt` lists what the code imports
-      (`PyGObject`, `aio-pika`, `pymongo`, `numpy`, `pandas`, `torch`,
-      `ultralytics`) plus `lap`, which ultralytics does not declare but
-      `model.track()` needs, pinned to the venv's versions; the type-check
-      dependencies are in the same file under a separate comment.
-      `pyproject.toml` carries the same packages as abstract lower bounds.
+      **Fixed**: the file is deleted. The root `pyproject.toml` lists what the
+      code imports (`PyGObject`, `aio-pika`, `pymongo`, `numpy`, `pandas`,
+      `torch`, `torchvision`, `ultralytics`) plus `lap`, which ultralytics does
+      not declare but `model.track()` needs, pinned exactly to the versions the
+      runtime was tested against; the type-check dependencies sit in the `dev`
+      dependency group. `torchvision` is pinned even though nothing imports it
+      directly: ultralytics pulls it in, and its PyPI build is compiled against
+      a different torch ABI than the CPU wheel, so the pair has to come from the
+      same release or importing it dies with `RuntimeError: operator
+      torchvision::nms does not exist`. The torch CPU wheel needs
+      `[[tool.uv.index]]` + `[tool.uv.sources]` — PEP 621 has no index-URL field,
+      so it is the one thing a dependency list alone cannot express. `uv.lock`
+      is committed, so the transitive graph is reproducible rather than
+      floating.
 - [x] Lint hygiene (re-checked against the current tree): missing type args on
       `queue.Queue` (`nodes/core/pipeline.py:19`) and `collection.Collection`
       (`nodes/lib/bustle/handlers.py:35,48`,

@@ -321,16 +321,22 @@ Same layering as hub minus HTTP.
   videoconvert ! video/x-raw, format=BGR ! appsink name=app_sink
   emit-signals=true max-buffers=1 drop=true`, connected with
   `srt://<addr>?mode=caller&streamid=subscribe:<node-id>`.
-- Environment: `nodes/.venv` (PyGObject/GStreamer, ultralytics YOLO, pymongo,
-  aio-pika, torch). `nodes/requirements.txt` pins those direct dependencies
-  (plus `lap`, which ultralytics does not declare but `model.track()` needs) and
-  `nodes/pyproject.toml` carries the same set as abstract lower bounds. There is
-  no packaging step: the code runs from `nodes/` as the project root, so imports
-  are `from core import ...` / `from lib.bustle import ...`.
+- Environment: `.venv` at the repo root (PyGObject/GStreamer, ultralytics YOLO,
+  pymongo, aio-pika, torch), created by `uv sync` from the root
+  `pyproject.toml` — which pins the direct dependencies exactly (plus
+  `torchvision` and `lap`, neither imported directly: ultralytics pulls the
+  former in and `model.track()` needs the latter) and wires the torch CPU wheel
+  through `[tool.uv.sources]`. `uv.lock` holds the full transitive graph.
+  `[tool.uv] package = false` keeps `uv sync` to dependencies, because there is
+  no packaging step: `nodes/` is a directory of scripts, not a package, so the
+  imports are `from core import ...` / `from lib.bustle import ...` with `nodes/`
+  as the root, and the node runs as `uv run python nodes/bustle.py` from the repo
+  root.
 - Tests: `nodes/tests/` (stdlib `unittest`, no pytest) covers the `nodes/core`
-  runtime; run it with `make test-nodes`, or from `nodes/` with
-  `.venv/bin/python -m unittest discover -s tests -t .`. Classes that need the
-  GStreamer bindings skip themselves where those are absent.
+  runtime; run it with `make test-nodes`, or from the repo root with
+  `.venv/bin/python -m unittest discover -s nodes/tests -t nodes` (the `-t nodes`
+  is what puts `nodes/` on `sys.path`). Classes that need the GStreamer bindings
+  skip themselves where those are absent.
 
 ## Shared root packages (`internal/`, imported by hub/rx/subscriptions/tx)
 
@@ -382,7 +388,7 @@ source; TODO.md section E is the tracker for their status.
 | Python node: dropped `await rep(...)`, blocking GStreamer/pymongo calls on the loop, 100% CPU frame loop, unsynchronized pipeline start/stop, unhandled `insert_one`/`model.track` failures, late replies mis-dispatched as requests, naive timestamps | a caller blocked forever; a transient error silently killed counting or persistence | awaited reply + `Coroutine`-typed `ReplyFunc`; `asyncio.to_thread` for blocking calls; blocking `get_frame(timeout=...)`; a lock around the pipeline; logged failures; an abandoned-trackID set; UTC timestamps |
 | frame path: `reshape((height, width, 3))` assumed tightly packed rows, and `get_frame()` lost its non-blocking default when it moved to `get(timeout=...)` | any `video/x-raw` width whose row was not 4-byte aligned (e.g. 1279) raised `ValueError` on the GStreamer streaming thread; an argument-less `get_frame()` blocked the caller forever | `_frame_view` strides rows from `GstVideo.VideoInfo.new_from_caps`, falls back to packed rows and returns `None` when the layout does not fit; the redundant full-frame `.copy()` is gone; `get_frame(timeout=None)` is non-blocking again |
 | hub security: committed JWT secret, any-HMAC validation, no signin rate limit, email logged, no ownership check on removal, unbounded bodies, only `ReadHeaderTimeout`, `Secure:true` cookies, unauthenticated DASH control routes | token forgery, brute force, cross-user deletion, slowloris, broken local dev, unauthenticated stream deletion | ephemeral secret + warning, pinned HS256 and issuer, 10/min per-address limiter, ownership enforced inside the `DELETE`, 1 MiB `MaxBytesReader` + Read/Write/Idle timeouts, `--cookie-secure`, `requireDashToken` (loopback-only without a token) |
-| Python typing/packaging: no `pyproject.toml`, no type-checker config, `requirements.txt` a `pip freeze` dump already divergent from the venv; missing type args on `queue.Queue`/`pymongo.Collection`, untyped `json_serializer(obj)`, an unused `Pipeline` Protocol | the documented type-check gate did not run, so the `None`-returning `GstVideo.VideoInfo.new_from_caps` was unguarded and a fresh venv could resolve different dependency versions | `nodes/pyproject.toml` (deps + `typeCheckingMode = "standard"`, `venvPath`/`venv` pinned) and a real pinned `requirements.txt`; `make typecheck` (0 errors); `_frame_view` guards `None`; `RouterLike` Protocol in `core/rpc.py`; the type args and the dead Protocol are gone. Never install `gst-python-stubs` — it clobbers the real `Gst.pyi` |
+| Python typing/packaging: no `pyproject.toml`, no type-checker config, `requirements.txt` a `pip freeze` dump already divergent from the venv; missing type args on `queue.Queue`/`pymongo.Collection`, untyped `json_serializer(obj)`, an unused `Pipeline` Protocol | the documented type-check gate did not run, so the `None`-returning `GstVideo.VideoInfo.new_from_caps` was unguarded and a fresh venv could resolve different dependency versions | root `pyproject.toml` (exact pins, the torch CPU index, `typeCheckingMode = "standard"`, `venvPath`/`venv`/`extraPaths` pinned) plus `uv.lock` for the transitive graph, and `uv sync` as the one setup command; `make typecheck` (0 errors); `_frame_view` guards `None`; `RouterLike` Protocol in `core/rpc.py`; the type args and the dead Protocol are gone. Never install `gst-python-stubs` — it clobbers the real `Gst.pyi` |
 
 ### Open (E7, E11)
 
@@ -403,13 +409,19 @@ source; TODO.md section E is the tracker for their status.
   It then runs the Python suite in `nodes/tests`; `make test-nodes` runs that
   alone, `PYTHON=...` picks another interpreter and `NODESTESTFLAGS=-v` adds
   per-test output.
-- `make typecheck` — pyright over `nodes/`, configured by `nodes/pyproject.toml`
-  (`typeCheckingMode = "standard"`, `venvPath`/`venv` pinned to `nodes/.venv`
-  so the third-party imports and the `gi.repository` stubs resolve). It needs
-  `pyright` and `PyGObject-stubs` in that venv and must not have
-  `gst-python-stubs`, which ships an overrides-only `Gst.pyi` at the same path
-  and silently clobbers the real stubs. `PYRIGHT=` and `TYPECHECKFLAGS`
-  override the command and its arguments.
+- `make typecheck` — pyright over `nodes/`, configured by the root
+  `pyproject.toml` (`typeCheckingMode = "standard"`, `venvPath`/`venv` pinned to
+  `.venv` so the third-party imports and the `gi.repository` stubs resolve, and
+  `extraPaths = ["nodes"]` so the nodes' `from core import ...` imports resolve
+  from a config one level above them). It needs `pyright` and `PyGObject-stubs`
+  in that venv (both in the `dev` dependency group, so `uv sync` installs them)
+  and must not have `gst-python-stubs`, which ships an overrides-only `Gst.pyi`
+  at the same path and silently clobbers the real stubs. `PYRIGHT=` and
+  `TYPECHECKFLAGS` override the command and its arguments.
+- Python environment — `uv sync` from the repo root creates `./.venv` and
+  installs the exact pins from `pyproject.toml` plus the `dev` group; `uv.lock`
+  records the resolved transitive graph. `[tool.uv] package = false` keeps it to
+  dependencies, since `nodes/` is a directory of scripts rather than a package.
 - `make build` — builds every `cmd/` entrypoint into `bin/surr-<name>`;
   `make build-tx` (also build-rx/hub/subscriptions) for one;
   `RELEASE_TYPE=release` strips and trimpaths.

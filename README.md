@@ -56,9 +56,10 @@ nodes. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
   to run the Python nodes.
 - **MongoDB** — analytics storage for nodes.
 - **Python 3** with GObject/GStreamer bindings, `ultralytics` (YOLO), `pymongo`
-  and `aio-pika` — for the nodes runtime. `nodes/requirements.txt` pins the
-  direct dependencies of a working venv; `nodes/pyproject.toml` carries the same
-  packages as abstract lower bounds and configures the type checker.
+  and `aio-pika` — for the nodes runtime. The dependencies are declared in the
+  root `pyproject.toml`, pinned exactly, with `uv.lock` holding the full
+  transitive graph. The venv lives at the repo root as `.venv/`.
+- **[uv](https://docs.astral.sh/uv/)** — installs and runs the Python side.
 
 ## Build
 
@@ -68,8 +69,24 @@ make build      # build only (no lint, no test)
 make lint       # golangci-lint, every module
 make test       # go test ./..., every module, then the nodes/ python suite
 make test-nodes # python tests for nodes/core (nodes/tests)
-make typecheck  # pyright over nodes/ (nodes/pyproject.toml)
+make typecheck  # pyright over nodes/ (pyproject.toml)
 make clean      # remove .cache/ and bin/
+```
+
+The Python side needs its venv before `make test-nodes` / `make typecheck` can
+run. From the repo root:
+
+```sh
+uv sync         # creates .venv/ and installs the node dependencies + dev tools
+```
+
+`uv sync` installs the exact pins from `pyproject.toml` and the `dev` group
+(`pyright`, `PyGObject-stubs`) into `./.venv`. It does **not** install the
+project itself: `nodes/` is a directory of scripts, not an importable package,
+so `[tool.uv] package = false` keeps `uv sync` to dependencies only.
+
+```sh
+uv run python nodes/bustle.py --help    # run the node from the repo root
 ```
 
 `make build` builds each service into `bin/surr-<name>` (`bin/surr-hub`,
@@ -80,14 +97,15 @@ Likewise `make test-hub`, `make test-rx`, `make test-subscriptions`,
 
 Knobs: `RELEASE_TYPE=release` adds `-s -w -trimpath`; `TAGS` passes build tags;
 `GOFLAGS` / `LDFLAGS` are appended; `TESTFLAGS` is appended to `go test` (e.g.
-`make test TESTFLAGS=-race`). `make test-nodes` runs with `nodes/.venv/bin/python`
+`make test TESTFLAGS=-race`). `make test-nodes` runs with `./.venv/bin/python`
 when it exists and `PYTHON=<interpreter>` overrides that; `NODESTESTFLAGS=-v`
-gives per-test output. `make typecheck` runs pyright from inside `nodes/` against
-`nodes/pyproject.toml` (`PYRIGHT=<path>` and `TYPECHECKFLAGS` override the
-command and its arguments). It needs `pyright` and `PyGObject-stubs` in
-`nodes/.venv`, and must **not** have `gst-python-stubs` installed — that package
-writes an overrides-only `Gst.pyi` over the real stubs and makes every
-GStreamer enum and constructor an unknown-attribute error.
+gives per-test output. `make typecheck` runs pyright from the repo root against
+`pyproject.toml` (`PYRIGHT=<path>` and `TYPECHECKFLAGS` override the command and
+its arguments). It needs `pyright` and `PyGObject-stubs` in `./.venv` — both are
+in the `dev` dependency group, so `uv sync` installs them — and must **not** have
+`gst-python-stubs` installed: that package writes an overrides-only `Gst.pyi`
+over the real stubs and makes every GStreamer enum and constructor an
+unknown-attribute error.
 
 The Go tests cover the RPC reply layer and the backoff used by the restart loops.
 The Python suite in `nodes/tests` covers the `nodes/core` runtime — the wire
@@ -183,18 +201,18 @@ loopback caller may register or delete a stream.
 
 ### 6. Start a node
 
-Run from the `nodes/` directory (the runtime imports `core` and `lib` as
-top-level packages):
+Run from the repo root. `nodes/` is not a package — the runtime imports `core`
+and `lib` as top-level names, and Python puts a script's own directory on
+`sys.path`, so the path below resolves as-is:
 
 ```sh
-cd nodes
-python bustle.py --node-id <uuid>
+uv run python nodes/bustle.py --node-id <uuid>
 ```
 
 The node needs YOLO weights — pass `-m/--model <path>`, and note that weight
 files are not committed to this repository. `--mongo-url`, `--mongo-db`,
 `--broker`, `-f/--family`, `-c/--chosen-classes` and `--drain-interval` are the
-other knobs; `python bustle.py --help` lists them all.
+other knobs; `uv run python nodes/bustle.py --help` lists them all.
 
 The node self-registers with `hub` on boot (`nodes.add`) and deregisters on
 graceful shutdown (`nodes.remove`). It retries registration until the hub
