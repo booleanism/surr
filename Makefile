@@ -66,7 +66,7 @@ CMD_TARGETS := $(foreach dir,$(CMD_DIRS),build-$(notdir $(dir)))
 # Map module paths to test target rules (test-root, test-hub, test-rx, test-subscriptions, test-tx)
 TEST_TARGETS := $(addprefix test-,$(patsubst .,root,$(MODULES)))
 
-.PHONY: all build lint test typecheck test-root test-nodes prep-cache clean-cache clean $(MODULES) $(TEST_TARGETS) $(CMD_TARGETS)
+.PHONY: all build lint test test-go typecheck test-root test-nodes prep-cache clean-cache clean $(MODULES) $(TEST_TARGETS) $(CMD_TARGETS)
 
 # typecheck is in `all` but not in `lint`/`test`: it needs the node venv, while
 # `make lint` and `make test-hub` should stay usable on a Go-only checkout.
@@ -74,7 +74,11 @@ all: lint test typecheck build
 
 lint: prep-cache $(MODULES)
 
-test: prep-cache $(TEST_TARGETS) test-nodes
+test: test-go test-nodes
+
+# The Go half of `test`, split out because it has no Python dependency: CI runs
+# it on a runner that has the cgo toolchain but no node venv.
+test-go: prep-cache $(TEST_TARGETS)
 
 prep-cache:
 	@mkdir -p $(GOCACHE) $(GOLANGCI_LINT_CACHE) $(BIN_DIR)

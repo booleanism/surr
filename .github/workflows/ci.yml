@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A force-push to a branch makes the previous run's result meaningless, so
+# cancel it instead of paying for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (lint, test, build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # rx and tx declare `go 1.27.1` in their go.mod, which is the highest
+      # floor in the repo, so pin that rather than letting the toolchain
+      # auto-download a newer one mid-build.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: |
+            go.sum
+            hub/go.sum
+            rx/go.sum
+            tx/go.sum
+            subscriptions/go.sum
+
+      # The Go side is not pure Go: hub and subscriptions link mattn/go-sqlite3
+      # (cgo, but it carries the amalgamation), rx links haivision/srtgo which
+      # is `#cgo LDFLAGS: -lsrt`, and tx links go-gst which needs the GStreamer
+      # headers. `make lint` type-checks every module, so all three are needed
+      # even for the lint step.
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libsrt-openssl-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
+
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/v2.13.2/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.13.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # The Makefile redirects GOCACHE and GOLANGCI_LINT_CACHE into .cache, so
+      # caching that directory is what actually saves the type-check work.
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: ${{ runner.os }}-lint-${{ hashFiles('**/go.sum', '.golangci.yml') }}
+          restore-keys: ${{ runner.os }}-lint-
+
+      - name: Lint
+        run: make lint
+
+      # test-go is the Go half of `make test`; the Python half needs the node
+      # venv, which the python job owns.
+      - name: Test
+        run: make test-go
+
+      - name: Build
+        run: make build
+
+      - name: Check the injected build id reaches --version
+        run: |
+          ./bin/surr-hub --version
+          ./bin/surr-hub --version | grep -q "$(git describe --tags --always --dirty)"
+
+  python:
+    name: Python (tests, typecheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # PyGObject is a build-from-source dependency (no wheels), and 3.58 wants
+      # `girepository-2.0 >= 2.80` -- hence libgirepository-2.0-dev, which only
+      # exists on distributions with GLib 2.80 or newer. ubuntu-24.04 has it.
+      # The gir1.2-* packages supply the Gst/GstVideo typelibs the node binds
+      # through; without them the pipeline tests skip themselves rather than
+      # fail, which would quietly halve the coverage.
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libgirepository-2.0-dev \
+            libcairo2-dev \
+            libgstreamer1.0-0 \
+            libgstreamer-plugins-base1.0-0 \
+            gir1.2-glib-2.0 \
+            gir1.2-gstreamer-1.0 \
+            gir1.2-gst-plugins-base-1.0
+
+      # --frozen fails the job when uv.lock disagrees with pyproject.toml, which
+      # is the check that keeps the lockfile honest.
+      - name: Sync the node environment
+        run: uv sync --frozen
+
+      - name: Test
+        run: make test-nodes
+
+      - name: Typecheck
+        run: make typecheck
