@@ -499,8 +499,22 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       would have to reimplement golang-migrate's `schema_migrations`
       bookkeeping (version + dirty flag) to stay compatible with the CLI.
 
-### E6. tx / DASH (HIGH) — fixed
+### E6. tx / DASH (HIGH) — fixed, with one new finding open
 
+- [ ] An unreachable RTSP source makes `tx` **abort** instead of reporting an
+      error, so a typo in the source URL looks like a crash loop rather than a
+      configuration mistake. Reproduced deterministically:
+      `docker run --rm --network surr_default --entrypoint surr-tx surr-tx run
+      --src=rtsp://no-such-host.invalid:8554/cam1 --sink='srt://rx:4200?mode=caller&streamid=publish:<sub-id>'`
+      logs `running transmitter`, then `bus watch error="...gst_rtspsrc_retrieve_sdp
+      (): Failed to connect. (Generic error): Could not open resource for reading
+      and writing."`, then
+      `GLib-GIO:ERROR:../../../gio/gthreadedresolver.c:1487:cancelled_cb: assertion
+      failed: (g_cancellable_is_cancelled (cancellable))` and `Bail out!`, and
+      exits **139**. Under `restart: unless-stopped` that is a restart every few
+      seconds, which is what the compose stack did until `TX_SRC` was corrected.
+      Note the sink is already publishing to `rx` by the time the source fails,
+      so `rx` accepts a publisher that will never carry frames.
 - [x] `tx/internal/streaming/stream.go:61-63` `block()` busy-spins
       (`for s.c.Load() > 1`), and `ref()` increments the same counter, so two
       concurrent DASH requests livelock the server at 100% CPU. **Fixed**: the
@@ -594,9 +608,36 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       `sock.Read` → `Close(subID)` and `StopSink` are skipped, so nodes keep
       streaming after rx shutdown.
 - [ ] `ingress.go:66-103` never sets an SRT rejection reason (egress does).
-- [ ] `rx/internal/adapter/rabbitmq/nodes.go`: `StartSink`/`StopSink` always
+- [x] `rx/internal/adapter/rabbitmq/nodes.go`: `StartSink`/`StopSink` always
       return nil (per-node failures only logged) and require exactly one
-      sibling.
+      sibling. **Fixed.** The swallowed error used to leave the data plane dead
+      in a way every component reported as healthy: on a cold start where `tx`
+      connects before the node has introduced itself, `rx` accepted the
+      publish, `do()` failed with `expected one sibling with
+      <node-id>.sink.start command`, `StartSink` logged it and returned nil, and
+      `handlePublisher` went on to log `publisher started` and read frames
+      nobody was subscribed to. Nothing re-dispatched the command, and because
+      `rx` never dropped the publisher, `tx` never reconnected either — every
+      container stayed `Up` and the MongoDB document count stayed put. Observed
+      with `surr-tx-1` connecting at `21:00:07` and `bustle` registering at
+      `21:00:09`. `StartSink`/`StopSink` now try every node and return the first
+      failure, which is enough on its own: `handlePublisher` already returned on
+      error, and its deferred `sock.Close()` makes `tx` reconnect into the
+      now-registered node. Verified by starting the stack with the node absent —
+      `rx` logged `start nodes sink` then `publisher stopped`, and the chain
+      recovered unaided once `bustle` introduced itself, with MongoDB growing
+      again (277 → 283 → 288). Tests:
+      `rx/internal/adapter/rabbitmq/nodes_test.go`.
+- [ ] The recovery above is unbounded. `tx`'s `srtsink` retries a closed socket
+      immediately and without backoff (`Socket is broken or closed. Trying to
+      reconnect`), so while the node is absent `rx` accepts and drops a publish
+      as fast as the two can complete a handshake: **1058 attempts in 31
+      seconds** (21:11:57–21:12:28), each one doing a blocking
+      `SelectSubscribedNodes` broker RPC inside the SRT listen callback. It ends
+      when the node arrives, but a subscription pointing at a node that is not
+      running spins at roughly 34 handshakes/second indefinitely. A short delay
+      before dropping the publisher, or retrying the dispatch in-process for a
+      bounded window, would bound it.
 
 ### E8. Python node runtime (HIGH) — fixed
 

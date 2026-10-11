@@ -201,9 +201,14 @@ topic exchange and broadcasts an `introduce` message advertising the commands
 it can serve; peers keep a registry of that, so a caller resolves
 `subscriptions.nodes.get` to whichever sibling offers it. The consequences:
 
-- **Startup order is not critical.** Services retry until their siblings
-  introduce themselves. Only the migrations are order-sensitive, which is what
-  `depends_on: service_completed_successfully` covers.
+- **Startup order is not critical, but it is not free either.** Services retry
+  their broker calls until their siblings introduce themselves, so the graph
+  settles on its own. `rx` telling a node to start is the one dispatch that is
+  not retried in-process: it happens once, when `tx` connects, so a node that
+  has not introduced itself yet is not told, `rx` drops the publisher, and `tx`
+  reconnects and tries again. That recovers on its own within a few seconds of
+  the node appearing — start `bustle` first anyway if you want a quiet log,
+  because until it does the two retry at roughly 30 handshakes a second.
 - **A node registers once per run.** `nodes.add` is sent on boot and retried
   until the hub answers. Recreating the hub's database while a node keeps
   running leaves that node unregistered until it restarts.
