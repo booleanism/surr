@@ -32,11 +32,15 @@ SRT ("data plane"). Analytics land in MongoDB; control state lives in SQLite.
 | subscriptions | Go  | `subscriptions/`  | SQLite-backed subscription registry answering node-membership queries |
 | nodes    | Python   | `nodes/`          | AI workers; `bustle.py` is the object counter (LibreDEIMm) |
 
-There is **no go.work**; each Go module is self-contained. All four service
-modules (`hub`, `rx`, `subscriptions`, `tx`) reach the shared root packages
-via `replace github.com/booleanism/surr => ../`. `tx` never joins the broker —
-it remains broker-free at runtime, but does import shared root packages
-(`internal/logging`) at build time.
+A committed `go.work` at the repository root lists all five modules, so they
+share one build list and `go build all` / `go vet all` span the whole
+repository (`go build ./...` still stops at each module boundary). The four
+service modules (`hub`, `rx`, `subscriptions`, `tx`) additionally reach the
+shared root packages via `replace github.com/booleanism/surr => ../`, which is
+what keeps a build made outside the workspace (`GOWORK=off`, and every deploy
+Dockerfile) resolvable while the shared module is unpublished. `tx` never joins
+the broker — it remains broker-free at runtime, but does import shared root
+packages (`internal/logging`) at build time.
 
 ## End-to-end data flow
 
