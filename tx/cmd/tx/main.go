@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -48,6 +49,13 @@ var DefaultStreamSpec = core.StreamSpecs{
 }
 
 func main() {
+	os.Exit(run())
+}
+
+// run is main's body, returning the process exit code rather than calling
+// os.Exit itself: os.Exit skips deferred calls, and the deferred cancellation
+// here is what lets the cleanup hooks run at all.
+func run() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -59,7 +67,7 @@ func main() {
 	}
 	err := cmdLine.parseCLI(ctx, os.Args)
 	if err != nil {
-		return
+		return 0
 	}
 
 	ctx, log := logging.Setup(ctx, "tx", "", Version, cmdLine.LogLevel, cmdLine.LogFormat)
@@ -87,6 +95,8 @@ func main() {
 		<-ctx.Done()
 		<-cleanupDone
 
+		return 0
+
 	case "run":
 		ctxRun, cancelRun := context.WithCancelCause(ctx)
 		cancelWrap := func(err error) {
@@ -96,18 +106,37 @@ func main() {
 
 		defer cancelWrap(context.DeadlineExceeded)
 
+		// The error travels back here instead of being logged in the goroutine:
+		// main is about to exit, and a log line that races the exit is a log
+		// line that sometimes does not happen. The buffer means the goroutine
+		// never blocks on a reader that has already given up.
+		commandDone := make(chan error, 1)
+
 		go func() {
-			if runErr := runCommand(ctxRun, cancelWrap, cmdLine, cleanups); runErr != nil {
-				log.Error().Err(runErr).Msg("run command")
+			runErr := runCommand(ctxRun, cancelWrap, cmdLine, cleanups)
+			if runErr != nil {
 				cancelWrap(runErr)
-				return
 			}
+
+			commandDone <- runErr
 		}()
 
 		<-ctx.Done()
 		<-cleanupDone
 
+		// Waiting for the command is what makes the exit code meaningful: a
+		// transmitter that could not reach its source has to fail loudly, or a
+		// typo in the source URL under `restart: unless-stopped` looks like a
+		// service that keeps dying for no stated reason.
+		if runErr := <-commandDone; runErr != nil {
+			log.Error().Err(runErr).Msg("run command")
+			return 1
+		}
+
+		return 0
+
 	default:
+		return 0
 	}
 }
 
@@ -271,6 +300,14 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 	rtspSrc := src.NewRTSPSrc(cmdLine.Run.Source, cbData)
 	prodPipe.Add(rtspSrc)
 
+	// The loop is stopped by the context rather than by the cleanup hook:
+	// g_main_loop_quit is safe from any thread, and this keeps the loop from
+	// outliving a cancellation that arrived before the hook was registered.
+	go func() {
+		<-ctx.Done()
+		loop.Quit()
+	}()
+
 	cleanups.Register(func() error {
 		if os.Getenv("GST_DEBUG_DUMP_DOT_DIR") != "" {
 			gst.DebugBinToDotFile(prodPipe, gst.DebugGraphShowAll, ProducerPipelineName)
@@ -281,8 +318,6 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 			}
 		}
 
-		pipeSetState(gst.StateNull)
-		loop.Quit()
 		return nil
 	})
 
@@ -311,5 +346,32 @@ func runCommand(ctx context.Context, cancel context.CancelCauseFunc, cmdLine *Co
 
 	loop.Run()
 
-	return nil
+	// The pipelines are deliberately left in PLAYING rather than set to NULL,
+	// and the process exits right here. Going to NULL disposes the RTSP source,
+	// which cancels the name lookup it left behind in GIO's threaded resolver;
+	// on GLib 2.84 (Debian trixie) that teardown races the resolver's worker
+	// thread and kills the process with SIGSEGV inside gthreadedresolver.c.
+	// That happens on a clean SIGTERM as much as on an unreachable source, and
+	// it is not an ordering problem: it reproduces whether the state change is
+	// issued from the loop's thread or from another one, and whether the whole
+	// pipeline or only the pipelines downstream of it are brought down. The
+	// kernel closes the sockets on exit, so the receiver sees the same thing
+	// either way. The cost of leaving this out is that a `--recording` run does
+	// not get its trailer written, so an interrupted recording needs remuxing
+	// before it plays; that is the better trade against a segfault on every
+	// shutdown.
+	return runFailure(ctx)
+}
+
+// runFailure returns the reason the pipelines came down, or nil when the
+// shutdown was asked for rather than caused by a failure. A bus error arrives
+// as the cancellation cause (see setupPipelines), so a source that cannot be
+// reached comes back out of here and the process exits non-zero.
+func runFailure(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if cause == nil || errors.Is(cause, context.Canceled) {
+		return nil
+	}
+
+	return cause
 }
