@@ -20,11 +20,11 @@ Treat both as prior art to review, not as landed code.
 **Section E is different**: it tracks defects found by reading the code during
 a full review pass, then re-checked against the working tree. Its checkboxes
 are **fix status** (`[x]` = fixed), not "verified" — every item, fixed or not,
-was reproduced from the source. **E0–E6, E8, E9 and E10 are now fixed and
-committed** (`beaa467`..`4181761`); E7 and E11 (MEDIUM and LOW) are still open.
-Line
-numbers inside `[x]` items refer to the revision they were found in, not to the
-fixed tree.
+was reproduced from the source. **All of E0–E11 is now fixed**; E0–E6, E8, E9
+and E10 are committed (`beaa467`..`4181761`), and the E7/E11 pass (rx data
+plane, tx shutdown, signup validation) is implemented and tested but **not yet
+committed** at the time of writing. Line numbers inside `[x]` items refer to the
+revision they were found in, not to the fixed tree.
 
 ## A. Nodes refactor (type-agnostic runtime) — DESIGN.md §12
 
@@ -240,27 +240,39 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       and LibreYOLO's `predict` reports no ids. Cost: ~546 ms/frame on CPU at
       1280x720. Covered by `nodes/tests/test_lib_detector.py` (17 tests against
       a faked `libreyolo`).
-- [ ] Go test suite. **Partly done**: `make test` runs `go test ./...` in every
-      module and covers the RPC reply layer
+- [x] Go test suite. **Done**: `make test` runs `go test ./...` in every module
+      and covers the RPC reply layer
       (`internal/protocols/handlers_test.go`, the `hub` and `subscriptions`
-      `handlers` packages) plus `internal/backoff`; the two `handlers` tests
-      enumerate the commands their service advertises and fail when one has no
-      case. The Python side is covered as well: `nodes/tests/` (117 tests, stdlib
-      `unittest`) exercises the `nodes/lib/core` runtime and the detector seam and
-      runs from
-      `make test-nodes`, wired into `make test`, and `make typecheck` gates it
-      with pyright. Still untested: the SRT data plane, the SQLite layer and the
-      tx pipelines.
+      `handlers` packages), `internal/backoff`, the sibling wire shape and
+      introduce warning (`internal/protocols/siblings_test.go`,
+      `internal/protocols/rabbitmq/router_test.go`), the SQLite user store
+      (`hub/internal/db/sqlite/user_test.go`), signup validation
+      (`hub/internal/protocols/http/handlers/users_test.go`), the rx data plane
+      (`rx/internal/protocols/srt/broadcast_test.go`, `pending_test.go`,
+      `rx/internal/adapter/rabbitmq/nodes_test.go`), the rx CLI address parser
+      (`rx/cmd/rx/cmdline_test.go`) and the tx shutdown verdict
+      (`tx/cmd/tx/main_test.go`, `tx/internal/core/coder/element_test.go`). The
+      two `handlers` tests enumerate the commands their service advertises and
+      fail when one has no case. The Python side is covered as well:
+      `nodes/tests/` (137 tests, stdlib `unittest`) exercises the
+      `nodes/lib/core` runtime, the detector seam and the version resolver, and
+      runs from `make test-nodes`, wired into `make test`, with
+      `make typecheck` gating it with pyright. What is still untested is the
+      wiring rather than the logic: no test drives a real SRT socket or a real
+      GStreamer pipeline — those are exercised by the compose stack.
 - [ ] PostgreSQL support (README TODO)
 - [ ] Analytics presentation layer (README TODO)
 
-## E. Verified defects (full code review pass)
+## E. Verified defects (full code review pass) — all fixed
 
 Every item below was reproduced by reading the code (two of them empirically:
-E0 with a scratch SQLite/Go test, E1 with a `json.Marshal` probe). These are
-described in DESIGN.md "Known limitations" §A/§B and summarised in
-AGENTS.md "Invariants". E0 and E1 block the whole media path and the whole
-error-reporting path respectively.
+E0 with a scratch SQLite/Go test, E1 with a `json.Marshal` probe; E6 and the
+unbounded rx reconnect loop with a live container stack). These are described in
+DESIGN.md "Known limitations" §A/§B and summarised in AGENTS.md "Invariants".
+E0 and E1 blocked the whole media path and the whole error-reporting path
+respectively; both are fixed, and the code each fix landed in now has a test.
+The items are kept as written — the historical defect text with the fix
+appended — because the reasoning is what stops a regression, not the checkbox.
 
 ### ✅ Compile regression (fixed): the tree did not build
 
@@ -282,7 +294,11 @@ handler-package tests, `internal/backoff/backoff_test.go`) are the Go-side
 coverage, and `nodes/tests/` covers the Python mirror of the RPC plumbing plus
 the whole E8 runtime. The two handler-package tests enumerate the commands each
 service advertises and fail when one is untested, so the reply layer cannot
-regress silently; the Go-side storage, data-plane and tx paths have no test.
+regress silently. The gap named here originally — "the Go-side storage,
+data-plane and tx paths have no test" — was closed by the E6/E7/E11 pass:
+`hub/internal/db/sqlite/user_test.go`, `rx/internal/protocols/srt/`,
+`rx/internal/adapter/rabbitmq/nodes_test.go`, `rx/cmd/rx/cmdline_test.go` and
+`tx/cmd/tx/main_test.go` now exist.
 
 ### E0. Subscriptions UUID storage-class mismatch — data plane dead (CRITICAL) — fixed
 
@@ -391,7 +407,8 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       sites, and the three adapters read failures through the new
       `RouterResponse.ErrorMessage()` — `GetBytes()` on a short ASCII message
       such as `internal` returns base64 garbage, which is exactly what the
-      adapters used to log.
+      adapters used to log. (The helper itself was deleted in the E11 pass
+      below, once nothing depended on it.)
 - [x] Ack semantics diverge: Go `Nack(false, true)` requeues on shutdown,
       Python always `nack(requeue=False)`.
 
@@ -499,9 +516,9 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       would have to reimplement golang-migrate's `schema_migrations`
       bookkeeping (version + dirty flag) to stay compatible with the CLI.
 
-### E6. tx / DASH (HIGH) — fixed, with one new finding open
+### E6. tx / DASH (HIGH) — fixed
 
-- [ ] An unreachable RTSP source makes `tx` **abort** instead of reporting an
+- [x] An unreachable RTSP source makes `tx` **abort** instead of reporting an
       error, so a typo in the source URL looks like a crash loop rather than a
       configuration mistake. Reproduced deterministically:
       `docker run --rm --network surr_default --entrypoint surr-tx surr-tx run
@@ -514,7 +531,40 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       exits **139**. Under `restart: unless-stopped` that is a restart every few
       seconds, which is what the compose stack did until `TX_SRC` was corrected.
       Note the sink is already publishing to `rx` by the time the source fails,
-      so `rx` accepts a publisher that will never carry frames.
+      so `rx` accepts a publisher that will never carry frames. **Fixed.** The
+      abort turned out to be a *shutdown-path* defect rather than a
+      failed-source one: the unfixed binary also exits 139 on a clean SIGTERM
+      with a reachable source and no bus error at all, so anything that stopped
+      the transmitter segfaulted on the way out. The trigger is the state change
+      to NULL, not the failed lookup — `g_main_loop_quit` is thread-safe, but
+      disposing the pipeline from a thread other than the one running the main
+      loop is not. GLib 2.84.4 attaches the resolver's `cancelled_cb` as a
+      GSourceFunc on the GLib *worker* context
+      (`g_source_attach (data->cancellable_source, g_get_worker_context ())`,
+      `gio/gthreadedresolver.c:1545`), so it reaches
+      `g_assert (g_cancellable_is_cancelled (cancellable))` at `:1487` from that
+      thread with a cancellable that is no longer cancelled. The upstream fix
+      (`82c764ce2e42f0d1032627dabcbd742d5f2bd8fa`, GLib MR !3105) is *already*
+      in 2.84.4 — it is the commit that introduced the `GWeakRef` guard at
+      `:1477` — so this is a different, remaining race and not an ordering
+      problem: it reproduces from the loop thread and from the cleanup
+      goroutine, for the whole pipeline set and for the downstream pipelines
+      alone. The fix therefore stops issuing the teardown state change
+      altogether: the pipelines are left in PLAYING, `loop.Quit()` runs from a
+      goroutine on ctx cancellation (safe from any thread), and the process
+      exits once `loop.Run()` returns. Accepted cost, stated in the code: a
+      `--recording` run does not get its trailer written, so an interrupted
+      recording needs remuxing before it plays — the better trade against a
+      segfault on every shutdown. The second half of the item is also fixed:
+      `tx` exited **0** for a source that never connected. `runCommand` now
+      returns `context.Cause(ctx)` unless the cause is `context.Canceled`
+      (`runFailure`, `tx/cmd/tx/main.go`), `main` returns that as its exit code
+      via `os.Exit(run())`, and a failed source is a **1** in the restart loop.
+      Verified with a two-probe harness against the container image (clean
+      source → `docker stop`; unreachable source → wait for exit): before,
+      `clean exit=0 bail=0`, `fail exit=139 bail=1`; after, four runs of
+      `clean exit=0 bail=0` / `fail exit=1 bail=0`. Tests:
+      `tx/cmd/tx/main_test.go`.
 - [x] `tx/internal/streaming/stream.go:61-63` `block()` busy-spins
       (`for s.c.Load() > 1`), and `ref()` increments the same counter, so two
       concurrent DASH requests livelock the server at 100% CPU. **Fixed**: the
@@ -587,27 +637,64 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       **Fixed**: both files deleted, the typo file renamed to
       `rtpmp4adepay.go`.
 
-### E7. rx data plane (MEDIUM)
+### E7. rx data plane (MEDIUM) — fixed
 
-- [ ] `rx/internal/protocols/srt/broadcast.go:54`: subscriber cap counts
+- [x] `rx/internal/protocols/srt/broadcast.go:54`: subscriber cap counts
       subscription maps and compares with `==` — one subscription admits
-      unlimited nodes; the (max+1)-th subscription is rejected.
-- [ ] `broadcast.go:60-64`: a reconnecting node's channel is overwritten in
+      unlimited nodes; the (max+1)-th subscription is rejected. **Fixed**: the
+      broadcaster counts *subscriptions* (one per node, `b.count`) instead of
+      topics and refuses with `errMaxSubscribers` (`%w`-wrapped, so a caller
+      classifies it with `errors.Is`) once `b.count >= b.max`. The cap is still
+      `--worker`, which is also the ingress SRT backlog. Test:
+      `TestTheSubscriberCapCountsNodesNotTopics`.
+- [x] `broadcast.go:60-64`: a reconnecting node's channel is overwritten in
       the map but never closed → the previous `handleCaller` blocks forever on
-      `range ch`.
-- [ ] `broadcast.go:50-66` + `egress.go:169`: `Subscribe` after `Close(subID)`
-      recreates an orphan topic that is never closed or fed.
-- [ ] `Unsubscribe` closes the channel while holding the registry mutex.
-- [ ] `ingress.go:66-103` / `egress.go:65-105`: blocking broker RPC inside the
+      `range ch`. **Fixed**: `Subscribe` returns a `*subscription` handle and a
+      replacement drains and closes the previous channel (`drain(old.ch)`)
+      outside the registry lock, so the old reader unblocks and returns. Test:
+      `TestSubscribingANodeAgainClosesThePreviousChannel`.
+- [x] `broadcast.go:50-66` + `egress.go:169`: `Subscribe` after `Close(subID)`
+      recreates an orphan topic that is never closed or fed. **Fixed**: only
+      `Open` creates a topic and only the publisher path calls it; `Subscribe`
+      fails with `errNoPublisher` when there is none. Test:
+      `TestSubscribeRefusesWithoutAPublisher`.
+- [x] `Unsubscribe` closes the channel while holding the registry mutex.
+      **Fixed**: the close (and the release of every queued chunk) moved into
+      `drain`, called outside the lock. `Unsubscribe` takes the handle and
+      removes it only when it is still the registered one, returning early
+      otherwise — which also closes the panic window where a replaced handle
+      closed its successor's channel. Test:
+      `TestUnsubscribingAReplacedHandleLeavesTheReplacement`.
+- [x] `ingress.go:66-103` / `egress.go:65-105`: blocking broker RPC inside the
       SRT handshake callback stalls handshakes when the pool is saturated;
-      pending maps are keyed by peer address with no TTL and leak.
-- [ ] `egress.go:184`: blocking `sock.Write` with no deadline → a stalled
+      pending maps are keyed by peer address with no TTL and leak. **Fixed**:
+      the lookup runs under `context.WithTimeout(ctx, handshakeLookupTimeout)`
+      (5s), and both pending maps are the same `pending[V]`
+      (`rx/internal/protocols/srt/pending.go`) with a 30s TTL and a 4096-entry
+      cap, swept on every put, so an abandoned handshake can no longer leak an
+      entry for the lifetime of the process. A full registry is refused with
+      `srtgo.RejectionReasonOverload` rather than growing. Tests:
+      `pending_test.go`.
+- [x] `egress.go:184`: blocking `sock.Write` with no deadline → a stalled
       subscriber wedges the goroutine, pins pooled buffers, and its deferred
-      `Unsubscribe` never runs.
-- [ ] `ingress.go:150-186`: ctx cancellation does not stop a blocked
+      `Unsubscribe` never runs. **Fixed**: a 10s write deadline is armed per
+      chunk; a failed write logs `subscriber write` and returns, which runs the
+      deferred `Unsubscribe` and releases the buffers. (libsrt sockets are
+      created non-blocking, which is what makes the deadline effective — a
+      blocking socket ignores it.)
+- [x] `ingress.go:150-186`: ctx cancellation does not stop a blocked
       `sock.Read` → `Close(subID)` and `StopSink` are skipped, so nodes keep
-      streaming after rx shutdown.
-- [ ] `ingress.go:66-103` never sets an SRT rejection reason (egress does).
+      streaming after rx shutdown. **Fixed**: a 1s read deadline is armed per
+      iteration; an expired deadline is an idle tick (the buffer is reset and
+      returned to the pool, the loop continues), so cancellation is noticed
+      within a second. The exit path is the extracted `stopSink`, which is what
+      the cancellation used to skip.
+- [x] `ingress.go:66-103` never sets an SRT rejection reason (egress does).
+      **Fixed**: every ingress rejection path goes through `rejectHandshake`
+      (`handshake.go`), which sets the reason and logs it: `BadRequest` for a
+      malformed streamid, `Forbidden` for a failed lookup, `Unacceptable` for
+      "no subscribed nodes", `Overload` for a full registry. The caller used to
+      get a bare `return false`, which libsrt reports as a generic refusal.
 - [x] `rx/internal/adapter/rabbitmq/nodes.go`: `StartSink`/`StopSink` always
       return nil (per-node failures only logged) and require exactly one
       sibling. **Fixed.** The swallowed error used to leave the data plane dead
@@ -628,16 +715,20 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       recovered unaided once `bustle` introduced itself, with MongoDB growing
       again (277 → 283 → 288). Tests:
       `rx/internal/adapter/rabbitmq/nodes_test.go`.
-- [ ] The recovery above is unbounded. `tx`'s `srtsink` retries a closed socket
+- [x] The recovery above is unbounded. `tx`'s `srtsink` retries a closed socket
       immediately and without backoff (`Socket is broken or closed. Trying to
       reconnect`), so while the node is absent `rx` accepts and drops a publish
       as fast as the two can complete a handshake: **1058 attempts in 31
       seconds** (21:11:57–21:12:28), each one doing a blocking
       `SelectSubscribedNodes` broker RPC inside the SRT listen callback. It ends
       when the node arrives, but a subscription pointing at a node that is not
-      running spins at roughly 34 handshakes/second indefinitely. A short delay
-      before dropping the publisher, or retrying the dispatch in-process for a
-      bounded window, would bound it.
+      running spins at roughly 34 handshakes/second indefinitely. **Fixed** in
+      `rx`: `handlePublisher` waits `sinkUnavailableDelay` (2s, ctx-aware)
+      before its deferred `Close` lets `tx` reconnect, which caps the loop at
+      roughly one handshake per two seconds instead of 34 per second. This
+      bounds the load rather than removing it — the retry still belongs to `tx`,
+      and a genuine backoff there would be the better fix if the loop ever
+      matters again.
 
 ### E8. Python node runtime (HIGH) — fixed
 
@@ -754,7 +845,7 @@ regress silently; the Go-side storage, data-plane and tx paths have no test.
       token) in constant time, and with no token configured only a loopback
       caller may mutate.
 
-### E10. Python typing / packaging (MEDIUM)
+### E10. Python typing / packaging (MEDIUM) — fixed
 
 **Fixed.** The root `pyproject.toml` now carries the dependency list and the
 pyright configuration, `uv.lock` records the resolved transitive graph, `uv
@@ -819,36 +910,62 @@ The venv is `./.venv` at the repo root, while all the node code stays in
       Protocol is deleted — its only occurrence in the tree was its own
       definition.
 
-### E11. Minor (LOW)
+### E11. Minor (LOW) — fixed
 
 - [x] `internal/db/db.go:61-74`: `Commit`/`Rollback` read `t.DB` without `t.mu`.
-- [ ] `internal/protocols/handlers.go:30-46`: `GetBytes` base64-decodes any
+- [x] `internal/protocols/handlers.go:30-46`: `GetBytes` base64-decodes any
       valid JSON string with no shape validation, and returns `nil, nil` for
-      `"null"` — indistinguishable from an empty result.
-- [ ] `internal/protocols/rabbitmq/router.go:195-197`: empty `ReplyTo` is
-      rejected silently.
+      `"null"` — indistinguishable from an empty result. **Fixed by deletion**:
+      it had no caller in Go and no counterpart in Python, and the ambiguity it
+      documented cannot be resolved by a helper — a short ASCII message such as
+      `"internal"` is also valid base64. What the protocol actually relies on is
+      the caller unmarshalling into the type it asked for, which is how the
+      hub's analytics proxy reads a Python node's base64 bytes result (a
+      `[]byte` target makes encoding/json do the decode). The doc comment now
+      states that contract instead of describing the helper. Test:
+      `TestABytesResultDecodesThroughABytesTarget`.
+- [x] `internal/protocols/rabbitmq/router.go:195-197`: empty `ReplyTo` is
+      rejected silently. **Fixed**: the reply closure logs a warning naming the
+      command and track id before returning the error. Nothing can be sent back
+      — there is no address — so the warning is the only trace the failure
+      leaves; without it the requester times out and the log of the side that
+      could have answered says nothing about why it did not. Test:
+      `TestReplyingWithoutAReplyToIsWarnedAbout`.
 - [x] `hub/internal/protocols/http/handlers/nodes.go:122`: `http.Error(w,
       "zero nodes", http.StatusNoContent)` — 204 must have no body.
-- [ ] `internal/models/user.go:7`: `Passwd` is JSON-serializable (safe only
-      because call sites marshal just the ID).
-- [ ] No email/password validation; duplicate email surfaces as 500, not 409.
+- [x] `internal/models/user.go:7`: `Passwd` is JSON-serializable (safe only
+      because call sites marshal just the ID). **Fixed**: the field is
+      `json:"-"`. It is not a theoretical leak —
+      `hub/internal/adapter/rabbitmq/subscription.go` marshals a whole
+      `models.User` as the `subscriptions.nodes.by.user.get` payload, so the
+      argon2id hash was crossing the broker. Request bodies are decoded into a
+      dedicated `handlers.credentials` type, so the model no longer has to be
+      decodable. Test: `TestAPasswordHashIsNotSerializable`.
+- [x] No email/password validation; duplicate email surfaces as 500, not 409.
       Confirmed by hand: the request decodes straight into `models.User`, whose
       password field is tagged `passwd` (`internal/models/user.go:7`), and
       nothing checks it afterwards. A body of
       `{"email":"x@y.z","password":"..."}` — the field named the way almost
       every API names it — is accepted, because Go's decoder ignores unknown
       keys, and the account is created with an **empty password** that then
-      authenticates successfully. Signup should reject an empty `passwd`, and
-      ideally reject unknown fields so the mistake is a 400 rather than a
-      silent account.
-- [ ] `rx/cmd/rx/cmdline.go`: `srtHost` splits on `:` → no IPv6 listen addrs.
-- [ ] `tx/cmd/tx/main.go:158` ignored the `url.Parse` error — **fixed**
-      (`if err != nil { return err }`). Still open: `tx/cmd/tx/main.go:120`
-      (`dash := dash.NewDashServer(...)`) still shadows the `dash` package
-      imported at `:17`, and `tx/internal/server/dash/client.go:52`
-      (`url := c.u.JoinPath(...)`) still shadows `net/url` imported at `:6`.
-      Both compile because the shadowed name is only used on the right-hand
-      side before it is rebound.
+      authenticates successfully. **Fixed**: `handlers.decodeCredentials`
+      (`hub/internal/protocols/http/handlers/credentials.go`) decodes with
+      `DisallowUnknownFields`, requires a non-empty `email` and `passwd`, and
+      answers 400; `InsertUser` translates SQLite's UNIQUE failure into
+      `models.ErrUserExists` and the signup handler answers **409**. The
+      translation matches the *extended* constraint code, because
+      `SQLITE_CONSTRAINT` also covers NOT NULL, CHECK and foreign key failures.
+      Tests: `hub/internal/protocols/http/handlers/users_test.go`,
+      `hub/internal/db/sqlite/user_test.go`.
+- [x] `rx/cmd/rx/cmdline.go`: `srtHost` splits on `:` → no IPv6 listen addrs.
+      **Fixed**: `net.SplitHostPort`, which also rejects `"127.0.0.1"`,
+      `":4200"` and `"127.0.0.1:70000"` instead of parsing them into a broken
+      host. Tests: `rx/cmd/rx/cmdline_test.go`.
+- [x] `tx/cmd/tx/main.go:158` ignored the `url.Parse` error — **fixed**
+      (`if err != nil { return err }`). The two shadowing locals are gone too:
+      `dashSrv` in `tx/cmd/tx/main.go` and `endpoint` in
+      `tx/internal/server/dash/client.go:52` no longer shadow the `dash`
+      package and `net/url`.
 - [x] `rx/cmd/rx/main.go:41`: the last raw `fmt.Println` in the tree is gone —
       no `fmt.Print*` call survives anywhere (`git grep 'fmt\.Print'` is
       empty). The CLI parse error is now swallowed (`if err != nil { return }`)

@@ -208,7 +208,10 @@ it can serve; peers keep a registry of that, so a caller resolves
   has not introduced itself yet is not told, `rx` drops the publisher, and `tx`
   reconnects and tries again. That recovers on its own within a few seconds of
   the node appearing — start `bustle` first anyway if you want a quiet log,
-  because until it does the two retry at roughly 30 handshakes a second.
+  because until it does the two retry at roughly one handshake every two
+  seconds. `rx` waits that moment before dropping the publisher precisely to
+  keep the rate down; without the wait the same loop ran at roughly 30
+  handshakes a second.
 - **A node registers once per run.** `nodes.add` is sent on boot and retried
   until the hub answers. Recreating the hub's database while a node keeps
   running leaves that node unregistered until it restarts.
@@ -258,6 +261,15 @@ subscription from one that never existed and rejects the publish.
 filename `LibreDEIMm.pt` under `./weights` and fetches it if it is not there,
 so the first start needs outbound HTTPS and a few minutes. The `weights` volume
 keeps it across rebuilds; `.dockerignore` keeps it out of the build context.
+
+**A `tx` that cannot reach its source is a restart loop, not a warning.** `tx`
+exits non-zero when the source never connected — that is deliberate, so the
+failure is visible to compose — and `restart: unless-stopped` brings it
+straight back, so the symptom is `tx` cycling every few seconds. The first
+lines of each cycle say why:
+`bus watch error="... Failed to connect. (Generic error): Could not open
+resource for reading and writing."`. That is a `TX_SRC` problem, not a `tx`
+problem, and nothing publishes to `rx` while it cycles.
 
 **SRT is UDP.** Both rx sockets are UDP, and the ports published here (4200,
 4201) exist for the case where only part of the system is containerised. If

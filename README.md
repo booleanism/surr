@@ -10,12 +10,13 @@ each other over a RabbitMQ topic exchange — there is no service registry and n
 central orchestrator.
 
 > **Project status: the control plane runs, and every defect found in the 2026-10
-> review down to HIGH severity is fixed.** [TODO.md](TODO.md) section E is the
-> tracker for the review findings and their status — what is fixed, and what is
-> still open — so it is the only place that records it. Tests cover the RPC reply
-> layer, the restart backoff and the `nodes/lib/core` runtime, and `make typecheck`
-> gates the Python side with pyright; the SRT data plane, the SQLite layer and
-> the tx pipelines are exercised by hand.
+> review is fixed.** [TODO.md](TODO.md) section E is the tracker for those
+> findings — each defect as it was found, with the fix appended — and sections A
+> and B are the work still ahead (the nodes refactor and the analytics service).
+> Tests cover the RPC reply layer, the restart backoff, the rx data plane and the
+> `nodes/lib/core` runtime, and `make typecheck` gates the Python side with
+> pyright; what is exercised by hand is the wiring — a real SRT socket and a real
+> GStreamer pipeline — through the compose stack in [deploy/](deploy/README.md).
 
 ## How it fits together
 
@@ -262,12 +263,14 @@ A typical first run: `POST /users/signup`, `POST /auth/signin` to get a token,
 then `POST /subscriptions/add` with the node IDs to obtain a subscription ID —
 that ID is what goes into the `tx --sink` streamid.
 
-Two field names surprise people, and both fail quietly: the password field is
-`passwd`, not `password` (an unknown key is ignored, so a `password` signup
-creates an account with an empty password that then authenticates), and
-`/subscriptions/add` takes `{"nodes":[{"id":"..."}]}`, not a flat list of ids
-(the wrong key creates an empty subscription, and the node cannot be added again
-because a node belongs to exactly one subscription).
+Two field names surprise people, and they fail differently. The password field
+is `passwd`, not `password`; the signup and signin bodies are decoded with
+unknown fields rejected, so `password` is a **400** naming the expected body
+rather than an account with an empty password. `/subscriptions/add` takes
+`{"nodes":[{"id":"..."}]}`, not a flat list of ids — that one still fails
+quietly (the wrong key creates an empty subscription, and the node cannot be
+added again because a node belongs to exactly one subscription). A second
+signup for the same address is a **409**, not a 500.
 
 ## Nodes
 

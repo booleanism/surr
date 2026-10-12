@@ -60,15 +60,17 @@ makes Python at-most-once and Go at-least-once on crash). Messages are manually
 acked; malformed ones are nacked without requeue so poison messages cannot loop
 (Go nacks with requeue only on shutdown).
 
-`RouterResponse.Result` is `json.RawMessage` with a `GetBytes()` decoder that
-transparently handles base64-encoded string payloads — this exists because the
-Python side base64-encodes binary results inside a JSON string. Any change to
-the response shape must be mirrored in both `internal/protocols/handlers.go`
-and `nodes/lib/core/handlers.py`. `GetBytes()` has no call sites (the convention
-survives because `json.Unmarshal` into `*[]byte` happens to base64-decode
-Python's string), and it is the wrong reader for failures: a short ASCII message
-such as `internal` is itself valid base64, so it decodes to garbage. Use
-`ErrorMessage()` instead — that was the trap behind §A1.
+`RouterResponse.Result` is `json.RawMessage`, which exists because the Python
+side base64-encodes binary results inside a JSON string. Any change to the
+response shape must be mirrored in both `internal/protocols/handlers.go` and
+`nodes/lib/core/handlers.py`. A caller that wants bytes unmarshals `Result`
+into a `[]byte` field and encoding/json does the decode — that is the whole
+convention, and it is why there is deliberately no `GetBytes()`-style helper: a
+short ASCII failure message such as `internal` is itself valid base64, so a
+decoder that "tries base64 and falls back to text" returns garbage for exactly
+the replies it is most likely to be called on. Read a failure with
+`ErrorMessage()` — conflating the two was the trap behind §A1. (A `GetBytes()`
+helper did exist until the E11 pass; it was deleted rather than validated.)
 
 The pending map is the delicate part. `Send` validates the sibling first and
 then registers a **buffered** (cap 1) reply channel, so a reply that arrives
@@ -118,11 +120,18 @@ from `sync.Pool`s with reset-and-put helpers, and background work runs through
 a bounded goroutine "task pool" rather than unbounded `go` statements —
 including delivery dispatch, which used to be a bare `go` per message.
 
-Known cracks in this design: the subscriber cap counts subscription *maps*, not
-subscribers, and uses `==` (so one subscription admits unlimited nodes); a
-reconnecting node's channel is overwritten in the map without being closed (its
-reader blocks forever); and `Unsubscribe` closes a channel while holding the
-registry lock.
+Known cracks in this design, all closed: the subscriber cap counted
+subscription *maps* rather than subscriptions and compared with `==` (so one
+subscription admitted unlimited nodes) — it now counts subscriptions and
+refuses past the cap with `errMaxSubscribers`; a reconnecting node's channel was
+overwritten in the map without being closed, so its reader blocked forever —
+`Subscribe` now returns a handle and a replacement drains and closes the old
+channel; and `Unsubscribe` closed a channel while holding the registry lock —
+the close moved outside the lock, and a handle that is no longer registered is
+refused so a replaced subscriber's deferred call cannot close its successor's
+channel. The per-iteration `Read`/`Write` deadlines (1s idle, 10s write) are
+what make a cancelled ctx or a stalled subscriber visible at all: a bare
+`sock.Read` in a loop never returns on cancellation.
 
 ### 5. tx as a standalone GStreamer binary
 
@@ -139,11 +148,31 @@ lifecycle: the producer decodes once, downstream re-encodes for SRT at
 until audio appears, lazily linked by a pad probe). Hardware codec variants
 are selected with Go build tags (`*_va.go` vs `*_default.go`); both now
 compile, and `h264enc.Valid()` turns a missing factory (e.g. no `openh264enc`
-plugin installed) into a startup error instead of a nil-pointer crash. The
-encoder inserts a `videoconvert` and pins `format=I420`, and `h264parse` runs
-with `config-interval=-1` so a node that subscribes late still receives
-SPS/PPS. Default codecs are software (`openh264dec`/`openh264enc`,
-`fdkaacdec`/`fdkaacenc`).
+plugin installed) into a startup error instead of a nil-pointer crash — the AAC
+decoders and encoder are checked the same way (`coder.CheckDecoders`,
+`aacenc.Valid()`). The encoder inserts a `videoconvert` and pins `format=I420`,
+and `h264parse` runs with `config-interval=-1` so a node that subscribes late
+still receives SPS/PPS. The software codecs are not hardcoded: `pickElement`
+walks a preference list and takes the first factory the runtime has —
+`fdkaacdec`/`fdkaacenc` → `faad`/`voaacenc` → `avdec_aac`/`avenc_aac` — because
+`fdkaac*` ships only where the non-free fdk-aac was built in, which is why a
+developer machine with deb-multimedia has them and a stock Debian image does
+not.
+
+Shutdown is deliberately abrupt: the pipelines are **never** brought to NULL.
+The process quits the main loop on cancellation and exits, leaving GStreamer to
+be torn down by the OS. The reason is a GLib 2.84 race rather than taste — the
+NULL transition disposes the RTSP source and cancels the name lookup GIO left
+in its threaded resolver, and that cancellation races the resolver's worker
+thread (`g_assert (g_cancellable_is_cancelled (cancellable))` in
+`gio/gthreadedresolver.c`), so the process dies of SIGSEGV on a clean SIGTERM as
+readily as on an unreachable source. It is not an ordering problem: it
+reproduces whether the state change is issued from the loop thread or from a
+cleanup hook, and whether the whole pipeline set or only the downstream
+pipelines are taken down. The accepted cost is that an interrupted `--recording`
+is missing its trailer and needs remuxing before it plays. A bus error still
+becomes a non-zero exit (`runFailure` reads `context.Cause`), so a source that
+never connected is visible to a supervisor instead of looking like success.
 
 Recording is opt-in: `--recording 0,0,0` builds no recording branch at all, so
 nothing is written and nothing is registered with the DASH server. `tx run`
@@ -468,9 +497,10 @@ is the tracker for these findings and their status.
    `protocols.ResultResponse(payload)` — plus named constants
    (`CodeSuccess`, `CodeDecodePayload`, `CodeDomain`, `CodeMarshalReply`) that
    are now documented as part of the wire protocol, and `ErrorMessage()` as
-   the read side. Reading a failure with `GetBytes()` was itself a trap: a
-   short ASCII message such as `internal` is valid base64, so it decoded to
-   garbage.
+   the read side. Reading a failure with the old `GetBytes()` helper was itself
+   a trap: a short ASCII message such as `internal` is valid base64, so it
+   decoded to garbage. The helper has since been deleted (E11) — a payload is
+   read by unmarshalling `Result` into the type the caller asked for.
 2. **`call()` double-sent on a cap-1 error channel** — `res <- err` then
    unconditionally `res <- nil`; the second send blocked forever, `done` never
    closed, `call()` blocked until ctx cancellation and leaked a pool worker.
@@ -553,25 +583,47 @@ is the tracker for these findings and their status.
    path as the real PyGObject-stubs file and silently clobbers it, which turns
    every GStreamer enum and constructor into an unknown-attribute error.
 
-#### Still open (E7, E11)
+#### Still open
 
 9. **ECharts-shaped analytics output**: both pipelines in
    `nodes/lib/bustle/analytics.py` end in a `$project` emitting ECharts option
    objects (`xAxis`/`yAxis`/`legend`/`series.type`/`showSymbol`), violating
    invariant 8. Corrected with the analytics service (§8, §11, TODO.md B4).
-10. **rx data plane (E7, MEDIUM)**: the broadcaster's subscriber cap counts
-    subscriptions and compares with `==` (so one subscription admits unlimited
-    nodes); a reconnecting node's channel is overwritten without being closed;
-    `Subscribe` after `Close` recreates an orphan topic; the SRT handshake
-    callbacks run blocking broker RPCs with untracked pending maps; a stalled
-    subscriber's `sock.Write` has no deadline; ctx cancellation does not stop a
-    blocked `sock.Read`; ingress never sets a rejection reason; and
-    `StartSink`/`StopSink` log per-node failures but always return nil.
-11. **Minor items (E11, LOW)**: `GetBytes` accepts any JSON string with no
-    shape validation, an empty `ReplyTo` is rejected silently, `models.User`
-    carries a JSON-serializable `Passwd`, duplicate signup email surfaces as
-    500 rather than 409, `rx` cannot bind an IPv6 listen address, and two local
-    variables still shadow the `dash` and `net/url` package names in tx.
+
+#### Fixed in the E7/E11 pass — do not reintroduce
+
+10. **rx data plane (E7, MEDIUM)** — fixed. The broadcaster counts subscriptions
+    rather than topics and refuses past the cap with `errMaxSubscribers`;
+    `Subscribe` returns a handle and a replacement `drain`s the previous
+    channel, so the replaced reader unblocks; only `Open` (the publisher path)
+    creates a topic, so a subscribe after close fails with `errNoPublisher`
+    instead of resurrecting an orphan; `Unsubscribe` takes the handle, removes
+    it only if it is still the registered one, and closes outside the lock. The
+    handshake callbacks run their broker lookup under a 5s timeout and keep
+    pending handshakes in `pending[V]` with a 30s TTL and a 4096-entry cap
+    instead of an unbounded map. Writes carry a 10s deadline and reads a 1s
+    idle deadline (libsrt sockets are non-blocking, which is what makes a
+    deadline effective), so a stalled subscriber or a cancelled ctx is noticed
+    instead of wedging the goroutine; every ingress rejection now sets a real
+    SRT reason (`BadRequest`/`Forbidden`/`Unacceptable`/`Overload`) rather than
+    returning a bare `false`. `StartSink`/`StopSink` return the first per-node
+    error after still trying every node, so a publisher whose node is not up is
+    dropped rather than served nothing — and the reconnect that follows is
+    bounded to roughly one handshake per two seconds (`sinkUnavailableDelay`)
+    instead of the measured ~34/second. The retry itself still belongs to `tx`.
+11. **Minor items (E11, LOW)** — fixed. `GetBytes` is deleted (a payload is read
+    by unmarshalling `Result` into the type the caller asked for; its "try
+    base64, fall back to text" guess could not be made correct); an empty
+    `ReplyTo` is logged as a warning before the reply is refused; `models.User`
+    `Passwd` is `json:"-"`, so the argon2id hash no longer rides the
+    `subscriptions.nodes.by.user.get` broker payload; signup and signin decode
+    into `handlers.credentials` with `DisallowUnknownFields`, so `password` is a
+    400 rather than a silently empty account, and a duplicate email is
+    `models.ErrUserExists` → 409 (matched on SQLite's *extended* constraint
+    code, because `SQLITE_CONSTRAINT` also covers NOT NULL/CHECK/FK); `rx`
+    parses listen addresses with `net.SplitHostPort`, so IPv6 works and
+    malformed addresses are rejected; and the two shadowing locals in `tx` are
+    renamed.
 12. **Detector licensing and coupling (fixed)**: the node ran inference through
     `ultralytics`, which is **AGPL-3.0** while this repository is MIT — a
     copyleft obligation on the whole distribution for anyone who published it —
@@ -600,13 +652,18 @@ is the tracker for these findings and their status.
    `make test`), including the detector seam (`lib/detector.py`, exercised
    against a faked `libreyolo`), and the Go tests cover the RPC reply layer
    (`internal/protocols/handlers_test.go`, the `hub` and `subscriptions`
-   `handlers` packages) and `internal/backoff`. The two `handlers` packages
-   enumerate the commands they advertise and fail when one has no case, so the
-   reply layer cannot regress silently. The Python side is also type checked by
+   `handlers` packages), `internal/backoff`, the sibling wire shape and the
+   revision warning, the tx codec preference lists and the shutdown verdict, the
+   hub's SQLite user store and signup validation, the user model's
+   serialization, and the rx data plane (broadcaster, pending handshakes, sink
+   dispatch, address parsing). The two `handlers` packages enumerate the
+   commands they advertise and fail when one has no case, so the reply layer
+   cannot regress silently. The Python side is also type checked by
    `make typecheck` (pyright, `standard`, over `bustle.py`, `lib/` and
-   `tests/`). Nothing else in the tree — the SRT data plane, the SQLite layer,
-   the tx pipelines — is executed by a test, and for those `make lint` and
-   `make test` are the only automated gates.
+   `tests/`). What no test covers is the wiring rather than the logic: nothing
+   drives a real SRT socket or a real GStreamer pipeline, and those — plus the
+   whole deployment — are exercised through the compose stack. `make lint` and
+   `make test` remain the only automated gates.
 2. **Restart loops could not recover and spun hot** (fixed, E4): no backoff, a
    one-shot `amqp091.Dial` with no `NotifyClose`, and the always-true
    `restart = restart || !restart` idiom. Routines now run inside
@@ -620,10 +677,10 @@ is the tracker for these findings and their status.
    (see B4).
 3. **Pool/backpressure edges**: `NewGoroutinesPool(0)` underflowed
    (`internal/pools/goroutines.go`) — fixed with a `DefaultNGoroutinesPool`
-   fallback, and `subscriptions` now starts its pool at all. Still open: bounded
-   pools truncate silently at capacity; the broadcaster's subscriber cap counts
-   subscriptions and uses `==`; a reconnecting node's channel is overwritten
-   without being closed.
+   fallback, and `subscriptions` now starts its pool at all. The broadcaster's
+   subscriber cap now counts subscriptions rather than topics, and a
+   reconnecting node's channel is drained and closed on replacement (E7).
+   Still open: bounded pools truncate silently at capacity.
 4. **Blocking lifecycle calls ignored cancellation** (fixed, E3):
    `Cleanups.Register` after `Run` started was silently dropped, and
    `SrtSocket.Accept` parks in `srt_epoll_wait` with an infinite timeout so

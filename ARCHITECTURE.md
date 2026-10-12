@@ -111,17 +111,20 @@ over a shared topic exchange (the "family", default `surr0`):
    `requeue=false` — a deliberate-looking but undocumented divergence.)
 
 Response codes on the wire are `0` success, `-1` payload decode error, `-2`
-domain/usecase error, `-3` response marshal error. **These non-zero codes are
-currently never delivered**: the error `Result` is set from a `[]byte` while
-`Result` is `json.RawMessage`, so marshalling the reply fails and the error is
-discarded. Callers time out instead. See "Known defects".
+domain/usecase error, `-3` response marshal error, `-4` not found. They are
+built by `protocols.ResultResponse`/`ErrorResponse` (the error text is
+JSON-quoted into `Result`), and the reader for a failure is
+`RouterResponse.ErrorMessage()`. A payload is read by unmarshalling `Result`
+into the type the caller asked for — there is deliberately no `GetBytes()`
+helper, because a short ASCII failure message such as `internal` is itself
+valid base64, so a "try base64, fall back to text" decoder returns garbage for
+exactly the replies it is most likely to be called on.
 
 Go implementation: `internal/protocols/rabbitmq/router.go` +
 `internal/protocols/handlers.go`. Python mirror: `nodes/lib/core/router.py` +
 `nodes/lib/core/handlers.py`. Python serializes `RouterResponse` with
-base64-encoded bytes; Go mirrors this in `RouterResponse.GetBytes`, and the
-hub's adapter relies on `json.Unmarshal` into `*[]byte` happening to
-base64-decode Python's JSON string.
+base64-encoded bytes in a JSON string, so a Go caller that wants those bytes
+declares a `[]byte` target and lets encoding/json do the decode.
 
 ### Command catalog
 
@@ -173,7 +176,10 @@ data-plane identity that survives a rename or restart.
   in-process broadcaster. It also fires `<node-id>.sink.start` (with the egress
   address) at every subscribed node, and `sink.stop` when the publisher
   disconnects. Ingress listen backlog = the broadcaster's subscription cap
-  (`--worker`, default 28). Ingress never sets an SRT rejection reason.
+  (`--worker`, default 28). A rejected publish carries an SRT rejection reason:
+  `bad request` for a malformed streamid, `forbidden` for a failed lookup,
+  `unacceptable` when no node is subscribed, `overload` when the registry is
+  full.
 - **Egress** (`--egress`, default `127.0.0.1:4201`): nodes connect in caller
   mode with `streamid=subscribe:<node-id>`. The listen callback validates the
   node against `subscriptions.by.nodeid.get` (exactly one subscription must
@@ -181,14 +187,14 @@ data-plane identity that survives a rename or restart.
   (`bad request` / `forbidden` / `unacceptable`). The accepted socket is then
   fed from the broadcaster. Egress listen backlog is hard-coded to 10.
 
-Both listen callbacks perform a **blocking broker RPC inside the SRT handshake
-callback** (before the connection is accepted), and both pending maps are keyed
-by peer address with no TTL — entries leak if `Accept` never follows. The
-ingress callback rejects with a bare `return false` and no rejection reason, so
-a publisher only sees a generic failure. SRT accept cannot be interrupted by
-context cancellation: `rx/internal/protocols/srt/listen.go` closes the socket to
-break the `srt_epoll_wait` park, which is why the socket is registered with
-`Cleanups`.
+Both listen callbacks perform a **broker RPC inside the SRT handshake callback**
+(before the connection is accepted), under a 5s timeout, so a saturated pool
+delays a handshake rather than parking it indefinitely. Pending handshakes live
+in `pending[V]` with a 30s TTL and a 4096-entry cap, so an abandoned handshake
+cannot leak an entry for the life of the process. SRT accept cannot be
+interrupted by context cancellation:
+`rx/internal/protocols/srt/listen.go` closes the socket to break the
+`srt_epoll_wait` park, which is why the socket is registered with `Cleanups`.
 
 The **broadcaster** (`rx/internal/protocols/srt/broadcast.go`) is the fan-out
 core: `topic[subID][nodeID] -> chan *Chunk`. Chunks wrap a pooled `*[]byte`
@@ -197,7 +203,12 @@ buffer to the bytes pool. Per-subscriber channels are buffered (256) and
 non-blocking on publish — a slow node drops chunks (logged on the first drop and
 every 1000th) rather than back-pressuring the publisher. Publisher disconnect
 (`Close(subID)`) tears down all subscribers of that subscription. The
-subscriber cap counts *subscriptions* (not subscribers) and compares with `==`.
+subscriber cap counts *subscriptions* (one per node, `--worker` again) and
+refuses past it with `errMaxSubscribers`; `Subscribe` returns a handle, so a
+replaced subscriber's channel is drained and closed instead of leaving its
+reader blocked forever. Both loops arm a deadline per iteration (1s idle on
+reads, 10s on writes), which is what makes a cancelled ctx or a stalled peer
+visible.
 
 ## Storage
 
@@ -226,8 +237,9 @@ subscriber cap counts *subscriptions* (not subscribers) and compares with `==`.
 
 - **producer**: `rtspsrc` → (dynamic pad-added dispatch by caps) → RTP
   depayloaders (`rtph264depay` / `rtpmp4adepay` / `rtpmp4gdepay`) → decoders
-  (`openh264dec` by default, `vah264dec` under the `va` build tag; AAC via
-  `fdkaacdec`) → `intersink`s named `vid`/`aud`. The intersinks hand buffers to
+  (`openh264dec` by default, `vah264dec` under the `va` build tag; AAC through
+  `pickElement` over `fdkaacdec`/`faad`/`avdec_aac`, whichever the runtime has)
+  → `intersink`s named `vid`/`aud`. The intersinks hand buffers to
   the other pipelines.
 - **downstream**: `intersrc(vid)` → `h264enc` (`videoconvert` + videoscale +
   capsfilter pinning `format=I420` → `openh264enc` by default, `vah264enc`
@@ -374,7 +386,7 @@ These are recorded in full in DESIGN.md ("Known limitations") and TODO.md
 section E. The 2026-10 review pass reproduced every one of them from the
 source; TODO.md section E is the tracker for their status.
 
-### Fixed (E0–E6, E8, E9, E10) — do not reintroduce
+### Fixed (E0–E11) — do not reintroduce
 
 | Defect | Effect | Fix |
 |---|---|---|
@@ -403,15 +415,17 @@ source; TODO.md section E is the tracker for their status.
 | hub security: committed JWT secret, any-HMAC validation, no signin rate limit, email logged, no ownership check on removal, unbounded bodies, only `ReadHeaderTimeout`, `Secure:true` cookies, unauthenticated DASH control routes | token forgery, brute force, cross-user deletion, slowloris, broken local dev, unauthenticated stream deletion | ephemeral secret + warning, pinned HS256 and issuer, 10/min per-address limiter, ownership enforced inside the `DELETE`, 1 MiB `MaxBytesReader` + Read/Write/Idle timeouts, `--cookie-secure`, `requireDashToken` (loopback-only without a token) |
 | detector: ultralytics was the inference engine, and it is **AGPL-3.0** while this repository is MIT; its `Results` object also leaked into the counting code (`boxes.cls`, `isinstance(..., torch.Tensor)`, `model.names`) | publishing the node would have imposed AGPL on the whole repository, and the leak made any swap a cross-cutting edit | a narrow `Detector` Protocol in `nodes/lib/detector.py` (`detect(frame) -> list[Detection]`) with `LibreYOLODetector` behind it, on **LibreYOLO** (MIT code) with **`LibreDEIMm.pt`** weights (Apache-2.0, 55.4 mAP50-95, 19.6 M params, 640 px); DEIM v2 S/M/L/X was rejected because those checkpoints add Meta's non-OSI DINOv3 licence. `--conf` replaces ultralytics' NMS as the only filter, and unused tracking was dropped |
 | Python typing/packaging: no `pyproject.toml`, no type-checker config, `requirements.txt` a `pip freeze` dump already divergent from the venv; missing type args on `queue.Queue`/`pymongo.Collection`, untyped `json_serializer(obj)`, an unused `Pipeline` Protocol | the documented type-check gate did not run, so the `None`-returning `GstVideo.VideoInfo.new_from_caps` was unguarded and a fresh venv could resolve different dependency versions | root `pyproject.toml` (exact pins, the torch CPU index, `typeCheckingMode = "standard"`, `venvPath`/`venv`/`extraPaths` pinned) plus `uv.lock` for the transitive graph, and `uv sync` as the one setup command; `make typecheck` (0 errors); `_frame_view` guards `None`; `RouterLike` Protocol in `lib/core/rpc.py`; the type args and the dead Protocol are gone. Never install `gst-python-stubs` — it clobbers the real `Gst.pyi` |
+| tx aborted on *every* shutdown, not only on an unreachable source (a GLib 2.84 race in `gio/gthreadedresolver.c` against a NULL state change issued from a thread other than the main loop's) | a source typo looked like a crash loop, and `tx` exited 0 even when the source never connected | the pipelines are never brought to NULL — `loop.Quit()` runs on ctx cancellation and the process exits after `loop.Run()`; `runFailure` turns a bus error into a non-zero exit |
+| rx data plane: the subscriber cap counted topics, a replaced node's channel was overwritten without closing, `Subscribe` after `Close` recreated an orphan topic, `Unsubscribe` closed under the registry lock | fan-out dropped or double-counted subscribers; a replaced reader blocked forever | the cap counts subscriptions (`errMaxSubscribers`); `Subscribe` returns a handle and a replacement `drain`s the old channel; only `Open` creates a topic (`errNoPublisher`); the close happens outside the lock |
+| rx handshake/lifecycle: blocking broker RPC inside the SRT listen callback, unbounded pending maps, no `Read`/`Write` deadline, no ingress rejection reason, `StartSink`/`StopSink` returned nil | a slow peer wedged accept or a writer; ctx cancellation left nodes streaming; a publisher whose node was down was served nothing and never re-dispatched | 5s lookup timeout; `pending[V]` (30s TTL, 4096 cap); 10s write and 1s read deadlines; `rejectHandshake` codes; `firstErr` propagation plus a 2s `sinkUnavailableDelay` before the publisher is dropped |
+| minor: `GetBytes` guessed at base64, an empty `ReplyTo` was refused silently, `models.User.Passwd` was JSON-serializable, a duplicate signup email was a 500, `rx` could not bind IPv6, two tx locals shadowed package names | the argon2id hash crossed the broker; a `password` signup created an empty-password account; failures were confusing | `GetBytes` deleted; the refusal is warned about; `Passwd` is `json:"-"`; `credentials` + `DisallowUnknownFields` + `models.ErrUserExists` → 409; `net.SplitHostPort`; renames |
 
-### Open (E7, E11)
+### Open
 
-| Area | Defect | Effect |
-|---|---|---|
-| rx data plane | `broadcast.go` subscriber cap counts topics, a reconnecting node's channel is overwritten without closing, `Unsubscribe` closes after deleting | fan-out loses or double-counts subscribers |
-| rx data plane | blocking broker RPC inside the SRT listen callback; no `Read`/`Write` deadline | a slow peer wedges accept or a writer |
-| Minor | `tx/cmd/tx/main.go` and `tx/internal/server/dash/client.go` shadow the `dash`/`url` package names | confusing, not breaking |
-| Minor | `internal/protocols/handlers.go` `GetBytes` accepts any JSON string with no shape validation; `models.User.Passwd` is JSON-serializable; duplicate signup email surfaces as 500; `rx` cannot bind an IPv6 address | loose edges, none breaking |
+Every defect in TODO.md section E is fixed. What remains is tracked in TODO.md
+sections A (nodes refactor, packaging) and B (analytics service), plus the
+ECharts-shaped analytics output that the analytics service is meant to replace
+— none of it a correctness defect in the shipped path.
 
 ## Build & tooling
 
