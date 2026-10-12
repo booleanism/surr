@@ -374,6 +374,15 @@ func (r *router) handleInbound(ctx context.Context, command protocols.Command, r
 
 	rep := func(ctx context.Context, resp protocols.RouterResponse) error {
 		if replyTo == "" {
+			// Nothing can be sent back — there is no address — so this warning
+			// is the only trace the failure leaves. Without it the requester
+			// just times out, and the log of the side that could have answered
+			// says nothing about why it did not.
+			zerolog.Ctx(ctx).Warn().
+				Str("command", string(command)).
+				Str("track_id", trackID.String()).
+				Msg("dropping reply: the request carried no ReplyTo")
+
 			return fmt.Errorf("no ReplyTo on original request, cannot reply")
 		}
 

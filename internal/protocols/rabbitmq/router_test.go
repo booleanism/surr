@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/booleanism/surr/internal/protocols"
+	"github.com/google/uuid"
 	"github.com/rabbitmq/amqp091-go"
 	"github.com/rs/zerolog"
 )
@@ -121,5 +122,32 @@ func TestIntroduceWithoutReplyToIsRejected(t *testing.T) {
 	err := r.handlerIntroCommand(introContext(buf), "", []byte(`{"commands":[]}`))
 	if err == nil {
 		t.Fatal("empty reply_to was accepted")
+	}
+}
+
+// TestReplyingWithoutAReplyToIsWarnedAbout pins the only trace this failure
+// leaves. A request with no ReplyTo cannot be answered at all, so the requester
+// times out; without the warning the answering side's log is silent about a
+// reply it dropped.
+func TestReplyingWithoutAReplyToIsWarnedAbout(t *testing.T) {
+	r, buf, _ := introRouter(t)
+
+	hs := protocols.NewHandlers()
+	if setErr := hs.Set("test.command", func(ctx context.Context, _ uuid.UUID, _ protocols.RouterRequest, rep protocols.ReplyFunc) {
+		if repErr := rep(ctx, protocols.ResultResponse([]byte(`{}`))); repErr == nil {
+			t.Error("replying to a request without a ReplyTo reported success")
+		}
+	}); setErr != nil {
+		t.Fatalf("set handler: %v", setErr)
+	}
+
+	r.gh = hs
+
+	if err := r.handleInbound(introContext(buf), "test.command", "", uuid.New(), nil); err != nil {
+		t.Fatalf("handle inbound: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "no ReplyTo") {
+		t.Errorf("the dropped reply was not logged: %s", buf.String())
 	}
 }
