@@ -10,7 +10,6 @@ import (
 
 	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
 	"github.com/booleanism/surr/hub/internal/usecases/auth"
-	"github.com/booleanism/surr/internal/models"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
@@ -87,8 +86,6 @@ func (h authHandlers) refreshCookie(value string, expires time.Time) *http.Cooki
 }
 
 func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close() //nolint:errcheck
-
 	log := zerolog.Ctx(r.Context())
 
 	// Key on the client address, not on the submitted email: keying on the
@@ -100,15 +97,14 @@ func (h authHandlers) signinHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req models.User
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request payload", http.StatusBadRequest)
+	creds, ok := decodeCredentials(w, r)
+	if !ok {
 		return
 	}
 
 	userID, err := h.a.VerifyCredentials(r.Context(), auth.UserAuth{
-		Email:  req.Email,
-		Passwd: req.Passwd,
+		Email:  creds.Email,
+		Passwd: creds.Passwd,
 	})
 	if err != nil {
 		// The submitted address is not logged: a failed signin would otherwise

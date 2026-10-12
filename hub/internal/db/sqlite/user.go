@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/booleanism/surr/internal/db"
 	"github.com/booleanism/surr/internal/models"
@@ -25,6 +26,14 @@ func (ur users) GetUser(ctx context.Context, email string, buf *models.User) err
 func (ur users) InsertUser(ctx context.Context, user models.User) error {
 	stmt := "INSERT INTO users (id, email, passwd) VALUES (?, ?, ?)"
 	_, err := ur.DB.ExecContext(ctx, stmt, user.ID[:], user.Email, user.Passwd)
+
+	// The email column is UNIQUE, so a second signup for the same address is a
+	// constraint failure. Translated here because only this layer sees the
+	// driver error, and the handler has to answer 409 rather than 500.
+	if isUniqueViolation(err) {
+		return fmt.Errorf("%w: %s", models.ErrUserExists, user.Email)
+	}
+
 	return err
 }
 

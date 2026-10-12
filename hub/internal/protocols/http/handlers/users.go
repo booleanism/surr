@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/booleanism/surr/internal/models"
@@ -34,17 +35,23 @@ func (s userHandlers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u userHandlers) signUpHandler(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close() //nolint:errcheck
-
-	var req models.User
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request payload", http.StatusBadRequest)
+	creds, ok := decodeCredentials(w, r)
+	if !ok {
 		return
 	}
 
-	userID, err := u.u.AddNewUser(r.Context(), req)
+	userID, err := u.u.AddNewUser(r.Context(), models.User{
+		Email:  creds.Email,
+		Passwd: creds.Passwd,
+	})
 	if err != nil {
 		zerolog.Ctx(r.Context()).Error().Err(err).Msg("signup handler")
+
+		if errors.Is(err, models.ErrUserExists) {
+			http.Error(w, "email is already registered", http.StatusConflict)
+			return
+		}
+
 		http.Error(w, "unable to signup user", http.StatusInternalServerError)
 		return
 	}
