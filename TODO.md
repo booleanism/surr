@@ -20,11 +20,16 @@ Treat both as prior art to review, not as landed code.
 **Section E is different**: it tracks defects found by reading the code during
 a full review pass, then re-checked against the working tree. Its checkboxes
 are **fix status** (`[x]` = fixed), not "verified" — every item, fixed or not,
-was reproduced from the source. **All of E0–E11 is now fixed**; E0–E6, E8, E9
-and E10 are committed (`beaa467`..`4181761`), and the E7/E11 pass (rx data
-plane, tx shutdown, signup validation) is implemented and tested but **not yet
-committed** at the time of writing. Line numbers inside `[x]` items refer to the
-revision they were found in, not to the fixed tree.
+was reproduced from the source. **All of E0–E11 is fixed and committed**
+(`beaa467`..`1911b36`). Line numbers inside `[x]` items refer to the revision
+they were found in, not to the fixed tree.
+
+**Section F is different again**: it tracks defects found by *running* the
+system, on a `docker compose` stack built from a single commit and driven by
+`deploy/smoke.sh`. Every one of them needs a live process to be reachable — a
+node that dies between two broker calls, a duplicate row left in a database by
+a previous run, a reply code nothing consumed. Four are fixed; F5 is the
+registry staleness that made two of them reachable and is still open.
 
 ## A. Nodes refactor (type-agnostic runtime) — DESIGN.md §12
 
@@ -971,3 +976,124 @@ The venv is `./.venv` at the repo root, while all the node code stays in
       empty). The CLI parse error is now swallowed (`if err != nil { return }`)
       rather than printed; urfave/cli prints its own usage, so nothing is lost,
       but a log line would be better than a silent exit.
+
+## F. Defects found by the live deployment sweep (all fixed)
+
+Section E came from reading the code. This section came from running it: a
+`docker compose` stack built from one commit (`1911b36`), driven end-to-end by
+`deploy/smoke.sh`. Four defects and one root enabler. Every one of them was
+invisible to the review pass, because each needs a *running* system to be
+reachable — a node that dies between two broker calls, a duplicate row left in
+a database by a previous run, a reply code nothing consumed.
+
+The sweep also confirmed what section E claimed: `tx` now exits 0 on SIGTERM
+and republishes after a restart, signup answers 409 for a duplicate email and
+400 for an unknown field, and a publisher connecting into an absent node is
+retried once every two seconds rather than ~34 times a second.
+
+### F1. rx sink dispatch reported success for a node that never answered (HIGH) — fixed
+
+- [x] `rx/internal/adapter/rabbitmq/nodes.go` `do()` ran the broker round trip
+      inside a pool closure that declared its own `err :=`. The `return` inside
+      the closure returned from the *closure*, so `do()` returned whatever
+      `pools.TaskFunc`'s `Run` returned — `nil` on every path. A failed `Send`
+      or `Recv` was logged and then discarded.
+- [x] Consequence, reproduced live with `bustle` stopped and `tx` forced to
+      reconnect into a node id that was still in the subscription: rx logged
+      `sink start dispatched` → `publisher started` with **no error at all**,
+      and the publisher only went away three seconds later when the SRT write
+      failed (`publisher read error="The socket has been closed"`). The
+      `sinkUnavailableDelay` path that section E7 added is reached only when
+      `StartSink` returns an error, so for a *registered but dead* node the
+      bounded retry never engaged; recovery happened by accident.
+- [x] **Fixed** by giving the round trip its own method that returns:
+      `do()` now runs `n.roundTrip(rpcCtx, c, payload, sibling)` on the pool
+      and receives its outcome over a buffered channel
+      (`result := make(chan error, 1)` … `return <-result`), so the caller's
+      goroutine waits for the answer instead of for the enqueue. `roundTrip`
+      returns every failure and additionally treats a non-zero reply code as
+      one, so a node that refuses the command is no longer a success.
+      Tests: `rx/internal/adapter/rabbitmq/nodes_test.go` —
+      `TestStartSinkReportsASendFailure`, `TestStartSinkReportsARecvFailure`,
+      `TestStartSinkReportsANodeThatRefusedTheCommand`.
+
+### F2. The same closure leaked a pool worker per stale dispatch (HIGH) — fixed
+
+- [x] `Recv` had no deadline of its own in that path: `router.Recv`
+      (`internal/protocols/rabbitmq/router.go:209`) blocks on
+      `ctx.Done()` unless a reply arrives, and the context it was given was the
+      process context. A node that is a registered sibling but has died leaves
+      every dispatch parked forever.
+- [x] Confirmed with a goroutine dump (`docker kill -s QUIT surr-rx-1`): 98
+      goroutine headers, one of them
+      `rabbitmq.(*router).Recv(...) router.go:209` ←
+      `adapter/rabbitmq.nodes.do.func1() nodes.go:120` ←
+      `pools.goroutinesPool.Listen.func1() goroutines.go:45`, marked
+      `[select, 3 minutes]` — parked since the dispatch. The pool has
+      `--worker 28` workers, so a handful of stale dispatches retires the pool
+      and every later sink command queues behind them.
+- [x] **Fixed**: `var sinkCommandTimeout = 5 * time.Second` bounds the round
+      trip (`context.WithTimeout` around it, `defer cancel()`), the same
+      discipline the SRT handshake lookup already used. A `var` rather than a
+      `const` so a test can shorten it. Test:
+      `TestARecvThatNeverAnswersIsBoundedByTheDeadline` — with the timeout
+      removed the test hangs and fails after 30s.
+- [x] Measured after the fix, in the same live stack: the reconnect rate for a
+      *stale-registered* node fell from 1058 cycles in 31s to **4 in 30s** —
+      the 2s `sinkUnavailableDelay` plus up to 5s waiting on a node that will
+      never answer. The rate therefore now depends on whether the node ever
+      registered: never registered fails the lookup at once and cycles every
+      2s, stale-registered pays the timeout first. F5 is what removes the
+      difference.
+
+### F3. Adding an already-subscribed node answered 500 (MEDIUM) — fixed
+
+- [x] `subscribed_nodes.node_id` is `UNIQUE` — a node belongs to exactly one
+      subscription — so the second add fails at the storage layer. That failure
+      travelled back as a bare domain error and `POST /subscriptions/add`
+      answered **HTTP 500 `unable to add subscription`**.
+- [x] The reply-code vocabulary had no way to say "conflict": it stopped at
+      `CodeNotFound = -4`. **Fixed** with `protocols.CodeConflict = -5`
+      (`internal/protocols/handlers.go`), the
+      `models.ErrNodeAlreadySubscribed` sentinel (`internal/models/node.go`),
+      an `isUniqueViolation` translation in the subscriptions store
+      (`subscriptions/internal/db/sqlite/errors.go` — a deliberate ten-line
+      duplicate of the hub's, because the root module must not depend on the
+      cgo driver), and a matching branch in the hub's adapter
+      (`hub/internal/adapter/rabbitmq/subscription.go`). The endpoint now
+      answers **409 `node is already in a subscription`**.
+- [x] Tests: `subscriptions/internal/db/sqlite/subscription_test.go`,
+      `subscriptions/internal/protocols/rabbitmq/handlers/subscription_test.go`,
+      `hub/internal/adapter/rabbitmq/subscription_test.go`,
+      `hub/internal/protocols/http/handlers/subscriptions_test.go`.
+- [x] Note this was the *cause* of the smoke run's first five failures: a
+      previous run's subscription still held the pinned node id, so the add
+      failed, `/nodes/availability` answered 204, and every later check
+      cascaded. The smoke script now generates a fresh node id per run.
+
+### F4. An empty node list created an empty subscription (LOW) — fixed
+
+- [x] `POST /subscriptions/add` with `{"nodes":[]}` answered **200** with a
+      fresh `subscription_id`. A subscription with no nodes is not useful and
+      the row is not removable through the API.
+- [x] **Fixed**: the handler rejects `len(subsNodes.Nodes) == 0` with 400
+      `at least one node is required` and any `node.ID == uuid.Nil` with 400
+      `every node needs an id`. Test:
+      `TestAddSubscriptionRejectsAnEmptyNodeList`,
+      `TestAddSubscriptionRejectsANodeWithoutAnID`.
+
+### F5. The sibling registry never forgets a dead node (MEDIUM) — OPEN
+
+- [ ] This is the enabler for F1 and F2, and it is the reason they were
+      reachable at all: `introduce` adds a sibling and nothing ever removes it,
+      so a node that is killed without a graceful `nodes.remove` stays
+      resolvable for the life of the hub process. `GetName` then finds exactly
+      one candidate, which is why the dispatch proceeds instead of failing with
+      `expected one sibling with <id>.sink.start command`.
+- [ ] F1 and F2 mean a stale entry is now *survivable* — the dispatch fails
+      after 5s and the bounded retry takes over — but it is still wrong: every
+      attempt costs a full 5s timeout before the node is treated as absent, so
+      a stale-registered node cycles four times in 30s where an unregistered
+      one cycles fifteen. A registry TTL or a liveness sweep would turn that
+      into an immediate answer and make the two cases identical. AGENTS.md has
+      described this as unimplemented since the node registration work landed.

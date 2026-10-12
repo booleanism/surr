@@ -111,7 +111,9 @@ over a shared topic exchange (the "family", default `surr0`):
    `requeue=false` — a deliberate-looking but undocumented divergence.)
 
 Response codes on the wire are `0` success, `-1` payload decode error, `-2`
-domain/usecase error, `-3` response marshal error, `-4` not found. They are
+domain/usecase error, `-3` response marshal error, `-4` not found, `-5`
+conflict (a well-formed, permitted request that clashes with existing state —
+a node already attached to another subscription). They are
 built by `protocols.ResultResponse`/`ErrorResponse` (the error text is
 JSON-quoted into `Result`), and the reader for a failure is
 `RouterResponse.ErrorMessage()`. A payload is read by unmarshalling `Result`
@@ -179,7 +181,11 @@ data-plane identity that survives a rename or restart.
   (`--worker`, default 28). A rejected publish carries an SRT rejection reason:
   `bad request` for a malformed streamid, `forbidden` for a failed lookup,
   `unacceptable` when no node is subscribed, `overload` when the registry is
-  full.
+  full. The sink dispatch is a round trip with a 5s deadline
+  (`sinkCommandTimeout`) whose failure is returned to the caller: a node that
+  cannot be reached, or that refuses the command, aborts the publisher instead
+  of starting one that will never carry frames, and rx waits 2s before dropping
+  it so a retrying publisher cannot spin.
 - **Egress** (`--egress`, default `127.0.0.1:4201`): nodes connect in caller
   mode with `streamid=subscribe:<node-id>`. The listen callback validates the
   node against `subscriptions.by.nodeid.get` (exactly one subscription must
@@ -382,11 +388,13 @@ Same layering as hub minus HTTP.
 
 ## Known defects
 
-These are recorded in full in DESIGN.md ("Known limitations") and TODO.md
-section E. The 2026-10 review pass reproduced every one of them from the
-source; TODO.md section E is the tracker for their status.
+These are recorded in full in DESIGN.md ("Known limitations"), TODO.md
+section E and TODO.md section F. The 2026-10 review pass reproduced every one of
+them from the source; the later deployment sweep found four more by *running*
+the stack, which is the only way to reach them. The two sections are the tracker
+for their status.
 
-### Fixed (E0–E11) — do not reintroduce
+### Fixed (E0–E11, F1–F4) — do not reintroduce
 
 | Defect | Effect | Fix |
 |---|---|---|
@@ -419,13 +427,17 @@ source; TODO.md section E is the tracker for their status.
 | rx data plane: the subscriber cap counted topics, a replaced node's channel was overwritten without closing, `Subscribe` after `Close` recreated an orphan topic, `Unsubscribe` closed under the registry lock | fan-out dropped or double-counted subscribers; a replaced reader blocked forever | the cap counts subscriptions (`errMaxSubscribers`); `Subscribe` returns a handle and a replacement `drain`s the old channel; only `Open` creates a topic (`errNoPublisher`); the close happens outside the lock |
 | rx handshake/lifecycle: blocking broker RPC inside the SRT listen callback, unbounded pending maps, no `Read`/`Write` deadline, no ingress rejection reason, `StartSink`/`StopSink` returned nil | a slow peer wedged accept or a writer; ctx cancellation left nodes streaming; a publisher whose node was down was served nothing and never re-dispatched | 5s lookup timeout; `pending[V]` (30s TTL, 4096 cap); 10s write and 1s read deadlines; `rejectHandshake` codes; `firstErr` propagation plus a 2s `sinkUnavailableDelay` before the publisher is dropped |
 | minor: `GetBytes` guessed at base64, an empty `ReplyTo` was refused silently, `models.User.Passwd` was JSON-serializable, a duplicate signup email was a 500, `rx` could not bind IPv6, two tx locals shadowed package names | the argon2id hash crossed the broker; a `password` signup created an empty-password account; failures were confusing | `GetBytes` deleted; the refusal is warned about; `Passwd` is `json:"-"`; `credentials` + `DisallowUnknownFields` + `models.ErrUserExists` → 409; `net.SplitHostPort`; renames |
+| rx sink dispatch declared `err :=` *inside* the pool closure, so `do()` returned `Run`'s nil for every failure, and its `Recv` had no deadline | `StartSink` reported success for a node that had died, so the publisher was accepted and the bounded retry never engaged; each stale dispatch parked a pool worker in `Recv` until the process context ended (`--worker 28` of them) | `do()` runs `roundTrip` on the pool and receives the outcome over a `make(chan error, 1)`; `sinkCommandTimeout` (5s) bounds the round trip; a non-zero reply code is now an error |
+| adding a node that was already in a subscription returned a bare domain error, and `{"nodes":[]}` created an empty subscription | `POST /subscriptions/add` answered 500 for a conflict and 200 for a request that creates an unremovable row | `CodeConflict` (`-5`) + `models.ErrNodeAlreadySubscribed` + `isUniqueViolation` translation → 409; empty and nil-id node lists → 400 |
 
 ### Open
 
-Every defect in TODO.md section E is fixed. What remains is tracked in TODO.md
-sections A (nodes refactor, packaging) and B (analytics service), plus the
-ECharts-shaped analytics output that the analytics service is meant to replace
-— none of it a correctness defect in the shipped path.
+Every defect in TODO.md sections E and F1–F4 is fixed. What remains is TODO.md
+F5 (the sibling registry never forgets a dead node, which is what makes a
+dispatch to one cost a full 5s timeout), plus everything tracked in TODO.md
+sections A (nodes refactor, packaging) and B (analytics service) — including the
+ECharts-shaped analytics output that the analytics service is meant to replace.
+None of it is a correctness defect in the shipped path.
 
 ## Build & tooling
 

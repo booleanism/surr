@@ -267,14 +267,14 @@ A typical first run: `POST /users/signup`, `POST /auth/signin` to get a token,
 then `POST /subscriptions/add` with the node IDs to obtain a subscription ID —
 that ID is what goes into the `tx --sink` streamid.
 
-Two field names surprise people, and they fail differently. The password field
-is `passwd`, not `password`; the signup and signin bodies are decoded with
-unknown fields rejected, so `password` is a **400** naming the expected body
-rather than an account with an empty password. `/subscriptions/add` takes
-`{"nodes":[{"id":"..."}]}`, not a flat list of ids — that one still fails
-quietly (the wrong key creates an empty subscription, and the node cannot be
-added again because a node belongs to exactly one subscription). A second
-signup for the same address is a **409**, not a 500.
+Two field names surprise people. The password field is `passwd`, not
+`password`; the signup and signin bodies are decoded with unknown fields
+rejected, so `password` is a **400** naming the expected body rather than an
+account with an empty password. `/subscriptions/add` takes
+`{"nodes":[{"id":"..."}]}`, not a flat list of ids — a body with no usable
+node is a **400**, and a node that is already in another subscription is a
+**409**, because a node belongs to exactly one subscription. A second signup for
+the same address is a **409** too, not a 500.
 
 ## Nodes
 

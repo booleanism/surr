@@ -589,6 +589,15 @@ is the tracker for these findings and their status.
    `nodes/lib/bustle/analytics.py` end in a `$project` emitting ECharts option
    objects (`xAxis`/`yAxis`/`legend`/`series.type`/`showSymbol`), violating
    invariant 8. Corrected with the analytics service (§8, §11, TODO.md B4).
+10. **The sibling registry never forgets a dead node (F5, MEDIUM)**. `introduce`
+    adds a sibling to every peer's registry and nothing ever removes one, so a
+    node killed without a graceful `nodes.remove` stays resolvable for the life
+    of the hub process. The fixes below make that survivable rather than fatal,
+    but the cost is a full 5s `sinkCommandTimeout` per dispatch before the node
+    is treated as absent, where the registry could answer immediately. A TTL or
+    a liveness sweep is the fix; the node side already sends `nodes.remove` on
+    the graceful path (`nodes/lib/core/rpc.py`), so the missing half is hub-side
+    expiry.
 
 #### Fixed in the E7/E11 pass — do not reintroduce
 
@@ -609,8 +618,11 @@ is the tracker for these findings and their status.
     returning a bare `false`. `StartSink`/`StopSink` return the first per-node
     error after still trying every node, so a publisher whose node is not up is
     dropped rather than served nothing — and the reconnect that follows is
-    bounded to roughly one handshake per two seconds (`sinkUnavailableDelay`)
-    instead of the measured ~34/second. The retry itself still belongs to `tx`.
+    bounded instead of the measured ~34/second: one handshake per two seconds
+    (`sinkUnavailableDelay`) when the node was never registered, and about one
+    per seven seconds when the registry still lists a dead one, because each
+    attempt then also spends the 5s `sinkCommandTimeout` below waiting for an
+    answer that will not come. The retry itself still belongs to `tx`.
 11. **Minor items (E11, LOW)** — fixed. `GetBytes` is deleted (a payload is read
     by unmarshalling `Result` into the type the caller asked for; its "try
     base64, fall back to text" guess could not be made correct); an empty
@@ -644,6 +656,57 @@ is the tracker for these findings and their status.
     dropped — `model.track()` was called but only `boxes.cls` was ever read, and
     LibreYOLO's `predict` reports no ids. Cost: ~546 ms/frame on CPU at
     1280x720, slower than the `yolo26s.pt` it replaced.
+
+#### Fixed in the deployment sweep (F1–F4) — do not reintroduce
+
+These four were found by *running* the stack, not by reading it, and each needs
+a live process to be reachable — which is why a review pass missed them and a
+compose stack plus `deploy/smoke.sh` did not. TODO.md section F has the
+evidence.
+
+13. **rx sink dispatch reported success for a node that never answered (F1,
+    HIGH)**. `rx/internal/adapter/rabbitmq/nodes.go` ran the broker round trip
+    inside a pool closure that declared its own `err :=`, so the `return` in
+    that closure returned from the *closure* — `do()` returned whatever
+    `pools.TaskFunc`'s `Run` returned, which is `nil` on every path. A failed
+    `Send` or `Recv` was logged and discarded, so `StartSink` reported success
+    and rx accepted a publisher for a node that had died between the sibling
+    lookup and the reply. The publisher then stalled until the SRT write failed,
+    so it recovered by accident; the bounded retry that the E7 fix added is
+    reached only when `StartSink` *returns* an error, so for a registered but
+    dead node it never engaged at all. `do()` now runs a separate `roundTrip`
+    method on the pool and receives its outcome over a `make(chan error, 1)`
+    (`return <-result`), and `roundTrip` returns every failure — including a
+    non-zero reply code, so a node that refuses the command (`invalid source
+    address`) is no longer a started sink.
+14. **The same closure leaked a pool worker per stale dispatch (F2, HIGH)**.
+    `router.Recv` blocks on `ctx.Done()` unless a reply arrives, and the context
+    it was given was the process context, so every dispatch to a registered but
+    dead node parked forever. A goroutine dump of a live rx showed
+    `router.Recv` ← `nodes.do.func1` ← `pools.goroutinesPool.Listen.func1`
+    marked `[select, 3 minutes]`, and `rx` has `--worker 28` of them: a handful
+    of stale dispatches retires the pool and every later sink command queues
+    behind them. `var sinkCommandTimeout = 5 * time.Second` now bounds the round
+    trip (a `var`, not a `const`, so a test can shorten it), the same discipline
+    the SRT handshake lookup already used. Measured live, this is also what
+    spaces the reconnect out for a node the registry still lists: 4 cycles in
+    30s, against 15 for a node that was never registered and 1058 in 31s before
+    the delay existed.
+15. **Adding an already-subscribed node answered 500 (F3, MEDIUM)**.
+    `subscribed_nodes.node_id` is `UNIQUE` — a node belongs to exactly one
+    subscription — so the second add fails at the storage layer, and that
+    failure travelled back as a bare domain error. The reply-code vocabulary
+    had no way to say "conflict": it stopped at `CodeNotFound = -4`. It now has
+    `protocols.CodeConflict = -5`, a `models.ErrNodeAlreadySubscribed`
+    sentinel, an `isUniqueViolation` translation in the subscriptions store (a
+    deliberate ten-line duplicate of the hub's, because the root module must not
+    depend on the cgo driver), and a matching branch in the hub's adapter — so
+    the endpoint answers 409. The reply codes are part of the wire protocol, so
+    the Python mirror in `nodes/lib/core/handlers.py` has to be kept in step.
+16. **An empty node list created an empty subscription (F4, LOW)**.
+    `POST /subscriptions/add` with `{"nodes":[]}` answered 200 with a fresh
+    `subscription_id` — a row with no members that the API cannot remove. The
+    handler now rejects an empty list and any `node.ID == uuid.Nil` with 400.
 
 ### B. Operational / robustness gaps
 
