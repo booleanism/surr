@@ -55,6 +55,25 @@ jobs:
           # build id mean what it says.
           fetch-depth: 0
 
+      # A container job runs as root, but the workspace it mounts is owned by
+      # the runner's user (uid 1001), and git >= 2.35.2 refuses to work in a
+      # repository it does not own:
+      #
+      #   fatal: detected dubious ownership in repository at '/__w/surr/surr'
+      #
+      # That is exit 128, and `go build` runs `git status` to stamp VCS
+      # information into every binary, so the build fails with
+      # "error obtaining VCS status: exit status 128" -- as does the Makefile's
+      # own `git describe` for VERSION. Telling git once that this checkout is
+      # trusted fixes all of them.
+      #
+      # This is invisible on a developer machine running rootless Docker: the
+      # host user is mapped to uid 0 inside the container, so the checkout is
+      # "owned" by root and git never complains. Only real-root Docker, which is
+      # what Actions uses, can reproduce it.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       # The Makefile redirects GOCACHE and GOLANGCI_LINT_CACHE into .cache, so
       # caching that directory is what actually saves the type-check work;
       # /go/pkg/mod is the module cache, which the image's own Go populates.
