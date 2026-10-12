@@ -54,9 +54,9 @@ func (c *dashClient) Do(req StreamRequest) (StreamResponse, error) {
 	method := c.cmdToHTTPMethod(req.CMD)
 	mime := c.kindToMIME(req.Kind)
 	body := bytes.NewReader(req.Data)
-	url := c.u.JoinPath(req.Endpoint)
+	endpoint := c.u.JoinPath(req.Endpoint)
 
-	httpReq, err := http.NewRequest(method, url.String(), body)
+	httpReq, err := http.NewRequest(method, endpoint.String(), body)
 	if err != nil {
 		return StreamResponse{}, err
 	}

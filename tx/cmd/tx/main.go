@@ -154,10 +154,10 @@ func serveCommand(ctx context.Context, cmdLine *CommandLine, cleanups *logging.C
 	}
 
 	tmpl := template.New("tmpl")
-	dash := dash.NewDashServer(tmpl, dashStream, *log)
+	dashSrv := dash.NewDashServer(tmpl, dashStream, *log)
 
 	var srv *http.Server
-	srv, err = setupDashServer(fmt.Sprintf("%s:%d", "127.0.0.1", cmdLine.DashPort), ManifestFileName, cmdLine.DashToken, dash, *log)
+	srv, err = setupDashServer(fmt.Sprintf("%s:%d", "127.0.0.1", cmdLine.DashPort), ManifestFileName, cmdLine.DashToken, dashSrv, *log)
 	if err != nil {
 		log.Error().Err(err).Msg("setup dash server")
 		return err
