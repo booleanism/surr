@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
-	"strings"
 
 	"fortio.org/safecast"
 	"github.com/urfave/cli/v3"
@@ -31,15 +31,25 @@ type CommandLine struct {
 	NWorker         int64
 }
 
+// srtHost parses a listen address of the form <host>:<port>.
+//
+// net.SplitHostPort rather than a split on ":": the naive version reads
+// "[::1]:4200" as host "[" and fails on the port, so an IPv6 listen address
+// could not be configured at all. SplitHostPort understands the bracketed form
+// and hands back the address without the brackets, which is what srtgo binds.
 func (c *CommandLine) srtHost(s string) (SRTHost, error) {
-	hp := strings.Split(s, ":")
-	if len(hp) < 2 {
-		return SRTHost{}, fmt.Errorf("expected <host>:<port> format")
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return SRTHost{}, fmt.Errorf("expected <host>:<port> format: %w", err)
 	}
 
-	port, err := strconv.Atoi(hp[1])
+	if host == "" {
+		return SRTHost{}, fmt.Errorf("expected <host>:<port> format: empty host")
+	}
+
+	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return SRTHost{}, err
+		return SRTHost{}, fmt.Errorf("invalid port %q: %w", portStr, err)
 	}
 
 	p, err := safecast.Conv[uint16](port)
@@ -48,7 +58,7 @@ func (c *CommandLine) srtHost(s string) (SRTHost, error) {
 	}
 
 	return SRTHost{
-		Host: hp[0],
+		Host: host,
 		Port: p,
 	}, nil
 }
