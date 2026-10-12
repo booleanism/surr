@@ -53,6 +53,11 @@ const (
 	// not belong to the caller. It is distinct from CodeDomain so the hub can
 	// answer 403/404 instead of 500 without string-matching the message.
 	CodeNotFound = -4
+	// CodeConflict reports a well-formed, permitted request that clashes with
+	// existing state -- a node already attached to another subscription. Like
+	// CodeNotFound it exists so the hub can answer 409 without string-matching
+	// the message.
+	CodeConflict = -5
 )
 
 // ResultResponse builds a success reply from an already-marshalled payload.

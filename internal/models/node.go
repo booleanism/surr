@@ -15,6 +15,16 @@ import (
 // HTTP layer can answer 403 instead of 500.
 var ErrSubscriptionNotFound = errors.New("subscription not found")
 
+// ErrNodeAlreadySubscribed reports that a node is already attached to another
+// subscription.
+//
+// A node belongs to exactly one subscription -- subscribed_nodes.node_id is
+// UNIQUE -- and no endpoint moves one, so the second add is a conflict rather
+// than a repeat of the first. It lives here for the same reason as
+// ErrSubscriptionNotFound: the subscriptions service sees only a SQLite
+// constraint failure and the hub has to turn that into 409.
+var ErrNodeAlreadySubscribed = errors.New("node is already subscribed")
+
 type Node struct {
 	ID      uuid.UUID `json:"id,omitzero"`
 	Bitrate int64     `json:"bitrate,omitempty"`
