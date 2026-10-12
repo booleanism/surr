@@ -126,6 +126,15 @@ func (s subscription) do(ctx context.Context, command protocols.Command, payload
 				continue
 			}
 
+			// An already-subscribed node is a conflict with stored state, so it
+			// gets its own sentinel: a bare reply code means nothing to a handler
+			// that only sees an error, and this one has to become a 409.
+			if resp.Code == protocols.CodeConflict {
+				errs = append(errs, fmt.Errorf("%s: %w: %s", sn, models.ErrNodeAlreadySubscribed, msg))
+
+				continue
+			}
+
 			errs = append(errs, fmt.Errorf("%s: unexpected response code %d: %s", sn, resp.Code, msg))
 
 			continue
