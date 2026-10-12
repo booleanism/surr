@@ -50,7 +50,14 @@ Knobs: `RELEASE_TYPE=release` (adds `-s -w -trimpath`), `TAGS` (build tags), `GO
 
 `VERSION` defaults to `git describe --tags --always --dirty` and is injected into every binary with `-X main.Version`, so `--version` and the `version=` field on every log line report the build. `LDFLAGS` appends to it rather than replacing it. The Python node resolves the same string independently (`nodes/lib/version.py`), which is what makes a mixed deployment's two build ids comparable. Do not reintroduce a hand-written version constant: the point of the injection is that no constant has to be kept in sync by hand.
 
-CI is `.github/workflows/ci.yml`: `make lint`, `make test-go` and `make build` on one runner (cgo + libsrt + GStreamer), `make test-nodes` and `make typecheck` on another (PyGObject built from source). `make test` is the two halves combined.
+CI is `.github/workflows/ci.yml`: `make lint`, `make test-go` and `make build` on one runner, `make test-nodes` and `make typecheck` on another (PyGObject built from source). `make test` is the two halves combined.
+
+The Go job runs inside a `golang:1.27.1-trixie` container rather than directly on the runner, and both halves of that image tag are load-bearing:
+
+- **The distro, because `tx` links go-gst.** `go-gst v0.0.2` references `C.GstIdStr`, which GStreamer only added in **1.26**. The `ubuntu-24.04` runner image ships 1.24, so on the bare runner `tx` does not type-check (`could not determine what C.GstIdStr refers to`, then 15 cascading `Add`/`AddPad`/`GetStaticPad` errors) and `make lint` fails before it reaches the other four modules. trixie is GStreamer 1.26.2 — the same release the deploy images are built on, so CI lints against the same headers those images ship rather than a distro that happens to be new enough.
+- **The patch version, because golangci-lint has a ceiling.** golangci-lint v2.13.2 is built with Go 1.27.0 and cannot read the export data Go 1.27.2 emits (`cannot decode "internal/goarch", export data version 5 is greater than maximum supported version 4`), so `golang:1.27-trixie` (1.27.2) fails and `golang:1.27.1-trixie` passes. 1.27.1 is also the highest `go` directive in the repo (rx and tx), so it is the floor, not a downgrade.
+
+The Python job stays on the runner: PyGObject 3.58 builds from source and needs GLib >= 2.80, which ubuntu-24.04 satisfies. It has been green.
 
 `make build-<name>` builds the module directory whose `cmd/<name>/` contains `main.go`, running `go build` from inside that directory (so the module's own `go.mod` applies) and writing `bin/surr-<name>`. `make test` discovers modules the same way, so a failure in any module fails the target. `make test-nodes` uses `./.venv/bin/python` when it exists (`PYTHON=...` overrides) and fails with instructions when that interpreter cannot import `aio_pika`/`numpy`.
 
