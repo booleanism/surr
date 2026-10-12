@@ -52,6 +52,23 @@ func (s subscriptionHandlers) add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A subscription is created with its nodes, and no endpoint adds one
+	// afterwards, so an empty list would leave a subscription that nothing can
+	// ever join -- one rx rejects every publish for.
+	if len(subsNodes.Nodes) == 0 {
+		log.Warn().Msg("no nodes in request")
+		http.Error(w, "at least one node is required", http.StatusBadRequest)
+		return
+	}
+
+	for _, node := range subsNodes.Nodes {
+		if node.ID == uuid.Nil {
+			log.Warn().Msg("node id missing")
+			http.Error(w, "every node needs an id", http.StatusBadRequest)
+			return
+		}
+	}
+
 	uid, err := uuid.Parse(r.Header.Get(middlewares.UserIDHeaderKey))
 	if err != nil {
 		log.Warn().Err(err).Msg("parsing userID")
@@ -62,6 +79,14 @@ func (s subscriptionHandlers) add(w http.ResponseWriter, r *http.Request) {
 	subsNodes.User.ID = uid
 	subsID, err := s.s.AddSubscription(r.Context(), subsNodes)
 	if err != nil {
+		// A node already attached to another subscription is the caller's
+		// mistake, not an internal failure.
+		if errors.Is(err, models.ErrNodeAlreadySubscribed) {
+			log.Warn().Err(err).Msg("add subscription")
+			http.Error(w, "node is already in a subscription", http.StatusConflict)
+			return
+		}
+
 		log.Error().Err(err).Msg("add subscription")
 		http.Error(w, "unable to add subscription", http.StatusInternalServerError)
 		return
