@@ -118,8 +118,16 @@ func (s subscriptions) addHandler(ctx context.Context, trackID uuid.UUID, req pr
 
 	err = s.s.AddSubscriptions(ctx, *subed)
 	if err != nil {
-		s.logFail(ctx, command, protocols.CodeDomain, err)
-		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
+		// A node that already belongs to another subscription is a conflict
+		// the hub can answer 409 for; everything else is a plain domain
+		// failure.
+		code := protocols.CodeDomain
+		if errors.Is(err, models.ErrNodeAlreadySubscribed) {
+			code = protocols.CodeConflict
+		}
+
+		s.logFail(ctx, command, code, err)
+		_ = rep(ctx, protocols.ErrorResponse(code, err))
 		return
 	}
 

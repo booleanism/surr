@@ -223,6 +223,14 @@ func TestSubscriptionHandlers(t *testing.T) {
 			wantCode: protocols.CodeNotFound, wantMsg: "gone: subscription not found",
 		},
 		{
+			// A node already attached to another subscription is a conflict
+			// between the request and the stored state, reported with its own
+			// code so the hub can answer 409 instead of 500.
+			name: "add node already subscribed", command: "subscriptions.add", payload: subs,
+			subs:     fakeSubscriptions{addErr: fmt.Errorf("node insert: %w", models.ErrNodeAlreadySubscribed)},
+			wantCode: protocols.CodeConflict, wantMsg: "node insert: node is already subscribed",
+		},
+		{
 			name: "remove error with json metacharacters", command: "subscriptions.remove", payload: subs,
 			subs:     fakeSubscriptions{removeErr: errors.New("delete \"subscribed_nodes\":\nconstraint failed")},
 			wantCode: protocols.CodeDomain, wantMsg: "delete \"subscribed_nodes\":\nconstraint failed",

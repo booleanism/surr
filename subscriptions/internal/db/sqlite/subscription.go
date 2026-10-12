@@ -84,12 +84,20 @@ func (s subscription) InsertSubscriptions(ctx context.Context, subsNodesList []m
 		return err
 	}
 
-	// A subscription with no nodes is legitimate; skip the second statement
-	// rather than emitting "INSERT ... VALUES " (a syntax error).
+	// A subscription with no nodes is legitimate at this layer; skip the second
+	// statement rather than emitting "INSERT ... VALUES " (a syntax error).
 	if len(nodeValueStrings) > 0 {
 		nodeStmt := fmt.Sprintf("INSERT INTO subscribed_nodes (subscription_id, node_id) VALUES %s", strings.Join(nodeValueStrings, ", "))
 		if _, err = s.DB.ExecContext(ctx, nodeStmt, nodeValueArgs...); err != nil {
 			_ = s.Rollback()
+
+			// node_id is UNIQUE: a node already attached to another
+			// subscription is a conflict the caller can explain, not a
+			// generic write failure.
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: node insert", ErrNodeAlreadySubscribed)
+			}
+
 			return err
 		}
 	}
@@ -123,6 +131,11 @@ func (s subscription) scanRows(rws *sql.Rows, fn func(i int) []any) (int, error)
 // ErrSubscriptionNotFound reports that a delete matched no subscription
 // owned by the requesting user.
 var ErrSubscriptionNotFound = models.ErrSubscriptionNotFound
+
+// ErrNodeAlreadySubscribed reports that a node is already attached to another
+// subscription. subscribed_nodes.node_id is UNIQUE, so the second insert is a
+// constraint failure rather than a silent no-op.
+var ErrNodeAlreadySubscribed = models.ErrNodeAlreadySubscribed
 
 func (s subscription) DeleteSubscriptions(ctx context.Context, subsID []models.Subscription) error {
 	if len(subsID) == 0 {
