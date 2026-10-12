@@ -93,30 +93,36 @@ func TestErrorMessage(t *testing.T) {
 	}
 }
 
-func TestGetBytes(t *testing.T) {
+// A bytes result from a Python node arrives as a base64 JSON string, because
+// nodes/lib/core/handlers.py encodes bytes through its json_serializer. The
+// decode happens in encoding/json when the caller unmarshals into the type it
+// asked for; the hub's analytics proxy relies on exactly this.
+func TestABytesResultDecodesThroughABytesTarget(t *testing.T) {
 	raw := []byte{0x01, 0x02, 0x03}
 	encoded := base64.StdEncoding.EncodeToString(raw)
 
 	resp := RouterResponse{Code: CodeSuccess, Result: json.RawMessage(`"` + encoded + `"`)}
 
-	got, err := resp.GetBytes()
-	if err != nil {
-		t.Fatalf("GetBytes: %v", err)
+	var got []byte
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal bytes result: %v", err)
 	}
 
 	if string(got) != string(raw) {
-		t.Errorf("GetBytes() is %v, want %v", got, raw)
+		t.Errorf("decoded %v, want %v", got, raw)
 	}
 
-	// A non-string Result is already the payload.
-	resp = RouterResponse{Code: CodeSuccess, Result: json.RawMessage(`[1,2]`)}
+	// The reverse direction is not detectable in general: a failure message
+	// that happens to be valid base64 decodes without error, which is why
+	// there is no helper that guesses between the two shapes. A caller reads
+	// a failure with ErrorMessage and a payload into a typed target.
+	resp = RouterResponse{Code: CodeDomain, Result: json.RawMessage(`"unexpected response code -2"`)}
 
-	got, err = resp.GetBytes()
-	if err != nil {
-		t.Fatalf("GetBytes: %v", err)
+	if err := json.Unmarshal(resp.Result, &got); err == nil {
+		t.Errorf("a failure message decoded as bytes: %v", got)
 	}
 
-	if string(got) != "[1,2]" {
-		t.Errorf("GetBytes() is %s, want [1,2]", got)
+	if msg := resp.ErrorMessage(); msg != "unexpected response code -2" {
+		t.Errorf("ErrorMessage() is %q", msg)
 	}
 }

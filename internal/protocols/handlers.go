@@ -2,7 +2,6 @@ package protocols
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -26,10 +25,12 @@ type (
 	//   - Result is raw JSON. On success it is the marshalled domain value
 	//     (object or array); on failure it is a JSON *string* holding the
 	//     message, which ErrorResponse builds.
-	//   - Python base64-encodes bytes results through its json_serializer, so a
-	//     Result that is a JSON string may be either a plain message or base64
-	//     bytes. GetBytes decodes that case; Go itself never emits it, it sends
-	//     marshalled JSON directly.
+	//   - A bytes result (the Python nodes base64-encode bytes through their
+	//     json_serializer) is decoded by unmarshalling Result into a []byte
+	//     field, which is what encoding/json does with a base64 JSON string.
+	//     There is deliberately no helper that guesses whether a string is a
+	//     message or base64 bytes: the caller knows the shape it asked for,
+	//     and a guess cannot be better than the type it decodes into.
 	RouterResponse struct {
 		Result json.RawMessage `json:"result,omitempty,omitzero"`
 		Code   int             `json:"code,omitempty"`
@@ -79,35 +80,6 @@ func ErrorResponse(code int, err error) RouterResponse {
 	}
 
 	return RouterResponse{Code: code, Result: quoted}
-}
-
-// GetBytes returns the reply payload as bytes.
-//
-// It exists for the Python side of the protocol, which base64-encodes bytes
-// results through its json_serializer: a Result that is a JSON string is
-// decoded as base64 when that succeeds and returned verbatim otherwise. The
-// convention is ambiguous by construction — a short ASCII message such as
-// "internal" is also valid base64 — so GetBytes is best-effort and failure
-// messages must be read with ErrorMessage instead.
-func (r RouterResponse) GetBytes() ([]byte, error) {
-	if len(r.Result) == 0 || string(r.Result) == "null" {
-		return nil, nil
-	}
-
-	if r.Result[0] == '"' {
-		var str string
-		if err := json.Unmarshal(r.Result, &str); err != nil {
-			return nil, err
-		}
-
-		if decoded, err := base64.StdEncoding.DecodeString(str); err == nil {
-			return decoded, nil
-		}
-
-		return []byte(str), nil
-	}
-
-	return r.Result, nil
 }
 
 // ErrorMessage returns the message carried by a non-zero reply.
