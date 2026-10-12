@@ -136,7 +136,11 @@ RabbitMQ, MongoDB, both migrators and every service on the right networks, or by
 hand, which is what the rest of this section describes. **Start with
 [`deploy/README.md`](deploy/README.md)** unless you are working on a single
 service — it is the shorter path, and it documents the one component the
-repository does not contain (an RTSP source).
+repository does not contain (an RTSP source). The stack has a `demo` profile
+that supplies a synthetic one, so `docker compose --profile demo --profile tx
+--profile nodes up -d` runs the whole system with no camera and no external
+containers. `deploy/smoke.sh` then asserts the behaviour that is invisible from
+`docker compose ps`.
 
 ### 1. Start the infrastructure
 
@@ -280,7 +284,7 @@ signup for the same address is a **409**, not a 500.
 
 ## Documentation
 
-- [deploy/README.md](deploy/README.md) — run the whole system with Docker Compose, including the RTSP source it needs.
+- [deploy/README.md](deploy/README.md) — run the whole system with Docker Compose, including the RTSP source it needs (`deploy/smoke.sh` verifies a running stack).
 - [ARCHITECTURE.md](ARCHITECTURE.md) — services, data flow, protocol, storage, service internals.
 - [DESIGN.md](DESIGN.md) — design rationale, trade-offs, known limitations, invariants.
 - [TODO.md](TODO.md) — staged work (nodes refactor, analytics service, logging) and verified defects.

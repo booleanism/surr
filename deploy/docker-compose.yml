@@ -14,6 +14,17 @@
 #   docker compose --profile nodes up -d
 #   docker compose --profile tx --profile nodes up -d
 #
+# There is also a `demo` profile, which stands up the one component this
+# repository does not contain -- an RTSP source -- so the whole thing can be
+# exercised without a camera:
+#
+#   docker compose --profile demo --profile tx --profile nodes up -d
+#
+# It is a mediamtx server plus an ffmpeg process publishing a synthetic
+# test pattern into it. It is deliberately NOT part of the `tx` profile: a real
+# deployment points tx at a real camera, and quietly starting a fake one
+# whenever tx starts would be the wrong default.
+#
 # Build context is the repository root (`..`) for every image, not the module
 # directory: each service module carries `replace github.com/booleanism/surr =>
 # ../`, so building hub/ needs the root module's internal/ tree beside it. The
@@ -208,6 +219,67 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # ------------------------------------------------------------- the demo source
+
+  # A synthetic camera, so the stack can be brought up and exercised end to end
+  # with nothing from outside. Behind the `demo` profile rather than `tx`: a real
+  # deployment points tx at a real camera, and silently substituting a fake one
+  # whenever tx starts would be the wrong default.
+  #
+  # mediamtx's stock configuration accepts a publish to any path, which is why
+  # there is no config file here -- `cam1` below is just a name both sides agree
+  # on. The RTSP port is published to the host so a tx running outside the stack
+  # can be pointed at the same source.
+  mediamtx:
+    profiles: ["demo"]
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "${MEDIAMTX_RTSP_PORT:-8554}:8554"
+    restart: unless-stopped
+
+  # The other half of the demo source: something that actually publishes.
+  #
+  # mediamtx is only an RTSP server -- with nothing pushing into it, `cam1` does
+  # not exist and tx fails to connect, which is exactly the TX_SRC problem the
+  # README describes. ffmpeg generates a test pattern and pushes it over TCP.
+  #
+  # `restart: unless-stopped` is load-bearing here: this container has no
+  # healthcheck to wait on and mediamtx may not be listening yet, so the first
+  # attempt can fail and needs to be retried.
+  demo-camera:
+    profiles: ["demo"]
+    image: jrottenberg/ffmpeg:7-scratch
+    command:
+      - -hide_banner
+      - -loglevel
+      - warning
+      - -re
+      - -f
+      - lavfi
+      - -i
+      - "testsrc=size=${DEMO_WIDTH:-1280}x${DEMO_HEIGHT:-720}:rate=${DEMO_FPS:-30}"
+      # Baseline profile and a 1s keyframe interval: the decoder on the other
+      # side is a software one, and tx re-encodes anyway.
+      - -c:v
+      - libx264
+      - -preset
+      - ultrafast
+      - -tune
+      - zerolatency
+      - -pix_fmt
+      - yuv420p
+      - -g
+      - "${DEMO_FPS:-30}"
+      - -f
+      - rtsp
+      - -rtsp_transport
+      - tcp
+      - "rtsp://mediamtx:8554/${DEMO_PATH:-cam1}"
+    depends_on:
+      mediamtx:
+        condition: service_started
+    restart: unless-stopped
+
   # The camera side. Needs an RTSP source and a subscription id to publish into.
   #
   #   TX_SUBSCRIPTION_ID   the id POST /subscriptions/add returned (a UUID)
@@ -235,7 +307,6 @@ services:
 
   # A node. Registers itself with the hub (`nodes.add`), then waits to be told
   # to start a sink. It pulls frames from rx's egress and writes counts to mongo.
-  #
   # The node id is the handle everything else uses -- the hub's nodes table, the
   # subscription's node list, and the `<node-id>.sink.*` commands -- so it is
   # pinned here rather than left to the script's default, which would silently

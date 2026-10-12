@@ -28,6 +28,13 @@ make test-hub      # also: test-rx, test-subscriptions, test-tx, test-root
 # deploy/README.md is the runbook, including the RTSP source the repo does not contain.
 cd deploy && VERSION=$(git describe --tags --always --dirty) docker compose --profile tx --profile nodes up -d
 
+# Same, but with a synthetic RTSP source, so no camera and no external container is needed.
+cd deploy && VERSION=$(git describe --tags --always --dirty) docker compose --profile demo --profile tx --profile nodes up -d
+
+# Assert what `docker compose ps` cannot show: the images are the build you think they are,
+# the data plane works, tx exits 0 on SIGTERM, and an absent node does not make rx spin.
+cd deploy && ./smoke.sh
+
 # Build a release binary (stripped, trimpath)
 make build-tx RELEASE_TYPE=release
 
@@ -99,7 +106,7 @@ Python nodes self-register in the hub's `nodes` table: `nodes.add` on boot (retr
 
 hub and subscriptions follow the same layering: `cmd/<svc>/` (CLI + main wiring) → `internal/protocols/` (transport handlers: http/rabbitmq) → `internal/usecases/` (business logic) → `internal/db/sqlite/` (storage) with `internal/adapter/` bridging usecases to the router. rx is similar minus the DB. tx is its own world: `internal/src` (GStreamer sources), `internal/sink` (srt/dash/etc sinks), `internal/streaming`, `internal/core` (coder/muxer/pipeline), `internal/server/dash`.
 
-Top level: `internal/` is the shared module root (protocols, pools, models, db, logging, restart) that the four service modules import through the `replace` directive; `nodes/` is the Python runtime (`nodes/lib/core` is the type-agnostic runtime, `nodes/lib/<type>` the worker); `deploy/` is the compose stack and its Dockerfiles; `.github/workflows/ci.yml` is CI. `deploy/` is the only place that knows how the services are wired to each other in a real deployment — keep it in step with new flags and new broker commands.
+Top level: `internal/` is the shared module root (protocols, pools, models, db, logging, restart) that the four service modules import through the `replace` directive; `nodes/` is the Python runtime (`nodes/lib/core` is the type-agnostic runtime, `nodes/lib/<type>` the worker); `deploy/` is the compose stack and its Dockerfiles; `.github/workflows/ci.yml` is CI. `deploy/` is the only place that knows how the services are wired to each other in a real deployment — keep it in step with new flags and new broker commands. `deploy/smoke.sh` is the end-to-end check for that wiring: it is the only thing in the repository that asserts against a *running* system, so when you change a flag, a port, a startup order or a shutdown path, it is what catches the break.
 
 ### Conventions
 

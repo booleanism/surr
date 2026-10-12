@@ -59,7 +59,22 @@ terminate TLS yourself) before exposing it.
 ## The RTSP source
 
 This is the one part of the system that is not in the repository: `tx` needs an
-RTSP URL to pull from. Two ways to get one.
+RTSP URL to pull from. Three ways to get one.
+
+**The `demo` profile**, which is the shortest path and needs nothing from
+you — mediamtx plus an ffmpeg process publishing a synthetic test pattern:
+
+```sh
+cd deploy
+docker compose --profile demo --profile tx --profile nodes up -d
+```
+
+That is the whole thing running end to end with no camera and no external
+containers. It is a separate profile rather than part of `tx` on purpose: a real
+deployment points `tx` at a real camera, and quietly starting a fake one
+whenever `tx` starts would be the wrong default. `demo` publishes
+`rtsp://mediamtx:8554/cam1`, which is already the default `TX_SRC`, so you do
+not have to set anything.
 
 **A real camera.** Point `TX_SRC` straight at it, or restream it:
 
@@ -69,8 +84,8 @@ ffmpeg -rtsp_transport tcp -i rtsp://user:pass@192.168.1.50:554/stream1 \
        -c copy -f rtsp rtsp://127.0.0.1:8554/cam1
 ```
 
-**A synthetic stream**, which is what you want for a first run — no camera, no
-codec surprises:
+**A synthetic stream of your own**, if you would rather run the pieces
+outside compose — no camera, no codec surprises:
 
 ```sh
 # mediamtx listens on :8554 and accepts RTSP ANNOUNCE (push) at any path.
@@ -103,19 +118,10 @@ ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
 ```
 
 `tx` runs inside the compose network, so `127.0.0.1` in `TX_SRC` would mean
-*tx's own container*. Either add mediamtx to the stack (it needs no
-configuration):
-
-```yaml
-  mediamtx:
-    image: bluenviron/mediamtx:latest
-    ports:
-      - "8554:8554"
-    restart: unless-stopped
-```
-
-and use `TX_SRC=rtsp://mediamtx:8554/cam1`, or keep mediamtx on the host and
-give the tx service a route to it:
+*tx's own container*. The `demo` profile above solves that for you; if you are
+running mediamtx yourself instead, either put it on the compose network and use
+`TX_SRC=rtsp://<container name>:8554/cam1`, or keep it on the host and give the
+tx service a route to it:
 
 ```yaml
   tx:
@@ -223,6 +229,50 @@ it can serve; peers keep a registry of that, so a caller resolves
   `127.0.0.1:4201` — a containerised node must be given a name it can resolve
   to *rx*, or it would try to subscribe to itself.
 
+## Verifying a deployment
+
+`smoke.sh` brings the stack up and asserts the things that are not visible from
+`docker compose ps` — a stack whose containers are all Up can still be running
+the wrong build, serving a dead data plane, or segfaulting on every shutdown:
+
+```sh
+cd deploy
+./smoke.sh
+```
+
+It takes about two minutes, exits non-zero if anything failed, and tears the
+stack down afterwards unless you pass `KEEP=1`. It checks, in order:
+
+1. **the images are the build you think they are.** This one exists because the
+   first stack tested reported a different version on every image — two said
+   `unknown` (nobody exported `VERSION` at build time) and two were built from
+   trees several commits apart. "The stack ran" proved nothing about which code
+   ran. A partly-rebuilt stack is a mixed deployment, which is exactly what the
+   protocol revision is there to diagnose, so it is worth catching before it.
+2. **the HTTP API behaves**, including the four failures that used to be silent
+   or wrong: a duplicate signup is `409` rather than `500`, a body using
+   `password` instead of `passwd` is a `400` rather than an empty-password user,
+   an add with no nodes is a `400` rather than an empty subscription, and adding
+   a node that is already subscribed is a `409` rather than a `500`.
+3. **frames reach the node and land in mongo** — the count is read twice, 30s
+   apart, and has to climb.
+4. **`tx` exits 0 on SIGTERM.** The assertion that was never made: an
+   unreachable source used to make `tx` die of SIGSEGV, and rebuilding with a
+   reachable one showed the abort was in the *shutdown* path, so it fired on a
+   clean SIGTERM too. Under `restart: unless-stopped` that is a crash loop for
+   what is usually a typo.
+5. **an absent node does not make `rx` reconnect in a tight loop** — the node
+   is stopped and the reconnect cycles are counted for 30s. Before the
+   `sinkUnavailableDelay` this was measured at 1058 in 31 seconds; it is now
+   four or five in 30, because each attempt also spends up to the 5s
+   `sinkCommandTimeout` waiting on a node that will never answer (the registry
+   still lists it — see TODO.md F5). A node that was never registered at all
+   fails the lookup immediately and cycles once every two seconds instead.
+
+It asserts against the running system rather than mocking it, because every
+one of these defects lived in the wiring — which is precisely what unit tests
+do not reach.
+
 ## Things that will bite you
 
 **The services do not create their own tables.** `hub` and `subscriptions` only
@@ -295,6 +345,20 @@ docker compose build                     # every image, stamped
 docker compose exec hub surr-hub --version
 docker compose logs hub | head -1        # version=... on the first line
 ```
+
+**Ask each image what it is before you debug anything else.** An image whose
+`VERSION` was left unset reports `version=unknown`, and one built before your
+last change reports the commit it was actually built from — both of which look
+identical to a working stack from `docker compose ps`:
+
+```sh
+for svc in hub subscriptions rx tx; do
+  docker run --rm --entrypoint /usr/local/bin/surr-$svc surr-$svc:latest --version
+done
+```
+
+`./smoke.sh` does exactly this as its first check, and fails if the four do not
+agree with the current `git describe`.
 
 A mismatch between two services is logged as a warning rather than hidden:
 
