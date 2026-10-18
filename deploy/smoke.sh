@@ -8,7 +8,8 @@
 # on every shutdown. The checks, in the order they run:
 #
 #   1. the images are the build you think they are (not `unknown`, and not one
-#      behind -- a partly-rebuilt stack is a mixed deployment)
+#      behind -- a partly-rebuilt stack is a mixed deployment), every migrator
+#      exits 0, and the analytics service joins the broker
 #   2. the HTTP API answers, and the client mistakes are client errors: a
 #      duplicate signup is 409 rather than 500, a body using `password` is 400,
 #      an add with no nodes is 400 and an already-subscribed node is 409
@@ -122,7 +123,7 @@ else
     ok "VERSION is $VERSION"
 fi
 
-for svc in hub subscriptions rx tx; do
+for svc in hub subscriptions rx tx analytics; do
     got=$(docker run --rm --entrypoint "/usr/local/bin/surr-${svc}" "surr-${svc}:latest" --version 2>/dev/null | awk '{print $NF}')
     check "${svc} image reports the build id" "$VERSION" "$got"
 done
@@ -154,10 +155,33 @@ fi
 
 # The migrators must succeed: the services only VERIFY their schema and exit if
 # a table is missing, so a failed migration looks like a hub that will not start.
-for job in migrate-hub migrate-subscriptions; do
+for job in migrate-hub migrate-subscriptions migrate-analytics; do
     jcode=$("${COMPOSE[@]}" ps -a --format '{{.ExitCode}}' "$job" 2>/dev/null | head -1)
     check "${job} exited 0" "0" "${jcode:-missing}"
 done
+
+# The analytics service is in the default profile but has no published port and
+# no HTTP surface, so nothing above would notice it failing to start. It logs
+# "routine started" once it is listening on the broker, which is the only proof
+# it joined the mesh rather than merely being up.
+printf '  waiting for analytics'
+astate=""
+for _ in $(seq 1 30); do
+    # Match the routine name alone: the log line carries colour codes between
+    # "routine=" and the value, so the joined string never appears verbatim.
+    astate=$(docker logs surr-analytics-1 2>&1 | grep -c 'router-listen')
+    if [ "${astate:-0}" -gt 0 ]; then
+        printf '\n'
+        ok "analytics is listening on the broker"
+        break
+    fi
+    printf '.'
+    sleep 2
+done
+if [ "${astate:-0}" -eq 0 ]; then
+    printf '\n'
+    no "analytics is listening on the broker" "no 'routine started' in 60s; docker logs surr-analytics-1"
+fi
 
 # ------------------------------------------------------------- 3. the HTTP API
 
