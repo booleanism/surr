@@ -10,11 +10,9 @@ require (
 
 require (
 	fortio.org/safecast v1.2.0
-	github.com/booleanism/surr v0.0.0
+	github.com/booleanism/surr v0.2.0
 	github.com/go-gst/go-glib v0.0.2
 	github.com/go-gst/go-gst v0.0.2
 	github.com/rs/zerolog v1.35.1
 	github.com/urfave/cli/v3 v3.11.0
 )
-
-replace github.com/booleanism/surr => ../

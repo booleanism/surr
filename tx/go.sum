@@ -1,5 +1,7 @@
 fortio.org/safecast v1.2.0 h1:ckQJNenMJHycqPsi/QrzA4EUX5WQkyd+hGO4mxt/a8w=
 fortio.org/safecast v1.2.0/go.mod h1:xZmcPk3vi4kuUFf+tq4SvnlVdwViqf6ZSZl91Jr9Jdg=
+github.com/booleanism/surr v0.2.0 h1:wtUwxl3AWRm8nDF5nTVnSmTRIB+iJA/3uKVucf2e1wc=
+github.com/booleanism/surr v0.2.0/go.mod h1:pX1Wu/D/9/n/mgt96qoWMnqNFw0bi9sCC4npiqVG12Y=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-gst/go-glib v0.0.2 h1:2sclYOyJzyi2/iRQlNjXoDi0FBxt8NHFPQFdRV9qH38=

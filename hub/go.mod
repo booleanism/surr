@@ -3,7 +3,7 @@ module github.com/booleanism/surr/hub
 go 1.26.0
 
 require (
-	github.com/booleanism/surr v0.0.0
+	github.com/booleanism/surr v0.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.52
@@ -18,5 +18,3 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
-
-replace github.com/booleanism/surr => ../

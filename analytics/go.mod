@@ -3,7 +3,7 @@ module github.com/booleanism/surr/analytics
 go 1.26.0
 
 require (
-	github.com/booleanism/surr v0.0.0
+	github.com/booleanism/surr v0.2.0
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/rabbitmq/amqp091-go v1.14.0
@@ -27,5 +27,3 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
-
-replace github.com/booleanism/surr => ../
