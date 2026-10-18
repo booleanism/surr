@@ -209,6 +209,12 @@ class BustleWorker(core_node.Worker):
         self._coll = coll
         self._drain_interval = drain_interval
         self._node_type = node_type
+        # What the analytics declaration is about. Resolved once at construction
+        # rather than at declare time, because the answer depends only on the
+        # detector's class table and the chosen classes, both of which are fixed
+        # for the life of the process.
+        self._subject = bustle_analytics.resolve_subject(detector.names, chosen_classes)
+        self._utc_offset = bustle_analytics.local_utc_offset()
 
     def attach(self, hs: core_handlers.Handlers) -> None:
         bustle_handlers.BustleHandlers.setup(
@@ -245,7 +251,14 @@ class BustleWorker(core_node.Worker):
         # retries while the analytics sibling is still booting; giving up only
         # costs the queries until the node restarts, since nothing can ask a
         # running node to declare again.
-        await bustle_analytics.declare(r, sibs, self._node_id, self._coll.name)
+        await bustle_analytics.declare(
+            r,
+            sibs,
+            self._node_id,
+            self._coll.name,
+            subject=self._subject,
+            utc_offset=self._utc_offset,
+        )
 
 def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> tuple[pymongo.MongoClient, collection.Collection]:
     # serverSelectionTimeoutMS keeps a dead or unreachable mongod from parking
