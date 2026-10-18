@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/booleanism/surr/hub/internal/adapter/rabbitmq"
@@ -90,6 +91,16 @@ func (n nodeHandlers) analyticsHandler(w http.ResponseWriter, r *http.Request) {
 	nbuf, err = n.a.GetAnalytics(r.Context(), user, node, filter, buf)
 	if err != nil {
 		log.Error().Str("user_id", userID.String()).Str("node_id", nodeID.String()).Err(err).Msg("get analytics")
+
+		// 409, not 500: the request was well formed and the node is the user's,
+		// but the node is not running, so there is nothing to report. The stored
+		// manifest outlives the node that declared it, so answering with empty
+		// shapes would read as "this node saw nothing" (TODO.md F6).
+		if errors.Is(err, models.ErrNodeUnavailable) {
+			http.Error(w, "node is not running", http.StatusConflict)
+			return
+		}
+
 		http.Error(w, "unable to fetch analytics", http.StatusInternalServerError)
 		return
 	}
