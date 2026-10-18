@@ -345,14 +345,26 @@ fi
 # The read path end to end: the hub asks the analytics service what this node
 # declared, runs every query in it and returns them under their own names. This
 # is the assertion that no query name is baked into the hub -- the report has to
-# contain the four bustle names because the node declared them, not because the
-# hub knows them.
+# contain the five bustle names because the node declared them, not because the
+# hub knows them. `fleet_activity` is the fleet-scoped one, stored once for the
+# node type rather than once for the node.
 report=$(curl -sS "${HUB_URL}/nodes/analytics?node_id=${NODE_ID}&time_cluster=minutes" \
     -H "Authorization: Bearer ${token}" 2>&1)
 
 declared_names=$(printf '%s' "$report" | jq -r '.queries[].name' 2>/dev/null | sort | tr '\n' ' ')
 check "the analytics endpoint returns the declared queries" \
-    "activity_by_class class_affinity occupancy rhythm " "${declared_names}"
+    "activity_by_class class_affinity fleet_activity occupancy rhythm " "${declared_names}"
+
+# A fleet-scoped query is the only one that runs across more than one
+# collection. With one node of this type the union is a no-op, so it must answer
+# with that node's numbers rather than with an empty fleet -- the failure this
+# catches is a member set that came back empty, which would read as "the fleet
+# saw nothing".
+fleet_avg=$(printf '%s' "$report" \
+    | jq -r '[.queries[] | select(.name == "fleet_activity") | .data[0].fleet.average] | first' 2>/dev/null)
+node_avg=$(printf '%s' "$report" \
+    | jq -r '[.queries[] | select(.name == "activity_by_class") | .data[0].classes[] | select(.name == "person") | .average] | first' 2>/dev/null)
+check "a fleet query answers with its single member's numbers" "${node_avg}" "${fleet_avg}"
 
 if printf '%s' "$report" | jq -e '.queries[] | select(.name == "rhythm") | .data' >/dev/null 2>&1; then
     ok "the endpoint answers a query that takes no bucket width"

@@ -263,9 +263,13 @@ stack down afterwards unless you pass `KEEP=1`. It checks, in order:
    serialised, resolved to the analytics service and accepted. Nothing else on
    the live path exercises `analytics.declare`.
    Then the read path end to end: `GET /nodes/analytics` has to come back with
-   the four queries the node declared (`activity_by_class`, `occupancy`,
-   `rhythm`, `class_affinity`), each with its own rows, plus the window the hub
-   chose. Those names appear because the node declared them — the hub holds none
+   the five queries the node declared (`activity_by_class`, `occupancy`,
+   `rhythm`, `class_affinity`, `fleet_activity`), each with its own rows, plus
+   the window the hub chose. `fleet_activity` is the fleet-scoped one: it is
+   stored once for the node *type*, and it only answers because the hub sends
+   the caller's own node ids with every query and the service unions their
+   collections — a one-node fleet here, so the union is a no-op and the numbers
+   should match that node's own report. Those names appear because the node declared them — the hub holds none
    of them, which is what makes a new node type's charts work without a hub
    change. `rhythm` is the one worth watching: it takes no bucket width, so it
    only answers if the hub sends each query the parameters *its* schema declares
