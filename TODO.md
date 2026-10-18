@@ -134,12 +134,12 @@ router + SQLite registry + read-only Mongo executor. Nodes become write-only;
 the service becomes the sole reader. Builds on A2 (the Node runtime hosts the
 declare step).
 
-**Status:** B1–B3 are implemented, tested and deployed (`deploy/analytics.Dockerfile`,
-the `analytics` and `migrate-analytics` compose services). Nothing calls the
-service yet — B4's sender is what first issues `analytics.declare`. A2 landed
-the hook it publishes from (`Worker.registered()`); what is missing is the
-manifest. Until then the service runs beside `sink.analytics` and is exercised
-by its own tests, not by the stack.
+**Status:** B1–B4 are implemented, tested and deployed (`deploy/analytics.Dockerfile`,
+the `analytics` and `migrate-analytics` compose services). Every node now
+publishes its query manifest at boot and the service answers `analytics.query`
+against live data, but the hub still proxies `GET /nodes/analytics` to
+`<node-id>.sink.analytics`, so the service is not yet on the read path. B5 is
+the cutover.
 
 - [x] B1. analytics service skeleton
   - [x] analytics/ module: cmdline (broker, family, name, mongo url, dsn),
@@ -185,18 +185,52 @@ by its own tests, not by the stack.
         `lib/bustle/analytics.py`. They die with B4, which is the commit that
         makes the shape checkable; until then the service validates structure
         (read-only operators, caps) and not semantics.
-- [ ] B4. Node side (A2 is done; the hook exists)
+        **Closed by B4 rather than by the service**: the pipelines were the
+        only ECharts-shaped thing, and they now emit generic chart data. The
+        check that they keep doing so lives where the shape is authored
+        (`nodes/tests/test_lib_bustle_analytics.py` rejects `xAxis`, `yAxis`,
+        `legend`, `showSymbol` and `type` keys), because a service-side
+        heuristic would be guessing at a shape it cannot see the renderer for.
+- [x] B4. Node side (A2 is done; the hook exists)
   - [x] Node runtime: `Worker.registered(router, sibs)` runs once `nodes.add`
         succeeded and is where a declaration is published. A failure is logged
         rather than raised — the node is registered and serving by then.
-  - [ ] bustle: publish the manifest from `BustleWorker.registered()`, with
-        retry-until-sibling like `nodes.add`
-  - [ ] bustle: convert lib/bustle/analytics.py's two pipelines into a query
+  - [x] bustle: publish the manifest from `BustleWorker.registered()`, with
+        retry-until-sibling like `nodes.add` — `bustle_analytics.declare()`
+        wraps `core_rpc.call(..., "analytics.declare", ...)`, so it inherits
+        the same resolve-and-retry ladder and fails on a non-zero reply code.
+        Bounded at `DECLARE_RETRIES = 30` rather than forever: a deployment
+        with no analytics service logs one warning a second for half a minute
+        and then stops, instead of logging for the life of the process. The
+        failure is swallowed by the runtime's hook guard, so the node keeps
+        serving its own commands — the declaration is re-published on the next
+        boot anyway, and nothing can ask a running node to declare again.
+        Verified live: `lib.bustle.analytics: declared analytics queries
+        node_id=... collection=... queries=2` 9ms after `node registered`.
+  - [x] bustle: convert lib/bustle/analytics.py's two pipelines into a query
         manifest (params: time_cluster window + granularity via placeholders)
         — dropping the ECharts-shaped final $project stages (xAxis/yAxis/
         legend/series.type/showSymbol) in favor of generic chart data:
         categories + named series of values; the presentation layer maps
-        these onto whatever chart library it uses
+        these onto whatever chart library it uses.
+        As built: `counts_detail` → one document per class,
+        `{name, points: [[bucket, value], ...]}`; `counts_summary` → one
+        document, `{categories: [...], series: [{name, values}]}`. Parameters
+        are `${start_time}` (ISO-8601) and `${unit_time}`; the window wraps the
+        parameter in `$toDate` because a string compared against a BSON date
+        orders below every date and would match nothing. The node id is baked
+        into the pipeline rather than passed, so a declaration cannot read a
+        collection it was not declared for. The ECharts mapping survives as
+        `to_echarts()`, called only by the legacy handler and deleted with it
+        at B5; verified live that `sink.analytics` still answers
+        `[xAxis, yAxis, legend, series(min/bar, average/bar, max/bar)]`.
+        `nodes/tests/test_lib_bustle_analytics.py` asserts the allowlist, the
+        stage cap, the absence of chart-library keys, the sort directions, the
+        placeholder/schema agreement in both directions, and the declare
+        round trip; mutation-checked against 9 edits (dropping `$toDate`,
+        adding `$out`, an undeclared and an unused parameter, a hardcoded
+        granularity, a wrong series source, a flipped sort, a missing ECharts
+        key).
 - [ ] B5. Cutover (the one wire-changing step — coordinated commit, Go +
         Python together)
   - [ ] Hub: swap node-analytics adapter from <node-id>.sink.analytics to
@@ -209,9 +243,9 @@ by its own tests, not by the stack.
   - [ ] Versioned query names (counts_by_minute@2) if rolling deploys mix
         versions
 
-Sequencing: B1–B3 are done (additive; the service runs side by side with
-sink.analytics indefinitely), and A2 is done, so B4 is next (the node starts
-declaring), then B5 in one window. Nothing before B5 breaks anything.
+Sequencing: B1–B4 are done (additive; the service runs side by side with
+sink.analytics indefinitely), so B5 is next and lands in one window. Nothing
+before B5 breaks anything.
 Logging (C) is Go-only and independent of A — it can proceed in parallel,
 but must land before B1 so the analytics service is born with structured
 logging instead of being migrated after.

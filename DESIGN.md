@@ -223,23 +223,35 @@ pipelines at query time (`<node-id>.sink.analytics`, proxied by the hub's
 per-frame counts) bounds write volume; the drain interval and the frame
 worker's drop-oldest frame queue (`maxsize=1`) both bias toward recent state.
 
-**Chart-library-agnostic output is the contract — but not yet the reality.**
-The intended data contract is generic chart data: axes/categories, series
-names, values (e.g. min/avg/max per class, time-bucketed averages), with the
-rendering library chosen entirely by the presentation layer. The current
-pipelines violate this: their final `$project` stages build Apache ECharts
-option objects (`xAxis {type: "category"}`, `yAxis`, `legend`, `series` with
-`type: "bar"|"line"`, `showSymbol`) — see `nodes/lib/bustle/analytics.py`.
-This couples the aggregation layer to one rendering library and is a known
-flaw. It is corrected as part of the analytics service (§11): declared query
-manifests must describe generic chart data only, and any
-library-specific mapping happens client-side.
+**Chart-library-agnostic output is now the contract, and the pipelines meet
+it.** The data contract is generic chart data: axes/categories, series names,
+values (e.g. min/avg/max per class, time-bucketed averages), with the rendering
+library chosen entirely by the presentation layer. Both pipelines in
+`nodes/lib/bustle/analytics.py` emit exactly that — `counts_detail` returns one
+document per class as `{name, points: [[bucket, value], ...]}`, `counts_summary`
+one document as `{categories: [...], series: [{name, values}]}`. The ECharts
+option objects the old pipelines built (`xAxis {type: "category"}`, `yAxis`,
+`legend`, `series.type`, `showSymbol`) are now produced by `to_echarts`, a
+mapping in the legacy handler that exists for the caller it still has and dies
+with that handler at the §11 cutover. Keeping the mapping out of the
+aggregation is what makes the same pipelines publishable as the node's query
+manifest: a pipeline that returns a renderer's option object could not be
+validated by the service and could not be reused by a second renderer.
 
-Two data-shape caveats in the same path: classes with zero detections in an
-interval are omitted rather than zero-filled (so the unwound series has gaps),
-and `timestamp` is a naive local `datetime.now()` while the timeseries
-granularity is seconds — `$dateTrunc` buckets shift when the host TZ is not
-UTC.
+One consequence worth stating: `counts_detail` returns a *per-class* document
+list rather than a shared category axis. A bucket can be missing for one class
+and present for another (a class added to `--chosen-classes` mid-run has no
+earlier buckets), and zero-filling it would assert a measurement that was never
+taken. The consumer takes the union of the points it receives; only
+`counts_summary` has an axis, and there all three series come out of the same
+`$group` so they cannot misalign.
+
+One data-shape caveat in the same path: classes with zero detections in an
+interval are omitted rather than zero-filled, so the unwound series has gaps.
+That is deliberate — a zero means "counted, and there were none", which is a
+different statement from "not measured". The timestamps are UTC
+(`datetime.now(timezone.utc)`), which the `$dateTrunc` buckets depend on: a
+naive local timestamp shifted every bucket by the host's UTC offset.
 
 **Planned replacement (see §11):** the query side of this decision moves to a
 dedicated analytics service. The store-raw/aggregate-on-read principle stays;
@@ -351,7 +363,16 @@ semantics), the node sends `analytics.declare`:
 at query time by the service. Declared pipelines must return **generic chart
 data** (axes/categories, series names, values) — never rendering-library
 structures like ECharts option objects; library mapping is the presentation
-layer's job. The service upserts the manifest into its own
+layer's job. **Status: both sides built.** `nodes/lib/bustle/analytics.py`
+builds the manifest (`counts_detail`, `counts_summary`) and the node publishes
+it from `BustleWorker.registered()`, which the runtime runs once `nodes.add`
+has succeeded — retried while the service is still booting, bounded at thirty
+attempts so a deployment with no analytics service logs a warning a second for
+half a minute instead of forever. The parameters are `${start_time}` (ISO-8601)
+and `${unit_time}`; `$toDate` wraps the former inside the pipeline because a
+string compared against a BSON date orders below every date and would match
+nothing.
+The service upserts the manifest into its own
 SQLite registry and serves `analytics.query {node_id, query_name, params}` —
 substitute, append time-range `$match`, execute read-only, return JSON — plus
 `analytics.queries.list {node_id}` for discovery. The hub's analytics
@@ -614,10 +635,12 @@ is the tracker for these findings and their status.
 
 #### Still open
 
-9. **ECharts-shaped analytics output**: both pipelines in
-   `nodes/lib/bustle/analytics.py` end in a `$project` emitting ECharts option
-   objects (`xAxis`/`yAxis`/`legend`/`series.type`/`showSymbol`), violating
-   invariant 8. Corrected with the analytics service (§8, §11, TODO.md B4).
+9. **The cutover itself** (TODO.md B5): the hub still proxies
+   `GET /nodes/analytics` to `<node-id>.sink.analytics`, so the node remains
+   the reader on the live path and keeps its Mongo read credential. The
+   pipelines already emit generic chart data and the manifest is already
+   published, so what is left is the adapter swap plus deleting the legacy
+   handler and `to_echarts`.
 
 #### Fixed in the E7/E11 pass — do not reintroduce
 

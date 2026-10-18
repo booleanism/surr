@@ -71,17 +71,18 @@ packages (`internal/logging`) at build time.
    named after the node ID.
 7. Analytics are read back through the hub (`GET /nodes/analytics`) which
    forwards the query over the broker to `<node-id>.sink.analytics`; the node
-   runs MongoDB aggregation pipelines that return chart series.
-   **Known flaw:** the pipelines currently bake Apache ECharts option
-   structure (`xAxis`/`yAxis`/`legend`/`series` with `type: "bar"|"line"`,
-   `showSymbol`) into the aggregation `$project` stages — the output is
-   ECharts-shaped, not chart-library-agnostic. The fix is part of the planned
-   analytics service: generic chart data (axes/categories, series names,
-   values), with any rendering library chosen by the presentation layer —
-   see "Planned evolution" below and DESIGN.md §8/§11.
+   runs MongoDB aggregation pipelines and returns chart series.
+   The pipelines emit **generic chart data** — `counts_detail` gives one
+   document per class as `{name, points: [[bucket, value], ...]}`,
+   `counts_summary` one document as `{categories: [...], series: [{name,
+   values}]}` — and the handler maps that onto ECharts options purely for the
+   caller it still has. Nothing chart-library-specific is baked into a stored
+   pipeline any more, which is what makes the same pipelines publishable as the
+   node's query manifest (see the `analytics` service below).
    **Replacement, in progress:** this read path moves to the `analytics`
-   service, which is built and green but not yet on the request path — the
-   cutover is TODO.md B5. See "Planned evolution" below and DESIGN.md §11.
+   service, which is built, green, and now receives every node's manifest at
+   boot; what is left is the cutover (TODO.md B5). See "Planned evolution"
+   below and DESIGN.md §11.
 
 > ⚠️ Steps 3–5 depend on `subscriptions.nodes.get` / `subscriptions.by.nodeid.get`.
 > `subscriptions.add` must write UUIDs in the storage class the lookups bind —
@@ -150,7 +151,7 @@ declares a `[]byte` target and lets encoding/json do the decode.
 | `subscriptions.nodes.by.user.get` | subscriptions | Node IDs subscribed by a user |
 | `subscriptions.nodes.all.get` | subscriptions | All currently-subscribed nodes |
 | `<node-id>.sink.start` / `<node-id>.sink.stop` | node | Start/stop the node's SRT pull pipeline |
-| `<node-id>.sink.analytics` | node | Aggregated analytics (currently ECharts-shaped — known flaw, see below) — **planned for removal** |
+| `<node-id>.sink.analytics` | node | Aggregated analytics, mapped to ECharts options by the handler for its existing caller — **planned for removal** |
 | `analytics.declare` | analytics | Node declares its query manifest (collection + named aggregation pipelines); replaces the whole manifest |
 | `analytics.queries.list` | analytics | Discover which queries a node exposes |
 | `analytics.query` | analytics | Execute a declared query by name with parameters; will replace `sink.analytics` at the B5 cutover |
@@ -386,9 +387,10 @@ credentials of its own rather than the root user the node holds.
 - `lib/bustle/` — the actual worker: `handlers.py`
   (`<node-id>.sink.start/stop/analytics`), `processing.py` (frame_worker thread
   running `detector.detect` + async normalizer draining into MongoDB),
-  `analytics.py` (MongoDB aggregation pipelines producing chart series —
-  currently ECharts-shaped, a known flaw the planned analytics service fixes
-  by returning generic chart data instead).
+  `analytics.py` (the node's query manifest: `counts_detail` and
+  `counts_summary`, read-only stages only, emitting generic chart data; the
+  same builders feed the legacy handler, which maps the results onto ECharts
+  options with `to_echarts` until the cutover removes it).
   `sink.analytics` and `analytics.py` are planned for removal once the
   analytics service lands (see below).
 - `lib/detector.py` — the detector seam. `Detector` is a `Protocol`
@@ -497,9 +499,11 @@ for their status.
 ### Open
 
 Every defect in TODO.md sections E and F is fixed. What remains is tracked in
-TODO.md sections A (nodes refactor, packaging) and B (analytics service) —
-including the ECharts-shaped analytics output that the analytics service is
-meant to replace. None of it is a correctness defect in the shipped path.
+TODO.md sections A (nodes refactor, packaging) and B (analytics service). The
+node's pipelines emit generic chart data now, so the last piece of the
+ECharts flaw is the `to_echarts` shim in the legacy handler, which dies with
+that handler at the B5 cutover. None of it is a correctness defect in the
+shipped path.
 
 ## Build & tooling
 
@@ -543,11 +547,13 @@ meant to replace. None of it is a correctness defect in the shipped path.
 ## Planned evolution
 
 Three workstreams were designed before implementation. Workstream 3 is done;
-workstream 1 is half-built — the `analytics/` service exists and serves all
-three commands, but nothing calls it yet, because the hub still proxies
-`GET /nodes/analytics` to `<node-id>.sink.analytics`. Workstream 2 has not
-started. They are recorded here and in DESIGN.md so implementation follows the
-agreed shape; TODO.md tracks execution.
+workstream 1 has both halves built — the `analytics/` service serves all three
+commands and every node now publishes its manifest to it at boot, but the hub
+still proxies `GET /nodes/analytics` to `<node-id>.sink.analytics`, so the
+service is exercised by its own tests and by live probes rather than by the
+read path. That cutover is TODO.md B5. Workstream 2 has not started. They are
+recorded here and in DESIGN.md so implementation follows the agreed shape;
+TODO.md tracks execution.
 
 > **Note on provenance.** Workstreams 1 and 2 do exist outside `main`: an
 > abandoned `feat/analytics-service` branch (surviving only as dangling
@@ -603,10 +609,10 @@ Consequences:
 - The analytics service is AI-type-agnostic by construction; adding a node
   type never touches it or the hub.
 - Declared queries return **generic chart data** (axes/categories, series
-  names, values) — chart-library-agnostic by contract. The current
-  ECharts-shaped output (`xAxis`/`legend`/`series.type` baked into
-  aggregations) is a known flaw that dies with `sink.analytics`; the
-  presentation layer maps generic data onto whatever chart library it uses.
+  names, values) — chart-library-agnostic by contract. Both bustle pipelines
+  now emit exactly that; the only ECharts-shaped code left is the `to_echarts`
+  shim in the legacy handler, which exists for its existing caller and dies
+  with it.
 - Mongo credentials split by role: write-only in nodes, read-only in the
   analytics service — enforced by credentials, not convention.
 - The node-type contract shrinks to: decode chain + processing loop +
