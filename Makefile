@@ -53,8 +53,12 @@ BUILD_TAGS_FLAG := $(if $(TAGS),-tags '$(TAGS)',)
 VERSION_LDFLAGS := -X main.Version=$(VERSION)
 LDFLAGS_FLAG := -ldflags '$(strip $(LDFLAGS) $(VERSION_LDFLAGS))'
 
-# Discover Go module paths (root + submodules), normalised so a module is
-# addressable as `make hub` / `make test-hub` rather than `make test-./hub`
+# Discover Go module paths, normalised so the module is addressable as `make .`
+# rather than `make ./`. There is exactly one (the root): the services used to be
+# separate modules with a go.work tying them together, which is what made them
+# uninstallable with `go install ...@version` -- a module carrying a `replace`
+# directive cannot be built from a version suffix. The find stays because it is
+# what keeps this correct if a second module ever appears.
 MODULES := $(patsubst ./%,%,$(shell find . -name "go.mod" -not -path '*/.*' -not -path '*/vendor/*' -exec dirname {} \;))
 
 # Discover main package entrypoints under any cmd/ directory
@@ -63,10 +67,15 @@ CMD_DIRS := $(shell find . -type f -name "main.go" -path '*/cmd/*' -not -path '*
 # Map directory names to build target rules (build-hub, build-rx, build-subscriptions, build-tx)
 CMD_TARGETS := $(foreach dir,$(CMD_DIRS),build-$(notdir $(dir)))
 
-# Map module paths to test target rules (test-root, test-hub, test-rx, test-subscriptions, test-tx)
+# Map module paths to test target rules (test-root for the root module).
+# TEST_DIRS adds one target per service directory, so `make test-hub` still means
+# "test the hub's packages" now that the services are directories rather than
+# modules of their own.
+TEST_DIRS := tx rx hub subscriptions analytics
+TEST_DIR_TARGETS := $(addprefix test-,$(TEST_DIRS))
 TEST_TARGETS := $(addprefix test-,$(patsubst .,root,$(MODULES)))
 
-.PHONY: all build lint test test-go typecheck test-root test-nodes prep-cache clean-cache clean $(MODULES) $(TEST_TARGETS) $(CMD_TARGETS)
+.PHONY: all build lint test test-go typecheck test-root test-nodes prep-cache clean-cache clean $(MODULES) $(TEST_TARGETS) $(TEST_DIR_TARGETS) $(CMD_TARGETS)
 
 # typecheck is in `all` but not in `lint`/`test`: it needs the node venv, while
 # `make lint` and `make test-hub` should stay usable on a Go-only checkout.
@@ -84,16 +93,22 @@ prep-cache:
 	@mkdir -p $(GOCACHE) $(GOLANGCI_LINT_CACHE) $(BIN_DIR)
 
 $(MODULES):
-	@echo "==> running golangci-lint in module: $@"
+	@echo "==> running golangci-lint: $@"
 	@cd $@ && golangci-lint run --config=$(CONFIG_FILE)
 
-# Test every module. The handler packages fail when a command a service
+# Test every package. The handler packages fail when a command a service
 # advertises has no case in their table, so a new handler without a test breaks
 # this. Pass TESTFLAGS=-race or TESTFLAGS=-count=1 as needed, and TAGS=va to
 # also compile the vah264enc variant of tx.
 $(TEST_TARGETS): test-%: prep-cache
-	@echo "==> running go test in module: $(if $(filter root,$*),.,$*) (tags: '$(TAGS)')"
+	@echo "==> running go test: $(if $(filter root,$*),.,$*) (tags: '$(TAGS)')"
 	@cd $(if $(filter root,$*),.,$*) && go test $(BUILD_TAGS_FLAG) $(TESTFLAGS) ./...
+
+# One service's packages. `test-go` above covers everything; these are for the
+# inner loop, where rebuilding the other four services' tests is pure latency.
+$(TEST_DIR_TARGETS): test-%: prep-cache
+	@echo "==> running go test: ./$*/... (tags: '$(TAGS)')"
+	@go test $(BUILD_TAGS_FLAG) $(TESTFLAGS) ./$*/...
 
 # Python tests for the nodes runtime (nodes/tests). Needs the node venv's
 # dependencies -- aio_pika and numpy -- so it fails with a pointer rather than a
