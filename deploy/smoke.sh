@@ -14,7 +14,8 @@
 #      duplicate signup is 409 rather than 500, a body using `password` is 400,
 #      an add with no nodes is 400 and an already-subscribed node is 409
 #   3. the node registers itself, declares its analytics queries, and frames
-#      reach it and land in mongo
+#      reach it and land in mongo -- then GET /nodes/analytics returns those
+#      declared queries with the window the hub chose
 #   4. tx exits 0 on SIGTERM instead of dying of a GLib assertion
 #   5. an absent node does not make rx reconnect in a tight loop, and the chain
 #      recovers by itself once the node comes back
@@ -337,6 +338,31 @@ if [ -n "$after" ] && [ "$after" != "null" ] && [ "$after" -gt "${before:-0}" ] 
 else
     no "the count climbs" "${before} -> ${after}"
 fi
+
+# The read path end to end: the hub asks the analytics service what this node
+# declared, runs every query in it and returns them under their own names. This
+# is the assertion that no query name is baked into the hub -- the report has to
+# contain the three bustle names because the node declared them, not because the
+# hub knows them.
+report=$(curl -sS "${HUB_URL}/nodes/analytics?node_id=${NODE_ID}&time_cluster=minutes" \
+    -H "Authorization: Bearer ${token}" 2>&1)
+
+declared_names=$(printf '%s' "$report" | jq -r '.queries[].name' 2>/dev/null | sort | tr '\n' ' ')
+check "the analytics endpoint returns the declared queries" \
+    "counts_detail counts_summary counts_totals " "${declared_names}"
+
+if printf '%s' "$report" | jq -e '.queries[] | select(.name == "counts_totals") | .data' >/dev/null 2>&1; then
+    ok "the endpoint answers a query that takes no bucket width"
+else
+    no "the endpoint answers a query that takes no bucket width" "response was: ${report}"
+fi
+
+# The window the hub chose, echoed back: minutes means a 5-minute window
+# bucketed by the second. A caller labels its chart from this rather than
+# recomputing it.
+check "the report names the window it used" \
+    "minutes second" \
+    "$(printf '%s' "$report" | jq -r '.window.time_cluster + " " + .window.unit_time' 2>/dev/null)"
 
 # ------------------------------------------------------- 6. tx shuts down cleanly
 
