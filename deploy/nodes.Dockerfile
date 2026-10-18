@@ -24,14 +24,20 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
-RUN apt-get update \
+# apt against BuildKit cache mounts: the .debs and the package index survive a
+# rebuild instead of being downloaded again, and the `rm -rf /var/lib/apt/lists/*`
+# that used to sit here is gone because the mounts never reach the image, so it
+# would only wipe the cache. PyGObject has no wheels, so this stage really does
+# compile against these headers on every cold build.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential \
       pkg-config \
       libglib2.0-dev \
       libgirepository-2.0-dev \
-      libcairo2-dev \
- && rm -rf /var/lib/apt/lists/*
+      libcairo2-dev
 
 WORKDIR /app
 
@@ -52,7 +58,13 @@ FROM ghcr.io/astral-sh/uv:python3.14-trixie-slim
 # be diagnosed from the logs of either side.
 ARG VERSION=unknown
 
-RUN apt-get update \
+# apt against BuildKit cache mounts: the .debs and the package index survive a
+# rebuild instead of being downloaded again, and the `rm -rf /var/lib/apt/lists/*`
+# that used to sit here is gone because the mounts never reach the image, so it
+# would only wipe the cache.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       libglib2.0-0 \
@@ -67,7 +79,6 @@ RUN apt-get update \
       gir1.2-glib-2.0 \
       gir1.2-gstreamer-1.0 \
       gir1.2-gst-plugins-base-1.0 \
- && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin surr
 
 # The node's pipeline is built from element names, so these are load-bearing:

@@ -72,14 +72,20 @@ FROM rust:1-slim-trixie AS inter-build
 # before moving it.
 ARG GST_PLUGINS_RS_TAG=gstreamer-1.26.11
 
-RUN apt-get update \
+# apt against BuildKit cache mounts: the .debs and the package index survive a
+# rebuild instead of being downloaded again, and the `rm -rf /var/lib/apt/lists/*`
+# that used to sit here is gone because the mounts never reach the image, so it
+# would only wipe the cache. The plugin links against gstreamer-base, hence the
+# plugins-base dev package in addition to the core one.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       git \
       pkg-config \
       libgstreamer1.0-dev \
-      libgstreamer-plugins-base1.0-dev \
- && rm -rf /var/lib/apt/lists/*
+      libgstreamer-plugins-base1.0-dev
 
 WORKDIR /src
 
@@ -107,13 +113,22 @@ FROM golang:1.27-trixie AS build
 # startup log line report.
 ARG VERSION=unknown
 
-RUN apt-get update \
+# Only the core dev package, and that is deliberate. What tx compiles is go-gst's
+# `pkg/gst`, whose cgo directives ask for glib, gobject, gio and gstreamer-1.0
+# plus the base/check/controller/net variants -- all of which libgstreamer1.0-dev
+# provides (it pulls libglib2.0-dev). The one go-gst package that needs
+# `gstreamer-mpegts-1.0` is gstmpegts, which tx does not import (check with
+# `go list -deps ./...` in tx/). Adding libgstreamer-plugins-bad1.0-dev here used
+# to be a no-op for the binary and dragged in libopencv-contrib-dev, libvtk9.3
+# and libtk8.6 -- hundreds of megabytes of headers nothing compiles against.
+# The runtime stage below still installs the plugins themselves; this stage only
+# needs headers.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
-      libgstreamer1.0-dev \
-      libgstreamer-plugins-base1.0-dev \
-      libgstreamer-plugins-bad1.0-dev \
- && rm -rf /var/lib/apt/lists/*
+      libgstreamer1.0-dev
 
 WORKDIR /src
 
@@ -135,7 +150,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM debian:trixie-slim
 
-RUN apt-get update \
+# apt against BuildKit cache mounts: the .debs and the package index survive a
+# rebuild instead of being downloaded again, and the `rm -rf /var/lib/apt/lists/*`
+# that used to sit here is gone because the mounts never reach the image, so it
+# would only wipe the cache.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       gstreamer1.0-tools \
@@ -144,7 +165,6 @@ RUN apt-get update \
       gstreamer1.0-plugins-bad \
       gstreamer1.0-plugins-ugly \
       gstreamer1.0-libav \
- && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin surr \
  && install -d -o surr -g surr /data
 

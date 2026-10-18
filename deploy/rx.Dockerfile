@@ -20,9 +20,14 @@ FROM golang:${GO_VERSION}-trixie AS build
 
 ARG VERSION=unknown
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends libsrt-openssl-dev \
- && rm -rf /var/lib/apt/lists/*
+# apt against BuildKit cache mounts: the .debs and the package index survive a
+# rebuild instead of being downloaded again, and the `rm -rf /var/lib/apt/lists/*`
+# that used to sit here is gone because the mounts never reach the image, so it
+# would only wipe the cache.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
+ && apt-get install -y --no-install-recommends libsrt-openssl-dev
 
 WORKDIR /src
 
@@ -40,9 +45,14 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM debian:trixie-slim
 
-RUN apt-get update \
+# apt against BuildKit cache mounts: the .debs and the package index survive a
+# rebuild instead of being downloaded again, and the `rm -rf /var/lib/apt/lists/*`
+# that used to sit here is gone because the mounts never reach the image, so it
+# would only wipe the cache.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libsrt1.5-openssl \
- && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin surr
 
 COPY --from=build /out/surr-rx /usr/local/bin/surr-rx

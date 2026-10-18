@@ -35,9 +35,15 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM debian:trixie-slim
 
-RUN apt-get update \
+# apt runs against BuildKit cache mounts, so the .deb files and the package
+# index survive a rebuild instead of being downloaded again. That is also why
+# there is no `rm -rf /var/lib/apt/lists/*` here any more: the mounts never
+# reach the image, so the cleanup would only wipe the cache. `sharing=locked`
+# stops two concurrent builds from corrupting the shared lists.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin surr \
  && install -d -o surr -g surr /data
 

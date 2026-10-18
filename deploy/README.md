@@ -369,3 +369,22 @@ sibling protocol revision mismatch  peer_protocol_revision=1  protocol_revision=
 The protocol revision is the compatibility contract between peers — the version
 string is just the build id, and two different builds of the same revision are
 compatible by definition.
+
+### What a rebuild actually costs
+
+Builds are cached, and two of the caches are expensive to rebuild, so know what
+you are throwing away before you prune:
+
+- **apt runs against BuildKit cache mounts** (`/var/cache/apt` and
+  `/var/lib/apt/lists`), so the package index and the `.deb` files survive an
+  edit to a `RUN` line above them. This is why no Dockerfile has a
+  `rm -rf /var/lib/apt/lists/*` any more — the mounts never reach the image, so
+  that cleanup would only wipe the cache.
+- **The `bustle` build is the slow one.** Its dependency layer downloads the
+  torch CPU wheel and builds PyGObject from source, and it has OOM-killed a
+  whole-stack build on a 16 GB machine. Build it on its own when memory is
+tight: `docker compose --profile nodes build bustle`.
+- **`tx` carries a Rust stage** that compiles the `intersrc` plugin against
+  GStreamer, with its own cargo registry and target cache. `docker builder prune
+  -a` discards both that and the torch layer; `docker builder prune -f` drops
+  only the dangling part, which is usually what you want when disk is short.
