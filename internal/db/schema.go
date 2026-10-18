@@ -13,15 +13,17 @@ var ErrSchemaMissing = errors.New("database schema is missing")
 
 // VerifySchema fails when database does not have every named table.
 //
-// The migrations live in the repo as SQL and are applied out-of-band with the
-// golang-migrate CLI, so nothing in a service's startup path notices a fresh
-// checkout: hub and subscriptions would open an empty file, start happily and
-// then fail one "no such table" at a time on the first requests, with no hint
-// that a migration step had been skipped. Called right after the connection is
-// opened, this turns that into a single actionable error.
+// The migrations are embedded in the binary but are still a separate step --
+// `migrate`, not startup -- so nothing else in a service's startup path notices
+// a fresh database: it would open an empty file, start happily and then fail one
+// "no such table" at a time on the first requests, with no hint that a migration
+// step had been skipped. Called right after the connection is opened, this turns
+// that into a single actionable error.
 //
-// migrationsPath is only used to build that error message.
-func VerifySchema(ctx context.Context, database *sql.DB, migrationsPath string, tables ...string) error {
+// migrateHint is the command that fixes it, spelled with the caller's own binary
+// name and database path ("surr-hub migrate -d ./hub.db"); it is only used to
+// build that error message, which is why it is a string and not a flag.
+func VerifySchema(ctx context.Context, database *sql.DB, migrateHint string, tables ...string) error {
 	missing := make([]string, 0, len(tables))
 
 	for _, table := range tables {
@@ -40,10 +42,10 @@ func VerifySchema(ctx context.Context, database *sql.DB, migrationsPath string, 
 	}
 
 	return fmt.Errorf(
-		"%w: missing table(s) %s; apply the migrations first: migrate -database sqlite3://<db file> -path %s up",
+		"%w: missing table(s) %s; apply the migrations first: %s",
 		ErrSchemaMissing,
 		strings.Join(missing, ", "),
-		migrationsPath,
+		migrateHint,
 	)
 }
 
