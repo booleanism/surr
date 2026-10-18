@@ -218,25 +218,49 @@ reason instead of retrying blind at 1 Hz.
 
 The node stores one median-count document per drain interval (2s default) in a
 MongoDB timeseries collection; chart-ready series are computed by aggregation
-pipelines at query time (`<node-id>.sink.analytics`, proxied by the hub's
-`GET /nodes/analytics` endpoint). Storing medians per interval (rather than
+pipelines at query time (declared by the node, executed by the analytics
+service, proxied by the hub's `GET /nodes/analytics` endpoint). Storing medians
+per interval (rather than
 per-frame counts) bounds write volume; the drain interval and the frame
 worker's drop-oldest frame queue (`maxsize=1`) both bias toward recent state.
 
-**Chart-library-agnostic output is now the contract, and the pipelines meet
-it.** The data contract is generic chart data: axes/categories, series names,
-values (e.g. min/avg/max per class, time-bucketed averages), with the rendering
-library chosen entirely by the presentation layer. Both pipelines in
-`nodes/lib/bustle/analytics.py` emit exactly that — `counts_detail` returns one
-document per class as `{name, points: [[bucket, value], ...]}`, `counts_summary`
-one document as `{categories: [...], series: [{name, values}]}`. The ECharts
+**Chart-library-agnostic output is the contract, and nothing in the stack
+breaks it.** The data contract is generic chart data: axes/categories, series
+names, values (e.g. min/avg/max per class, time-bucketed averages), with the
+rendering library chosen entirely by the presentation layer. The three
+pipelines in `nodes/lib/bustle/analytics.py` emit exactly that — `counts_detail`
+returns one document per class as `{name, points: [[bucket, value], ...]}`,
+`counts_summary` one document as `{categories: [...], series: [{name, values}]}`,
+`counts_totals` one document as `{categories: [...], values: [...]}`. The ECharts
 option objects the old pipelines built (`xAxis {type: "category"}`, `yAxis`,
-`legend`, `series.type`, `showSymbol`) are now produced by `to_echarts`, a
-mapping in the legacy handler that exists for the caller it still has and dies
-with that handler at the §11 cutover. Keeping the mapping out of the
-aggregation is what makes the same pipelines publishable as the node's query
-manifest: a pipeline that returns a renderer's option object could not be
-validated by the service and could not be reused by a second renderer.
+`legend`, `series.type`, `showSymbol`) and the `to_echarts` shim that briefly
+mapped rows for the legacy handler are both gone with that handler. Keeping the
+mapping out of the aggregation is what makes the same pipelines publishable as
+the node's query manifest: a pipeline that returns a renderer's option object
+could not be validated by the service and could not be reused by a second
+renderer.
+
+**The charts belong to the node type.** `GET /nodes/analytics` names no query.
+It asks the analytics service what the node declared and runs that list, so a
+detector with a different story to tell — plates instead of people — declares
+its own queries and appears in the report with no change to the hub. The report
+is therefore a list of named results rather than a fixed pair of fields:
+
+```
+{"window": {"time_cluster": ..., "start_time": ..., "unit_time": ...},
+ "queries": [{"name": ..., "description": ..., "data": [...]}, ...]}
+```
+
+Each entry carries its rows untouched, or an `error` saying why that one query
+could not be answered — one broken chart must not cost the caller the rest. The
+request fails only when nothing at all could be answered, because a 200 with an
+empty report reads like a node that has never seen anything, which is a
+different fact from a service that cannot answer. The window is the endpoint's
+to choose (it is a question about how much history to show, not about what the
+documents mean) and each query is sent only the parameters its own schema
+declares: sending `unit_time` to a query that does not take it is a payload
+error at the service, and withholding it from one that does is a missing
+parameter.
 
 One consequence worth stating: `counts_detail` returns a *per-class* document
 list rather than a shared category axis. A bucket can be missing for one class
@@ -330,18 +354,19 @@ Cross-cutting conventions:
 
 ### 11. Analytics service: writer-owned queries (service built, cutover pending)
 
-The service is built, tested and deployed (TODO.md B1–B3); what is not built is
-the node side that declares (B4, which waits on §12) and the hub cutover (B5).
-This section records the decision so the remaining steps follow it. An earlier
+The service is built, tested, deployed and on the read path (TODO.md B1–B5);
+what is left is fleet-wide declarations (B6). This section records the decision
+so that what follows keeps its shape. An earlier
 first attempt survives as dangling commits and a stash from the abandoned
 `feat/analytics-service` branch; it was not the base of this one.
 
-**Problem.** Today each node type owns both the write path (document shape)
-and the read path (`<node-id>.sink.analytics` with type-specific aggregation
-code). Every node type therefore needs its own broker command handler, its own
-query logic, and read access to MongoDB — and a future presentation layer
-would need to know which node answers which query. That couples the reader to
-the writer's internals in exactly the way the rest of the system avoids.
+**Problem (as it stood).** Each node type owned both the write path (document
+shape) and the read path (`<node-id>.sink.analytics` with type-specific
+aggregation code). Every node type therefore needed its own broker command
+handler, its own query logic, and read access to MongoDB — and a future
+presentation layer would have needed to know which node answered which query.
+That coupled the reader to the writer's internals in exactly the way the rest
+of the system avoids.
 
 **Principle.** *Whoever writes the data also writes the query.* Document
 shape, write path, and query definitions are one contract that must
@@ -363,8 +388,9 @@ semantics), the node sends `analytics.declare`:
 at query time by the service. Declared pipelines must return **generic chart
 data** (axes/categories, series names, values) — never rendering-library
 structures like ECharts option objects; library mapping is the presentation
-layer's job. **Status: both sides built.** `nodes/lib/bustle/analytics.py`
-builds the manifest (`counts_detail`, `counts_summary`) and the node publishes
+layer's job. **Status: landed.** `nodes/lib/bustle/analytics.py` builds the
+manifest (`counts_detail`, `counts_summary`, `counts_totals`) and the node
+publishes
 it from `BustleWorker.registered()`, which the runtime runs once `nodes.add`
 has succeeded — retried while the service is still booting, bounded at thirty
 attempts so a deployment with no analytics service logs a warning a second for
@@ -374,10 +400,12 @@ string compared against a BSON date orders below every date and would match
 nothing.
 The service upserts the manifest into its own
 SQLite registry and serves `analytics.query {node_id, query_name, params}` —
-substitute, append time-range `$match`, execute read-only, return JSON — plus
-`analytics.queries.list {node_id}` for discovery. The hub's analytics
-endpoint swaps its adapter from `<node-id>.sink.analytics` to
-`analytics.query`; nodes delete `sink.analytics` and `lib/<type>/analytics.py`.
+substitute, append the result cap, execute read-only, return JSON — plus
+`analytics.queries.list {node_id}`, which answers with each query's name,
+description and parameter schema and never with its pipeline. The hub's
+analytics endpoint asks for that list and runs every entry; the nodes'
+`sink.analytics` handler is gone, so a node holds a write credential on its own
+collection and no read handle at all.
 
 **Why a query registry rather than MongoDB views.** Views were considered and
 rejected as the mechanism: view pipelines are static (no parameters — the
@@ -633,14 +661,23 @@ is the tracker for these findings and their status.
    path as the real PyGObject-stubs file and silently clobbers it, which turns
    every GStreamer enum and constructor into an unknown-attribute error.
 
-#### Still open
+#### Fixed in the B5 cutover — do not reintroduce
 
-9. **The cutover itself** (TODO.md B5): the hub still proxies
-   `GET /nodes/analytics` to `<node-id>.sink.analytics`, so the node remains
-   the reader on the live path and keeps its Mongo read credential. The
-   pipelines already emit generic chart data and the manifest is already
-   published, so what is left is the adapter swap plus deleting the legacy
-   handler and `to_echarts`.
+9. **The cutover (TODO.md B5)** — done. The hub no longer proxies to a node
+   command: `GetAnalytics` (`hub/internal/adapter/rabbitmq/nodes.go`) reads the
+   node's declaration from the analytics service and runs every query in it, so
+   no query name appears in the control plane and a new node type needs no hub
+   change. The node's `sink.analytics` handler and `to_echarts` are deleted and
+   `BustleHandlers.setup` no longer takes a collection: the node writes with a
+   `readWrite` Mongo credential and reads nothing, while the analytics service
+   holds `read` only — the split is enforced by credentials rather than by
+   convention, which is what makes it worth stating in a review. The window
+   (`time_cluster` → start + bucket width) moved into the hub with the adapter,
+   because how much history to show is the caller's question, not the writer's.
+   Two behaviours are deliberate and easy to "simplify" away: each query is sent
+   only the parameters *its own* schema declares, and one failing query is
+   reported per entry instead of failing the report (the whole request fails
+   only when nothing could be answered).
 
 #### Fixed in the E7/E11 pass — do not reintroduce
 
@@ -891,8 +928,11 @@ evidence.
    keys (`rpc.direct.<name>`, `rpc.broadcast`), introduce shape
    (`{"commands": [...]}` + ReplyTo), RouterResponse JSON shape (incl. the
    base64 string convention), manual acks, nack-without-requeue for malformed
-   messages. When the planned analytics commands are added (DESIGN.md §11),
-   both sides must change in the same commit.
+   messages. The analytics commands (DESIGN.md §11) are part of that surface:
+   `analytics.declare`, `analytics.queries.list` and `analytics.query` are
+   mirrored by the node only in the sense that the manifest it publishes must
+   stay decodable, so a change to the declaration shape changes both sides in
+   the same commit.
 2. `internal/` root packages are shared by hub/rx/subscriptions/tx — tx must
    stay independent of the broker and of the DB/pool helpers it does not need.
 3. Commands follow `<subject>.<verb>`; node commands embed the stable node
@@ -912,9 +952,10 @@ evidence.
 8. Aggregation output must be chart-library-agnostic: generic chart data
    (axes, series, values) only — no rendering-library-specific structure
    (e.g. ECharts option objects) may leak into pipelines, manifests, or
-   handler responses (DESIGN.md §8, §11). Today's `sink.analytics`
-   pipelines violate this; the violation is removed with the analytics
-   service cutover, not preserved.
+   handler responses (DESIGN.md §8, §11). Nothing in the stack emits one any
+   more; the check that keeps it that way lives with the pipelines, in
+   `nodes/tests/test_lib_bustle_analytics.py`, because a service-side heuristic
+   would be guessing at a shape it cannot see the renderer for.
 9. Never log secrets: passwords, tokens, the JWT secret, credential-bearing
    URIs (log scheme://host only), or full RPC/request payloads (length at
    debug). SRT streamids are identifiers, not secrets (DESIGN.md §13).

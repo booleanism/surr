@@ -12,8 +12,9 @@ central orchestrator.
 > **Project status: the control plane runs, and every defect found in the 2026-10
 > review is fixed.** [TODO.md](TODO.md) section E is the tracker for those
 > findings — each defect as it was found, with the fix appended — and sections A
-> and B are the work still ahead: the nodes refactor, and the `analytics` service,
-> which is built and deployed but not yet on the request path.
+> and B are the work still ahead: the nodes refactor (packaging, the last
+> `BustleHandlers` singleton) and, in B, only the optional fleet-wide analytics
+> rollups. The `analytics` service is on the request path.
 > Tests cover the RPC reply layer, the restart backoff, the rx data plane and the
 > `nodes/lib/core` runtime, and `make typecheck` gates the Python side with
 > pyright; what is exercised by hand is the wiring — a real SRT socket and a real
@@ -40,7 +41,7 @@ camera (RTSP) ──→ tx ──── SRT ────→ rx ──── SRT 
 | **rx** | `rx/` | Receiver/relay. Terminates SRT ingress, looks up which nodes belong to a subscription, and fans the stream out over SRT egress. |
 | **hub** | `hub/` | Control plane. HTTP API (JWT auth, users, nodes, subscriptions) backed by SQLite, plus broker handlers. |
 | **subscriptions** | `subscriptions/` | Answers which nodes belong to a subscription. SQLite-backed, no HTTP surface. |
-| **analytics** | `analytics/` | Read path over MongoDB. Keeps a registry of the aggregation queries each node declared about its own documents, and runs one by name on request. Not yet on the request path. |
+| **analytics** | `analytics/` | Read path over MongoDB. Keeps a registry of the aggregation queries each node declared about its own documents and runs them on request. `GET /nodes/analytics` runs whatever the node declared, so each node type brings its own charts and the hub names none. |
 | **nodes** | `nodes/` | Python AI workers. Pull SRT frames, run inference, write results to MongoDB. |
 
 Every service broadcasts an `introduce` message advertising the commands it
@@ -269,7 +270,7 @@ Protected routes require `Authorization: Bearer <access token>`.
 | `POST` | `/auth/refresh` | cookie | Rotate the refresh token, mint a new access token |
 | `POST` | `/auth/logout` | cookie | Revoke the refresh token |
 | `GET` | `/nodes/availability` | ✓ | Nodes not yet bound to a subscription |
-| `GET` | `/nodes/analytics?node_id=&time_cluster=` | ✓ | Analytics for one node (proxied to the node over the broker) |
+| `GET` | `/nodes/analytics?node_id=&time_cluster=` | ✓ | Every query the node declared, with the window used (`{window, queries: [{name, description, data}]}`) |
 | `POST` | `/subscriptions/add` | ✓ | Bind nodes to a new subscription |
 | `POST` | `/subscriptions/remove` | ✓ | Remove a subscription |
 

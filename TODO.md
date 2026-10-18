@@ -134,12 +134,12 @@ router + SQLite registry + read-only Mongo executor. Nodes become write-only;
 the service becomes the sole reader. Builds on A2 (the Node runtime hosts the
 declare step).
 
-**Status:** B1–B4 are implemented, tested and deployed (`deploy/analytics.Dockerfile`,
-the `analytics` and `migrate-analytics` compose services). Every node now
-publishes its query manifest at boot and the service answers `analytics.query`
-against live data, but the hub still proxies `GET /nodes/analytics` to
-`<node-id>.sink.analytics`, so the service is not yet on the read path. B5 is
-the cutover.
+**Status:** B1–B5 are implemented, tested, deployed and on the read path
+(`deploy/analytics.Dockerfile`, the `analytics` and `migrate-analytics` compose
+services). A node publishes its query manifest at boot, `GET /nodes/analytics`
+asks the service what that node declared and runs every query in it, and the
+node no longer reads its own collection. Only B6 (fleet-wide rollups) is left,
+and it is optional.
 
 - [x] B1. analytics service skeleton
   - [x] analytics/ module: cmdline (broker, family, name, mongo url, dsn),
@@ -220,10 +220,11 @@ the cutover.
         parameter in `$toDate` because a string compared against a BSON date
         orders below every date and would match nothing. The node id is baked
         into the pipeline rather than passed, so a declaration cannot read a
-        collection it was not declared for. The ECharts mapping survives as
-        `to_echarts()`, called only by the legacy handler and deleted with it
-        at B5; verified live that `sink.analytics` still answers
-        `[xAxis, yAxis, legend, series(min/bar, average/bar, max/bar)]`.
+        collection it was not declared for. At B4 the ECharts mapping still
+        survived as `to_echarts()`, called only by the legacy handler and
+        verified live to answer
+        `[xAxis, yAxis, legend, series(min/bar, average/bar, max/bar)]`; B5
+        deleted both. A third query, `counts_totals`, was added at B5.
         `nodes/tests/test_lib_bustle_analytics.py` asserts the allowlist, the
         stage cap, the absence of chart-library keys, the sort directions, the
         placeholder/schema agreement in both directions, and the declare
@@ -231,21 +232,47 @@ the cutover.
         adding `$out`, an undeclared and an unused parameter, a hardcoded
         granularity, a wrong series source, a flipped sort, a missing ECharts
         key).
-- [ ] B5. Cutover (the one wire-changing step — coordinated commit, Go +
-        Python together)
-  - [ ] Hub: swap node-analytics adapter from <node-id>.sink.analytics to
-        analytics.query (GET /nodes endpoint shape unchanged)
-  - [ ] Nodes: delete sink.analytics handler and lib/<type>/analytics.py
-  - [ ] Update ARCHITECTURE.md command catalog + data flow step 7, DESIGN.md
-        §9 note, this file; move Mongo read credential out of nodes
+- [x] B5. Cutover (the one wire-changing step — coordinated commit, Go +
+        Python together) — **done, and it ended up wider than planned.**
+  - [x] Hub: the node-analytics adapter now asks the service for the node's
+        declaration (`analytics.queries.list`) and runs every query in it
+        (`analytics.query`). No query name is baked into the hub: the charts
+        belong to the node type, so a detector with a different story to tell
+        declares its own and appears in the report with no hub change. The
+        response shape did change — from a fixed `{summary, detail}` pair to
+        `{window, queries: [{name, description, data | error}]}` — because a
+        fixed pair is exactly the coupling the cutover exists to remove. Each
+        query is sent only the parameters its own schema declares (sending
+        `unit_time` to a query that does not take it is a payload error at the
+        service; withholding it from one that does is a missing parameter), and
+        one failing query is reported per entry rather than failing the report,
+        which fails outright only when nothing could be answered. The
+        `time_cluster` → window/bucket mapping moved here from the node, since
+        how much history to show is the caller's question.
+  - [x] Nodes: `sink.analytics`, `AnalyticsParams`, `_aggregate` and
+        `to_echarts` are deleted; `BustleHandlers.setup` no longer takes a
+        collection and the node holds no read handle on its own data. The
+        manifest gained `counts_totals` (`{categories, values}`) to prove the
+        endpoint is not tied to two names — it takes only `start_time`, so it
+        also exercises the per-query parameter selection end to end.
+  - [x] Docs: ARCHITECTURE.md command catalog + data flow step 7, DESIGN.md
+        §8/§9/§11, this file, AGENTS.md invariants.
+  - [x] Mongo credential split: `deploy/mongo-init.js` creates `surr-writer`
+        (`readWrite` on the nodes database) and `surr-reader` (`read`), as a
+        one-shot `mongo-init` compose service rather than a
+        `/docker-entrypoint-initdb.d` script — those only fire on an empty data
+        directory, so an existing `mongo-data` volume would never get the users.
+        bustle uses the writer, analytics the reader: the split is enforced by
+        credentials, not convention.
 - [ ] B6. Later (only if needed)
   - [ ] Fleet/wildcard declarations for cross-node rollups
   - [ ] Versioned query names (counts_by_minute@2) if rolling deploys mix
         versions
 
-Sequencing: B1–B4 are done (additive; the service runs side by side with
-sink.analytics indefinitely), so B5 is next and lands in one window. Nothing
-before B5 breaks anything.
+Sequencing: B1–B5 are done, so the service is the read path and the node-side
+aggregation code is gone. What remains is B6, which is optional: fleet-wide
+rollups need a declaration that is not scoped to one node, and nothing today
+asks for one.
 Logging (C) is Go-only and independent of A — it can proceed in parallel,
 but must land before B1 so the analytics service is born with structured
 logging instead of being migrated after.
@@ -305,13 +332,14 @@ the DESIGN.md §13 policy exactly — logs must carry context values
 
 ## D. Standalone fixes (unrelated to A/B, small)
 
-- [ ] ECharts-shaped analytics output (nodes/lib/bustle/analytics.py): the
-      aggregation $project stages build Apache ECharts option objects
-      (xAxis/legend/series.type) instead of generic chart data. If you want
-      the fix before the analytics service lands (design says fix it there,
-      TODO B4), it can be done standalone by restructuring the final stages
-      to return {categories, series: [{name, values}]} — consumers currently
-      expecting the ECharts shape must adapt in the same change
+- [x] ECharts-shaped analytics output (nodes/lib/bustle/analytics.py) — fixed
+      across B4 and B5. The pipelines now emit generic chart data only, the
+      `to_echarts` shim died with the handler that used it, and `GET
+      /nodes/analytics` returns named rows with no renderer's vocabulary
+      anywhere. The regression guard is
+      `nodes/tests/test_lib_bustle_analytics.py`, which checks the *keys* —
+      the old stages wrote `{"$literal": "line"}`, so matching the rendered
+      text would let them straight back in
 - [x] tx --recording flag wrote parsed specs into DownstreamSpecs instead of
       RecordingSpecs (tx/cmd/tx/cmdline.go, recording flag Action) — fixed
       and committed (e3ca2db)
