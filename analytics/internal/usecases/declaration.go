@@ -22,12 +22,14 @@ import (
 // message, and the handler maps the sentinel to one reply code.
 var ErrInvalidDeclaration = errors.New("invalid declaration")
 
-// maxCollectionLength and maxQueryNameLength bound what a node may store. Both
-// are far above any real value; the point is that an unbounded string in a
-// primary key is a memory problem waiting for a caller to send one.
+// maxCollectionLength, maxQueryNameLength and maxNodeTypeLength bound what a node
+// may store. All three are far above any real value; the point is that an
+// unbounded string in a primary key is a memory problem waiting for a caller to
+// send one.
 const (
 	maxCollectionLength = 120
 	maxQueryNameLength  = 64
+	maxNodeTypeLength   = 32
 )
 
 // queryNamePattern is the set of names that can be looked up again safely. A
@@ -35,6 +37,11 @@ const (
 // lowercase alphanumerics plus _ . and -, which needs no quoting anywhere it
 // travels.
 var queryNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
+
+// nodeTypePattern is the set of node types a fleet may be keyed by. Tighter than
+// queryNamePattern because a type is a word, not a path: it names a kind of node
+// ("bustle") and never needs a dot or a slash.
+var nodeTypePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // Declaration is the storage this service needs.
 //
@@ -45,6 +52,8 @@ type Declaration interface {
 	UpsertDeclaration(ctx context.Context, decl models.Declaration) error
 	SelectQueryInfos(ctx context.Context, nodeID uuid.UUID, infos *[]models.QueryInfo) (int, error)
 	SelectQuery(ctx context.Context, nodeID uuid.UUID, name string) (models.DeclaredQuery, error)
+	SelectNodeType(ctx context.Context, nodeID uuid.UUID) (string, error)
+	SelectFleetCollections(ctx context.Context, nodeType string, nodeIDs []uuid.UUID, out *[]string) (int, error)
 }
 
 type declaration struct {
@@ -81,8 +90,56 @@ func (d declaration) ListQueries(ctx context.Context, nodeID uuid.UUID, infos *[
 	return d.d.SelectQueryInfos(ctx, nodeID, infos)
 }
 
-func (d declaration) GetQuery(ctx context.Context, nodeID uuid.UUID, name string) (models.DeclaredQuery, error) {
-	return d.d.SelectQuery(ctx, nodeID, name)
+// GetQuery resolves one declared query and, for a fleet-scoped one, its members.
+//
+// Membership is resolved here rather than in the executor because it is a
+// registry question: the type comes from the node's own declaration and the ids
+// come from the caller's authorization, and only the declaration usecase holds
+// both. What the executor receives is a finished list of collections, so it never
+// has to reach back into the registry mid-query.
+func (d declaration) GetQuery(ctx context.Context, nodeID uuid.UUID, name string, fleet []uuid.UUID) (models.DeclaredQuery, error) {
+	declared, err := d.d.SelectQuery(ctx, nodeID, name)
+	if err != nil {
+		return models.DeclaredQuery{}, err
+	}
+
+	if !declared.Query.IsFleet() {
+		// A node-scoped query ignores the fleet list entirely. Ignoring rather
+		// than refusing is deliberate: the caller does not know which scope a
+		// name has -- the hub names no query -- so a fleet list that was sent
+		// anyway is not a mistake worth failing a report over.
+		declared.Scope = models.ScopeNode
+
+		return declared, nil
+	}
+
+	// The declaring node's type is what a fleet is keyed by, and it is the same
+	// for every node of that type, so the node asking does not have to be the
+	// node that declared.
+	nodeType, err := d.d.SelectNodeType(ctx, nodeID)
+	if err != nil {
+		return models.DeclaredQuery{}, err
+	}
+
+	collections := make([]string, 0, len(fleet))
+
+	n, err := d.d.SelectFleetCollections(ctx, nodeType, fleet, &collections)
+	if err != nil {
+		return models.DeclaredQuery{}, err
+	}
+
+	if n == 0 {
+		// No member collection: the caller owns no node of this type that has
+		// declared itself. Answering with the empty shape would read as a fleet
+		// that saw nothing, which is the same lie the hub's liveness check
+		// refuses for a single node.
+		return models.DeclaredQuery{}, fmt.Errorf("%w: no %q node in the caller's fleet has declared itself", models.ErrEmptyFleet, nodeType)
+	}
+
+	declared.Collections = collections[:n]
+	declared.Collection = collections[0]
+
+	return declared, nil
 }
 
 func validateDeclaration(decl models.Declaration) error {
@@ -98,7 +155,46 @@ func validateDeclaration(decl models.Declaration) error {
 		return fmt.Errorf("%w: a manifest must declare at least one query", ErrInvalidDeclaration)
 	}
 
+	if err := validateNodeType(decl.NodeType, decl.Queries); err != nil {
+		return err
+	}
+
 	return validateQueries(decl.Queries)
+}
+
+// validateNodeType checks the type a fleet query is keyed by.
+//
+// It is required only when the manifest declares a fleet query, and that is not
+// a leniency: a node that declares nothing fleet has no reason to name a type,
+// and demanding one would break every node written before fleet declarations
+// existed. What it may not do is declare a fleet query without one -- a fleet
+// with no type is a fleet that cannot be resolved, so it would be stored and then
+// never answerable.
+func validateNodeType(nodeType string, queries []models.Query) error {
+	fleet := false
+
+	for _, query := range queries {
+		if query.IsFleet() {
+			fleet = true
+
+			break
+		}
+	}
+
+	if !fleet {
+		return nil
+	}
+
+	switch {
+	case nodeType == "":
+		return fmt.Errorf("%w: a fleet query needs node_type", ErrInvalidDeclaration)
+	case len(nodeType) > maxNodeTypeLength:
+		return fmt.Errorf("%w: node_type is longer than %d bytes", ErrInvalidDeclaration, maxNodeTypeLength)
+	case !nodeTypePattern.MatchString(nodeType):
+		return fmt.Errorf("%w: node_type %q must be lowercase alphanumerics plus _ or -", ErrInvalidDeclaration, nodeType)
+	}
+
+	return nil
 }
 
 func validateCollection(collection string) error {
@@ -118,6 +214,18 @@ func validateCollection(collection string) error {
 	}
 
 	return nil
+}
+
+// validScope accepts an absent scope as well as the two names, because an absent
+// scope is what every manifest written before fleet declarations sends and it
+// means the same as ScopeNode.
+func validScope(scope string) bool {
+	switch scope {
+	case "", models.ScopeNode, models.ScopeFleet:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateQueries(queries []models.Query) error {
@@ -146,6 +254,8 @@ func validateQuery(query models.Query) error {
 		return fmt.Errorf("%w: query name %q is longer than %d bytes", ErrInvalidDeclaration, query.Name, maxQueryNameLength)
 	case !queryNamePattern.MatchString(query.Name):
 		return fmt.Errorf("%w: query name %q must be lowercase alphanumerics plus _ . or -", ErrInvalidDeclaration, query.Name)
+	case !validScope(query.Scope):
+		return fmt.Errorf("%w: query %q has scope %q, which is neither %q nor %q", ErrInvalidDeclaration, query.Name, query.Scope, models.ScopeNode, models.ScopeFleet)
 	}
 
 	if err := validatePipeline(query); err != nil {

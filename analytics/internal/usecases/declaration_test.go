@@ -13,11 +13,13 @@ import (
 // query is a pointer so the struct's pointer-bearing fields stay small; the
 // value it points at is the caller's, which is all a fake needs.
 type fakeStore struct {
-	query     *models.DeclaredQuery
-	upsertErr error
-	queryErr  error
-	stored    []models.Declaration
-	infos     []models.QueryInfo
+	query       *models.DeclaredQuery
+	upsertErr   error
+	queryErr    error
+	nodeType    string
+	collections []string
+	stored      []models.Declaration
+	infos       []models.QueryInfo
 }
 
 func (f *fakeStore) UpsertDeclaration(_ context.Context, decl models.Declaration) error {
@@ -46,6 +48,20 @@ func (f *fakeStore) SelectQuery(_ context.Context, _ uuid.UUID, _ string) (model
 	}
 
 	return *f.query, f.queryErr
+}
+
+func (f *fakeStore) SelectNodeType(_ context.Context, _ uuid.UUID) (string, error) {
+	return f.nodeType, f.queryErr
+}
+
+func (f *fakeStore) SelectFleetCollections(_ context.Context, _ string, _ []uuid.UUID, out *[]string) (int, error) {
+	if f.queryErr != nil {
+		return 0, f.queryErr
+	}
+
+	*out = append((*out)[:0], f.collections...)
+
+	return len(f.collections), nil
 }
 
 // validDeclaration is the baseline every rejection case mutates, so a case only
@@ -107,6 +123,35 @@ func TestDeclareRejectsAnUnusableManifest(t *testing.T) {
 			name:   "an upper-case query name",
 			mutate: func(d *models.Declaration) { d.Queries[0].Name = "Detail" },
 			want:   "must be lowercase",
+		},
+		{
+			name:   "a scope that is neither of the two",
+			mutate: func(d *models.Declaration) { d.Queries[0].Scope = "cluster" },
+			want:   "which is neither",
+		},
+		{
+			name: "a fleet query with no node type",
+			mutate: func(d *models.Declaration) {
+				d.Queries[0].Scope = models.ScopeFleet
+				d.NodeType = ""
+			},
+			want: "a fleet query needs node_type",
+		},
+		{
+			name: "a node type with an upper-case letter",
+			mutate: func(d *models.Declaration) {
+				d.Queries[0].Scope = models.ScopeFleet
+				d.NodeType = "Bustle"
+			},
+			want: "must be lowercase",
+		},
+		{
+			name: "an overlong node type",
+			mutate: func(d *models.Declaration) {
+				d.Queries[0].Scope = models.ScopeFleet
+				d.NodeType = strings.Repeat("t", maxNodeTypeLength+1)
+			},
+			want: "longer than",
 		},
 		{
 			name:   "an overlong query name",
@@ -282,12 +327,108 @@ func TestGetQueryPassesTheDeclaredQueryThrough(t *testing.T) {
 	}
 	store := &fakeStore{query: &want}
 
-	got, err := NewDeclaration(store).GetQuery(context.Background(), uuid.New(), "detail")
+	got, err := NewDeclaration(store).GetQuery(context.Background(), uuid.New(), "detail", nil)
 	if err != nil {
 		t.Fatalf("get query: %v", err)
 	}
 
 	if got.Collection != want.Collection || got.Query.Name != want.Query.Name {
 		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// A fleet query needs a node type, and a node-scoped one does not: a node that
+// declares nothing fleet has no reason to name a type, and demanding one would
+// break every node written before fleet declarations existed.
+func TestDeclareAcceptsAFleetManifest(t *testing.T) {
+	store := &fakeStore{}
+	decl := validDeclaration()
+	decl.NodeType = "bustle"
+	decl.Queries[0].Scope = models.ScopeFleet
+
+	if err := NewDeclaration(store).Declare(context.Background(), decl); err != nil {
+		t.Fatalf("declare a fleet manifest: %v", err)
+	}
+
+	if len(store.stored) != 1 || store.stored[0].NodeType != "bustle" {
+		t.Fatalf("stored %+v, want the manifest with its node type", store.stored)
+	}
+}
+
+// A fleet query is answered from the caller's own nodes, resolved through the
+// registry. The manifest names no collection, so this resolution is the only
+// thing standing between a caller and another user's documents.
+func TestGetQueryResolvesAFleetToTheCallersCollections(t *testing.T) {
+	store := &fakeStore{
+		query: &models.DeclaredQuery{
+			Collection: "declarers-own",
+			Scope:      models.ScopeFleet,
+			Query: models.Query{
+				Name:     "fleet_activity",
+				Scope:    models.ScopeFleet,
+				Pipeline: []byte(`[{"$limit":1}]`),
+			},
+		},
+		nodeType:    "bustle",
+		collections: []string{"aaa", "bbb"},
+	}
+
+	declared, err := NewDeclaration(store).GetQuery(context.Background(), uuid.New(), "fleet_activity", []uuid.UUID{uuid.New(), uuid.New()})
+	if err != nil {
+		t.Fatalf("get query: %v", err)
+	}
+
+	if len(declared.Collections) != 2 || declared.Collections[1] != "bbb" {
+		t.Fatalf("fleet resolved to %v", declared.Collections)
+	}
+
+	// The collection the executor starts from has to be a member, not the
+	// declarer's own: the declaring node may be one the caller cannot read.
+	if declared.Collection != "aaa" {
+		t.Fatalf("the fleet reads %q first, want the caller's first member", declared.Collection)
+	}
+}
+
+// An empty fleet is a refusal, not an empty report. The query exists and is well
+// formed; the caller simply owns no node of that type that has declared itself,
+// and answering with the empty shape would read as a fleet that saw nothing.
+func TestGetQueryRefusesAFleetWithNoMembers(t *testing.T) {
+	store := &fakeStore{
+		query: &models.DeclaredQuery{
+			Scope: models.ScopeFleet,
+			Query: models.Query{Name: "fleet_activity", Scope: models.ScopeFleet, Pipeline: []byte(`[]`)},
+		},
+		nodeType: "bustle",
+	}
+
+	_, err := NewDeclaration(store).GetQuery(context.Background(), uuid.New(), "fleet_activity", []uuid.UUID{uuid.New()})
+	if !errors.Is(err, models.ErrEmptyFleet) {
+		t.Fatalf("got %v, want ErrEmptyFleet", err)
+	}
+}
+
+// The fleet list travels with every query, because the hub does not know which
+// scope a name has. A node-scoped query ignores it rather than refusing it: a
+// list that was sent anyway is not a mistake worth failing a report over.
+func TestGetQueryIgnoresTheFleetForANodeScopedQuery(t *testing.T) {
+	store := &fakeStore{
+		query: &models.DeclaredQuery{
+			Collection: "own",
+			Query:      models.Query{Name: "detail", Pipeline: []byte(`[]`)},
+		},
+		collections: []string{"should", "not", "appear"},
+	}
+
+	declared, err := NewDeclaration(store).GetQuery(context.Background(), uuid.New(), "detail", []uuid.UUID{uuid.New()})
+	if err != nil {
+		t.Fatalf("get query: %v", err)
+	}
+
+	if declared.Collection != "own" || len(declared.Collections) != 0 {
+		t.Fatalf("a node-scoped query resolved to %+v", declared)
+	}
+
+	if declared.Scope != models.ScopeNode {
+		t.Fatalf("scope is %q, want %q", declared.Scope, models.ScopeNode)
 	}
 }

@@ -39,7 +39,7 @@ type fakeDeclarations2 struct {
 	err   error
 }
 
-func (f fakeDeclarations2) GetQuery(context.Context, uuid.UUID, string) (models.DeclaredQuery, error) {
+func (f fakeDeclarations2) GetQuery(context.Context, uuid.UUID, string, []uuid.UUID) (models.DeclaredQuery, error) {
 	if f.query == nil {
 		return models.DeclaredQuery{}, f.err
 	}
@@ -276,5 +276,103 @@ func TestExecutePassesAStorageFailureThrough(t *testing.T) {
 		if !errors.Is(err, want) {
 			t.Fatalf("got %v, want %v", err, want)
 		}
+	}
+}
+
+// fleetDeclared is a fleet-scoped declaration over the given member collections.
+func fleetDeclared(pipeline string, collections ...string) *models.DeclaredQuery {
+	return &models.DeclaredQuery{
+		Collection:  collections[0],
+		Scope:       models.ScopeFleet,
+		Collections: collections,
+		Query: models.Query{
+			Name:     "fleet_activity",
+			Scope:    models.ScopeFleet,
+			Pipeline: json.RawMessage(pipeline),
+		},
+	}
+}
+
+// The union has to be prepended, not appended: the node's $match, $group and
+// $facet have to see every member's documents, not the result of having already
+// aggregated one collection.
+func TestExecuteUnionsTheFleetBeforeThePipeline(t *testing.T) {
+	store := &fakeQuery{}
+
+	var out json.RawMessage
+
+	err := NewQuery(store, fakeDeclarations2{query: fleetDeclared(`[{"$count":"n"}]`, "aaa", "bbb", "ccc")}).
+		Execute(context.Background(), models.AnalyticsQueryRequest{NodeID: uuid.New(), QueryName: "fleet_activity"}, &out)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var stages []map[string]any
+
+	if err = json.Unmarshal([]byte(store.pipeline), &stages); err != nil {
+		t.Fatalf("pipeline is not a pipeline: %v (%s)", err, store.pipeline)
+	}
+
+	if len(stages) != 4 {
+		t.Fatalf("pipeline has %d stages, want two unions plus the query plus the cap: %s", len(stages), store.pipeline)
+	}
+
+	// The first member is the collection the aggregate starts from, so only the
+	// remaining ones become unions.
+	for i, want := range []string{"bbb", "ccc"} {
+		union, ok := stages[i]["$unionWith"].(map[string]any)
+		if !ok || union["coll"] != want {
+			t.Fatalf("stage %d is %v, want a union with %q", i, stages[i], want)
+		}
+	}
+
+	if _, ok := stages[2]["$count"]; !ok {
+		t.Fatalf("the node's own pipeline is not after the unions: %s", store.pipeline)
+	}
+
+	// The collection handed to the driver is a member, never the declarer's own:
+	// the node that declared the fleet query may be one the caller cannot read.
+	if store.collection != "aaa" {
+		t.Fatalf("aggregated %q, want the first member", store.collection)
+	}
+}
+
+// A fleet of one is the plain query: a $unionWith with nothing to union would be
+// a stage that does nothing, and a fleet that resolves to one collection is
+// exactly the single-node deployment.
+func TestExecuteAddsNoUnionForASingleCollectionFleet(t *testing.T) {
+	store := &fakeQuery{}
+
+	var out json.RawMessage
+
+	err := NewQuery(store, fakeDeclarations2{query: fleetDeclared(`[{"$count":"n"}]`, "aaa")}).
+		Execute(context.Background(), models.AnalyticsQueryRequest{NodeID: uuid.New(), QueryName: "fleet_activity"}, &out)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if strings.Contains(store.pipeline, "$unionWith") {
+		t.Fatalf("a one-collection fleet still unions: %s", store.pipeline)
+	}
+}
+
+// The service is the only thing allowed to add a $unionWith. A manifest that
+// brings its own is still refused -- the allowlist runs before the union is
+// prepended, and this pins that the two do not get confused.
+func TestAFleetQueryCannotSmuggleItsOwnUnion(t *testing.T) {
+	store := &fakeQuery{}
+
+	var out json.RawMessage
+
+	err := NewQuery(store, fakeDeclarations2{
+		query: fleetDeclared(`[{"$unionWith":{"coll":"stolen"}}]`, "aaa", "bbb"),
+	}).Execute(context.Background(), models.AnalyticsQueryRequest{NodeID: uuid.New(), QueryName: "fleet_activity"}, &out)
+
+	if !errors.Is(err, ErrInvalidPipeline) {
+		t.Fatalf("got %v, want ErrInvalidPipeline", err)
+	}
+
+	if store.pipeline != "" {
+		t.Fatalf("a refused pipeline still reached the driver: %s", store.pipeline)
 	}
 }

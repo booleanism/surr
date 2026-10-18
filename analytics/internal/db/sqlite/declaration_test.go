@@ -332,3 +332,199 @@ func TestDeclarationsAreScopedToTheirNode(t *testing.T) {
 		t.Fatalf("node %s sees %d names %v, want none", second, n, names)
 	}
 }
+
+// fleetDeclaration is a manifest with one node-scoped query and one that reads
+// across nodes, which is what a real node type declares.
+func fleetDeclaration(nodeID uuid.UUID, nodeType, collection string) models.Declaration {
+	return fleetDeclarationNamed(nodeID, nodeType, collection, "fleet_activity")
+}
+
+// fleetDeclarationNamed takes the fleet query's name so a test can tell one
+// type's rollup from another's. Two types declaring the same name is the case
+// that would hide a cross-type leak behind a name match.
+func fleetDeclarationNamed(nodeID uuid.UUID, nodeType, collection, fleetName string) models.Declaration {
+	return models.Declaration{
+		NodeID:     nodeID,
+		NodeType:   nodeType,
+		Collection: collection,
+		Queries: []models.Query{
+			{
+				Name:     "activity_by_class",
+				Pipeline: []byte(`[{"$match":{"node.id":"x"}}]`),
+			},
+			{
+				Name:     fleetName,
+				Scope:    models.ScopeFleet,
+				Pipeline: []byte(`[{"$match":{"$expr":{}}}]`),
+			},
+		},
+	}
+}
+
+// The type's fleet manifest is a set owned by the type, so the node that
+// declares one replaces whatever the type had -- including a query the new
+// manifest no longer lists. Without that, a fleet query from a retired build
+// would stay answerable forever: the node that declared it is not the node that
+// would have to undeclare it.
+func TestAFleetReDeclareReplacesTheTypesWholeManifest(t *testing.T) {
+	store := newTestDeclaration(t)
+	ctx := context.Background()
+
+	first, second := uuid.New(), uuid.New()
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclaration(first, "bustle", "aaa")); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclarationNamed(second, "bustle", "bbb", "fleet_renamed")); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	// The type's set is replaced, not accumulated: the first node's rollup is
+	// gone even though that node never re-declared.
+	if _, err := store.SelectQuery(ctx, second, "fleet_activity"); !errors.Is(err, ErrDeclarationNotFound) {
+		t.Fatalf("a fleet query the type no longer declares still answers: %v", err)
+	}
+
+	if _, err := store.SelectQuery(ctx, second, "fleet_renamed"); err != nil {
+		t.Fatalf("the replacing fleet query does not answer: %v", err)
+	}
+}
+
+// A node that declares no fleet query must leave the type's fleet manifest
+// alone. Otherwise every node of a type could erase the fleet rollup by
+// re-declaring itself, and the query would vanish as soon as one node restarted.
+func TestANodeWithoutAFleetQueryLeavesTheFleetManifestAlone(t *testing.T) {
+	store := newTestDeclaration(t)
+	ctx := context.Background()
+
+	declarer, plain := uuid.New(), uuid.New()
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclaration(declarer, "bustle", "aaa")); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+
+	withoutFleet := testDeclaration(plain)
+	withoutFleet.NodeType = "bustle"
+
+	if err := store.UpsertDeclaration(ctx, withoutFleet); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	declared, err := store.SelectQuery(ctx, plain, "fleet_activity")
+	if err != nil {
+		t.Fatalf("the fleet query disappeared: %v", err)
+	}
+
+	if declared.Scope != models.ScopeFleet {
+		t.Fatalf("the fleet query came back with scope %q", declared.Scope)
+	}
+}
+
+// A fleet query is not the declaring node's: any node of the type can run it.
+// That is the whole point -- the node that published it may be the one that
+// restarted.
+func TestAFleetQueryIsVisibleToEveryNodeOfItsType(t *testing.T) {
+	store := newTestDeclaration(t)
+	ctx := context.Background()
+
+	declarer, sibling, stranger := uuid.New(), uuid.New(), uuid.New()
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclaration(declarer, "bustle", "aaa")); err != nil {
+		t.Fatalf("declarer upsert: %v", err)
+	}
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclaration(sibling, "bustle", "bbb")); err != nil {
+		t.Fatalf("sibling upsert: %v", err)
+	}
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclarationNamed(stranger, "plate", "ccc", "plate_fleet")); err != nil {
+		t.Fatalf("stranger upsert: %v", err)
+	}
+
+	if names := queryInfoNames(t, store, sibling); len(names) != 2 || names[1] != "fleet_activity" {
+		t.Fatalf("a bustle node sees %v, want its own query plus the fleet one", names)
+	}
+
+	// The fleet query belongs to the type, so a node of another type neither
+	// sees it nor can run it.
+	if names := queryInfoNames(t, store, stranger); len(names) != 2 || names[1] != "plate_fleet" {
+		t.Fatalf("a plate node sees %v, want its own query plus plate_fleet", names)
+	}
+
+	if _, err := store.SelectQuery(ctx, stranger, "fleet_activity"); !errors.Is(err, ErrDeclarationNotFound) {
+		t.Fatalf("a plate node can run the bustle fleet query: %v", err)
+	}
+}
+
+// queryInfoNames is the query names one node may run, sorted as the store
+// returns them.
+func queryInfoNames(t *testing.T, store declaration, nodeID uuid.UUID) []string {
+	t.Helper()
+
+	infos := make([]models.QueryInfo, 0, 8)
+
+	if _, err := store.SelectQueryInfos(context.Background(), nodeID, &infos); err != nil {
+		t.Fatalf("select query infos: %v", err)
+	}
+
+	names := make([]string, 0, len(infos))
+
+	for _, info := range infos {
+		names = append(names, info.Name)
+	}
+
+	return names
+}
+
+// Membership is the intersection of the type the registry knows and the ids the
+// caller is allowed to read. Neither alone is enough: without the type a caller
+// could union another node type's collection, and without the ids it could read
+// another user's nodes.
+func TestFleetMembersAreTheCallersNodesOfThatType(t *testing.T) {
+	store := newTestDeclaration(t)
+	ctx := context.Background()
+
+	mine, theirs, otherType := uuid.New(), uuid.New(), uuid.New()
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclaration(mine, "bustle", "mine")); err != nil {
+		t.Fatalf("mine: %v", err)
+	}
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclaration(theirs, "bustle", "theirs")); err != nil {
+		t.Fatalf("theirs: %v", err)
+	}
+
+	if err := store.UpsertDeclaration(ctx, fleetDeclaration(otherType, "plate", "other")); err != nil {
+		t.Fatalf("other type: %v", err)
+	}
+
+	collections := make([]string, 0, 8)
+
+	n, err := store.SelectFleetCollections(ctx, "bustle", []uuid.UUID{mine, otherType}, &collections)
+	if err != nil {
+		t.Fatalf("select fleet collections: %v", err)
+	}
+
+	if n != 1 || len(collections) != 1 || collections[0] != "mine" {
+		t.Fatalf("fleet is %v, want just the caller's own bustle collection", collections)
+	}
+}
+
+// A node that declared nothing has no collection, so it is not a member -- the
+// same rule that makes a fleet query unavailable to a node that never introduced
+// itself.
+func TestFleetMembersExcludeANodeThatNeverDeclared(t *testing.T) {
+	store := newTestDeclaration(t)
+
+	collections := make([]string, 0, 8)
+
+	n, err := store.SelectFleetCollections(context.Background(), "bustle", []uuid.UUID{uuid.New()}, &collections)
+	if err != nil {
+		t.Fatalf("select fleet collections: %v", err)
+	}
+
+	if n != 0 {
+		t.Fatalf("fleet has %d collections %v, want none", n, collections)
+	}
+}

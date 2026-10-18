@@ -41,6 +41,12 @@ const (
 	// pipeline whose stage count the cap cannot see.
 	maxFacetDepth = 2
 
+	// maxFleetMembers bounds how many collections one fleet query unions. A
+	// union is a stage, and the fleet's size is not something this service
+	// controls, so the cap is what stops a large deployment from turning one
+	// request into an unbounded aggregation.
+	maxFleetMembers = 16
+
 	// maxResultDocuments and maxResultBytes bound what one query may return.
 	// Both are enforced by the executor, not by the pipeline, because a pipeline
 	// that omits $limit would otherwise return the whole collection.
@@ -98,7 +104,7 @@ type Query interface {
 // separate from the storage interface of the same shape so a test can stand in
 // for the whole declaration path, not just its last step.
 type Declarations interface {
-	GetQuery(ctx context.Context, nodeID uuid.UUID, name string) (models.DeclaredQuery, error)
+	GetQuery(ctx context.Context, nodeID uuid.UUID, name string, fleet []uuid.UUID) (models.DeclaredQuery, error)
 }
 
 type query struct {
@@ -121,7 +127,7 @@ func NewQuery(q Query, d Declarations) query {
 // because the stored row may have been written by an older build of this
 // service whose rules were looser.
 func (q query) Execute(ctx context.Context, req models.AnalyticsQueryRequest, out *json.RawMessage) error {
-	declared, err := q.d.GetQuery(ctx, req.NodeID, req.QueryName)
+	declared, err := q.d.GetQuery(ctx, req.NodeID, req.QueryName, req.Fleet)
 	if err != nil {
 		return err
 	}
@@ -143,6 +149,13 @@ func (q query) Execute(ctx context.Context, req models.AnalyticsQueryRequest, ou
 		return err
 	}
 
+	if declared.Query.IsFleet() {
+		stages, err = unionStages(stages, declared.Collections)
+		if err != nil {
+			return err
+		}
+	}
+
 	// The cap is appended rather than merged into the manifest's own $limit: the
 	// node's limit may be larger or absent, and appending is the only form that
 	// cannot be widened by the pipeline it is meant to bound.
@@ -161,6 +174,50 @@ func (q query) Execute(ctx context.Context, req models.AnalyticsQueryRequest, ou
 	*out = res
 
 	return nil
+}
+
+// unionStages prepends one $unionWith per member collection beyond the first, so
+// the node's own pipeline runs over the whole fleet rather than over one node's
+// documents.
+//
+// This is the ONLY place a $unionWith reaches a pipeline, and it is why the
+// allowlist can keep denying it: the collections named here come from this
+// service's registry, resolved from the caller's authorized node ids, and never
+// from the manifest. A node that sent $unionWith in its own pipeline is still
+// refused by the checker, which has already run by the time this is called.
+//
+// Prepending rather than appending is what makes the semantics right: the
+// node's $match, $group and $facet have to see the unioned documents, not the
+// result of having already aggregated one collection.
+func unionStages(stages []json.RawMessage, collections []string) ([]json.RawMessage, error) {
+	if len(collections) <= 1 {
+		return stages, nil
+	}
+
+	if len(collections) > maxFleetMembers {
+		return nil, fmt.Errorf("%w: a fleet of %d nodes is more than the %d this service unions", ErrInvalidPipeline, len(collections), maxFleetMembers)
+	}
+
+	// The member list is bounded, but the total is still the node's pipeline plus
+	// one stage per member, so the combined count is checked against its own bound
+	// rather than against maxPipelineStages -- which is a limit on what a manifest
+	// may declare, not on what the service adds.
+	if len(stages)+len(collections)-1 > maxPipelineStages+maxFleetMembers {
+		return nil, fmt.Errorf("%w: %d stages after the fleet union", ErrInvalidPipeline, len(stages)+len(collections)-1)
+	}
+
+	unions := make([]json.RawMessage, 0, len(collections)-1)
+
+	for _, collection := range collections[1:] {
+		stage, err := json.Marshal(map[string]any{"$unionWith": map[string]any{"coll": collection}})
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidPipeline, err)
+		}
+
+		unions = append(unions, stage)
+	}
+
+	return append(unions, stages...), nil
 }
 
 // pipelineChecker walks an aggregation pipeline and refuses anything this
