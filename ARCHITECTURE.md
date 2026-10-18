@@ -634,8 +634,9 @@ runtime lives in `lib/core/node.py` and owns boot/registration/shutdown (the
 `Worker.registered()` hook is where `analytics.declare` will be published), the
 decode chain is a parameter, the frame-worker busy-loop is gone, and
 `BustleHandlers` is an ordinary object constructed with its dependencies rather
-than a class-attribute singleton (A1). Remaining: packaging and the
-"add a node type" recipe (A5).
+than a class-attribute singleton (A1). The recipe for a second type is
+[nodes/README.md](nodes/README.md). Remaining: A4 (opt-in periodic
+re-registration) and the packaging item.
 
 ### 3. Structured logging (zerolog) — ✅ implemented
 

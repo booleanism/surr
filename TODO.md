@@ -139,10 +139,21 @@ Ordered stages; each lands independently and is wire-compatible.
 - [ ] A4. Lifecycle hardening (opt-in only)
   - [ ] Periodic re-registration (--reregister flag, default off; hub upsert
         is idempotent so this is safe)
-- [ ] A5. Packaging/docs
-  - [ ] pyproject entry point (bustle = bustle:main)
-  - [ ] nodes/README: "add a node type" recipe — decode chain + processing
-        loop + document shape + query manifest; everything else inherited
+- [x] A5. Packaging/docs
+  - [ ] pyproject entry point (bustle = bustle:main) — **deliberately not done**.
+        A console script needs an installable project, so `[tool.uv] package`
+        would flip to true and a wheel would install `lib/` as a *top-level*
+        package into `.venv`. `lib` is a generic name to squat on, and it
+        creates exactly the hazard the four Go `replace` directives already
+        taught: an installed copy shadowing the edited source tree, silently.
+        `uv run python nodes/bustle.py` and the container's
+        `ENTRYPOINT ["python", "nodes/bustle.py"]` both already work, so the
+        entry point buys an alias at the cost of a second import path.
+  - [x] nodes/README: "add a node type" recipe — decode chain + processing
+        loop + document shape + query manifest; everything else inherited.
+        Also records what the runtime owns, the shutdown order and why it is
+        that order, the executor's stage allowlist / size caps / facet-nesting
+        rules, the flag table, and a checklist.
 
 Out of scope for A (deliberate): sibling-registry TTL/sweep (cross-language,
 Go + Python, its own branch); renames of lib/ layout; async rewrite of the

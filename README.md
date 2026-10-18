@@ -94,6 +94,10 @@ so `[tool.uv] package = false` keeps `uv sync` to dependencies only.
 uv run python nodes/bustle.py --help    # run the node from the repo root
 ```
 
+[nodes/README.md](nodes/README.md) is the recipe for a second node type: the
+four things a type supplies (decode chain, processing loop, document shape,
+query manifest) and everything it inherits from `lib/core` instead.
+
 `make build` builds each service into `bin/surr-<name>` (`bin/surr-hub`,
 `bin/surr-rx`, `bin/surr-subscriptions`, `bin/surr-analytics`, `bin/surr-tx`).
 Individual targets: `make build-hub`, `make build-rx`, `make build-subscriptions`,
