@@ -82,3 +82,55 @@ type AnalyticsQueryRequest struct {
 	QueryName string         `json:"query_name"`
 	NodeID    uuid.UUID      `json:"node_id"`
 }
+
+// QueryInfo is one declared query as the analytics service advertises it.
+//
+// The pipeline is deliberately absent. A caller that runs a query names it; it
+// never needs to see the aggregation, and a list that carried every pipeline
+// would put the node's document shape into the control plane for no gain.
+//
+// Field order follows the same rule as Query's; see the note there.
+type QueryInfo struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	ParamsSchema json.RawMessage `json:"params_schema,omitempty"`
+}
+
+// AnalyticsWindow is the time range a report covers, echoed back so a caller can
+// label its charts without repeating the arithmetic that produced them.
+// Field order follows the same rule as Query's; see the note there.
+type AnalyticsWindow struct {
+	TimeCluster string `json:"time_cluster"`
+	StartTime   string `json:"start_time"`
+	UnitTime    string `json:"unit_time"`
+}
+
+// AnalyticsQueryResult is one declared query's answer, under its own name.
+//
+// Data is the rows exactly as the aggregation produced them, and Error names why
+// this one query could not be run. A report is a list rather than a fixed pair
+// of fields because the charts belong to the node type: a future detector with a
+// different story to tell declares different queries and the endpoint carries
+// them without changing. One failing query is reported here instead of failing
+// the whole report, so a manifest that names one chart the endpoint cannot
+// parameterise does not cost the caller every other chart it did publish.
+// Field order follows the same rule as Query's; see the note there.
+type AnalyticsQueryResult struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Data        json.RawMessage `json:"data,omitempty"`
+}
+
+// AnalyticsReport is the body GET /nodes/analytics returns.
+//
+// Rows stay raw JSON rather than typed structs: the hub proxies aggregations it
+// did not write, so decoding them would make every node's document shape a
+// change to the control plane. It also keeps the chart-library mapping out of
+// the stack entirely -- the caller decides what to draw, which is what
+// invariant 8 asks for.
+// Field order follows the same rule as Query's; see the note there.
+type AnalyticsReport struct {
+	Window  AnalyticsWindow        `json:"window"`
+	Queries []AnalyticsQueryResult `json:"queries"`
+}
