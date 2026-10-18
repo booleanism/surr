@@ -31,7 +31,8 @@ ENV UV_COMPILE_BYTECODE=1 \
 # compile against these headers on every cold build.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential \
       pkg-config \
@@ -64,7 +65,8 @@ ARG VERSION=unknown
 # would only wipe the cache.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       libglib2.0-0 \

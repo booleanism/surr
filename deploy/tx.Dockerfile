@@ -79,7 +79,8 @@ ARG GST_PLUGINS_RS_TAG=gstreamer-1.26.11
 # plugins-base dev package in addition to the core one.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       git \
@@ -125,7 +126,8 @@ ARG VERSION=unknown
 # needs headers.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
       libgstreamer1.0-dev
@@ -156,7 +158,8 @@ FROM debian:trixie-slim
 # would only wipe the cache.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
       gstreamer1.0-tools \

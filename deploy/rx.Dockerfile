@@ -26,7 +26,8 @@ ARG VERSION=unknown
 # would only wipe the cache.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends libsrt-openssl-dev
 
 WORKDIR /src
@@ -51,7 +52,8 @@ FROM debian:trixie-slim
 # would only wipe the cache.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    apt-get update \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libsrt1.5-openssl \
  && useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin surr
 
