@@ -316,12 +316,13 @@ Cross-cutting conventions:
   bind `uuid.UUID` values (→ TEXT) while the read path bound `ID[:]` (→ BLOB),
   so membership lookups matched nothing (§A0).
 
-### 11. Analytics service: writer-owned queries (planned, not on `main`)
+### 11. Analytics service: writer-owned queries (service built, cutover pending)
 
-Not yet implemented on `main` — designed, agreed, tracked in TODO.md. A first
-attempt exists as dangling commits / a stash from the abandoned
-`feat/analytics-service` branch. This section records the decision so the
-implementation follows it.
+The service is built, tested and deployed (TODO.md B1–B3); what is not built is
+the node side that declares (B4, which waits on §12) and the hub cutover (B5).
+This section records the decision so the remaining steps follow it. An earlier
+first attempt survives as dangling commits and a stash from the abandoned
+`feat/analytics-service` branch; it was not the base of this one.
 
 **Problem.** Today each node type owns both the write path (document shape)
 and the read path (`<node-id>.sink.analytics` with type-specific aggregation
@@ -383,6 +384,24 @@ now.
   whitelist (deny `$out`/`$merge`/`$unionWith`), a stage cap, and a
   result-size cap in one executor function. This is the design's one real
   security surface.
+
+  **As built** (`analytics/internal/usecases/query.go`) that surface is an
+  *allowlist* of eighteen read-only stages rather than a blocklist, because a
+  blocklist loses to nesting: `$facet` can hold a writing stage inside a
+  pipeline whose outer shape looks read-only, so the contents of a `$facet` are
+  validated recursively against the same list. `$lookup` and `$graphLookup` are
+  excluded too — read-only, but they read other nodes' collections. Alongside
+  the allowlist: a 24-stage cap, a `$limit` **appended** rather than merged (a
+  manifest without one cannot return a whole collection), and a
+  2000-document / 1 MiB result cap enforced by the Mongo adapter as it reads the
+  cursor, so an over-cap query stops reading instead of building the answer and
+  discarding it.
+- Parameter substitution happens on the pipeline's **raw bytes**, not on a
+  decoded Go map. A map would lose `$sort` operand order, and `{"a":1,"b":-1}`
+  sorts differently from `{"b":-1,"a":1}` — the query's meaning would change
+  between declare and execute. The pipeline is carried as `json.RawMessage` from
+  the registry to the executor and decoded into `[]bson.D` only at the driver
+  boundary, which preserves order for the same reason.
 - Query names become part of the wire contract between node author and
   presentation layer — hence `analytics.queries.list` is part of the design,
   not decoration.

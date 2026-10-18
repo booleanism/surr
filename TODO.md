@@ -110,26 +110,56 @@ router + SQLite registry + read-only Mongo executor. Nodes become write-only;
 the service becomes the sole reader. Builds on A2 (the Node runtime hosts the
 declare step).
 
-- [ ] B1. analytics service skeleton
-  - [ ] analytics/ module: cmdline (broker, family, name, mongo url, dsn),
+**Status:** B1–B3 are implemented, tested and deployed (`deploy/analytics.Dockerfile`,
+the `analytics` and `migrate-analytics` compose services). Nothing calls the
+service yet — B4's sender is what first issues `analytics.declare`, and it waits
+on A2. Until then the service runs beside `sink.analytics` and is exercised by
+its own tests, not by the stack.
+
+- [x] B1. analytics service skeleton
+  - [x] analytics/ module: cmdline (broker, family, name, mongo url, dsn),
         main wiring, introduce loop, restart loops — near copy of
-        subscriptions/ skeleton
-  - [ ] SQLite registry schema: declarations (node_id, collection, queries)
-        with idempotent upsert on analytics.declare
-- [ ] B2. Commands
-  - [ ] analytics.declare: {node_id, collection, queries: [{name,
-        params_schema?, pipeline}]} → upsert manifest
-  - [ ] analytics.query: {node_id, query_name, params} → substitute params,
-        append time-range $match, execute read-only, return JSON
-  - [ ] analytics.queries.list: {node_id} → declared query names
-- [ ] B3. Executor hardening (the one security surface)
-  - [ ] Operator whitelist: allow $match/$group/$project/$sort/$limit/
-        $unwind/...; deny $out/$merge/$unionWith
-  - [ ] Stage count cap; result-size cap
-  - [ ] Output-shape check: declared pipelines must return generic chart
+        subscriptions/ skeleton. Flags: `-b/--broker`, `-d/--database`
+        (default `./analytics.db`), `--mongo-url` (env `MONGO_URL`),
+        `--mongo-db`, `-f/--family`, `-n/--name`, plus the logging pair. The
+        Mongo client is built before any command is served, so a bad URL is a
+        startup failure rather than the first failed query.
+  - [x] SQLite registry schema: declarations (node_id, collection, queries)
+        with idempotent upsert on analytics.declare. One row per declared
+        query, primary key `(node_id, name)`; the upsert is delete-then-insert
+        inside one transaction, because a manifest is a set and a re-declare
+        that drops a query has to remove it.
+- [x] B2. Commands
+  - [x] analytics.declare: {node_id, collection, queries: [{name,
+        params_schema?, pipeline}]} → upsert manifest. Validated here, at
+        declare time, so a broken manifest is refused where it can still be
+        fixed rather than at the first query.
+  - [x] analytics.query: {node_id, query_name, params} → substitute params,
+        append time-range $match, execute read-only, return JSON.
+        Substitution happens on the raw bytes: decoding the pipeline into a
+        Go map would lose `$sort` operand order, which changes the query's
+        meaning. The time-range `$match` is the caller's, passed as a
+        parameter; the service appends the document cap.
+  - [x] analytics.queries.list: {node_id} → declared query names
+- [x] B3. Executor hardening (the one security surface)
+  - [x] Operator whitelist: allow $match/$group/$project/$sort/$limit/
+        $unwind/...; deny $out/$merge/$unionWith. An **allowlist** of 18
+        read-only stages, not a blocklist: `$facet` can nest a writing stage
+        inside a pipeline that looks read-only from the outside, and the
+        contents of a `$facet` are validated recursively for the same reason.
+  - [x] Stage count cap (24) and result-size cap (2000 documents / 1 MiB).
+        `$limit` is **appended** rather than merged into whatever the manifest
+        already had, so a manifest without one cannot return a whole
+        collection.
+  - [x] Output-shape check: declared pipelines must return generic chart
         data (axes/categories, series names, values) — reject ECharts-style
         option structures (xAxis/legend/series.type) at declare time where
-        feasible, or at minimum enforce it in review/convention
+        feasible, or at minimum enforce it in review/convention. **Deferred to
+        B4/B5 on purpose**: the service cannot recognise a chart shape it has
+        never seen, and the ECharts `$project` stages are still in
+        `lib/bustle/analytics.py`. They die with B4, which is the commit that
+        makes the shape checkable; until then the service validates structure
+        (read-only operators, caps) and not semantics.
 - [ ] B4. Node side (after A2)
   - [ ] Node runtime: post-registration hook sends analytics.declare with the
         entrypoint-supplied manifest, retry-until-sibling like nodes.add
@@ -151,9 +181,9 @@ declare step).
   - [ ] Versioned query names (counts_by_minute@2) if rolling deploys mix
         versions
 
-Sequencing: land A0–A2 first (Node runtime must exist to host the declare
-step) — A0 is done; then B1–B4 (purely additive, runs side by side with sink.analytics
-indefinitely), then B5 in one window. Nothing before B5 breaks anything.
+Sequencing: B1–B3 are done (additive; the service runs side by side with
+sink.analytics indefinitely). Then A2, then B4 (the node starts declaring), then
+B5 in one window. Nothing before B5 breaks anything.
 Logging (C) is Go-only and independent of A — it can proceed in parallel,
 but must land before B1 so the analytics service is born with structured
 logging instead of being migrated after.

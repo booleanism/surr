@@ -30,12 +30,13 @@ SRT ("data plane"). Analytics land in MongoDB; control state lives in SQLite.
 | rx       | Go       | `rx/`             | SRT ingress/egress relay and fan-out broker between publishers and AI nodes |
 | hub      | Go       | `hub/`            | Control plane: HTTP API (JWT auth, users, nodes, subscriptions, analytics proxy) + broker commands |
 | subscriptions | Go  | `subscriptions/`  | SQLite-backed subscription registry answering node-membership queries |
+| analytics | Go | `analytics/` | Read path over MongoDB: a SQLite registry of node-declared aggregation queries, and the executor that runs one by name |
 | nodes    | Python   | `nodes/`          | AI workers; `bustle.py` is the object counter (LibreDEIMm) |
 
-A committed `go.work` at the repository root lists all five modules, so they
+A committed `go.work` at the repository root lists all six modules, so they
 share one build list and `go build all` / `go vet all` span the whole
-repository (`go build ./...` still stops at each module boundary). The four
-service modules (`hub`, `rx`, `subscriptions`, `tx`) additionally reach the
+repository (`go build ./...` still stops at each module boundary). The five
+service modules (`hub`, `rx`, `subscriptions`, `analytics`, `tx`) additionally reach the
 shared root packages via `replace github.com/booleanism/surr => ../`, which is
 what keeps a build made outside the workspace (`GOWORK=off`, and every deploy
 Dockerfile) resolvable while the shared module is unpublished. `tx` never joins
@@ -78,8 +79,9 @@ packages (`internal/logging`) at build time.
    analytics service: generic chart data (axes/categories, series names,
    values), with any rendering library chosen by the presentation layer —
    see "Planned evolution" below and DESIGN.md §8/§11.
-   **Planned replacement:** this read path moves to a dedicated analytics
-   service — see "Planned evolution" below and DESIGN.md §11.
+   **Replacement, in progress:** this read path moves to the `analytics`
+   service, which is built and green but not yet on the request path — the
+   cutover is TODO.md B5. See "Planned evolution" below and DESIGN.md §11.
 
 > ⚠️ Steps 3–5 depend on `subscriptions.nodes.get` / `subscriptions.by.nodeid.get`.
 > `subscriptions.add` must write UUIDs in the storage class the lookups bind —
@@ -149,15 +151,18 @@ declares a `[]byte` target and lets encoding/json do the decode.
 | `subscriptions.nodes.all.get` | subscriptions | All currently-subscribed nodes |
 | `<node-id>.sink.start` / `<node-id>.sink.stop` | node | Start/stop the node's SRT pull pipeline |
 | `<node-id>.sink.analytics` | node | Aggregated analytics (currently ECharts-shaped — known flaw, see below) — **planned for removal** |
+| `analytics.declare` | analytics | Node declares its query manifest (collection + named aggregation pipelines); replaces the whole manifest |
+| `analytics.queries.list` | analytics | Discover which queries a node exposes |
+| `analytics.query` | analytics | Execute a declared query by name with parameters; will replace `sink.analytics` at the B5 cutover |
 | `introduce` | everyone | Capability advertisement (protocol-level) |
 
-Planned commands (not yet implemented — see "Planned evolution" and DESIGN.md §11):
-
-| Command | Served by | Purpose |
-|---|---|---|
-| `analytics.declare` | analytics (planned) | Node declares its query manifest (collection + named aggregation pipelines) |
-| `analytics.query` | analytics (planned) | Execute a declared query by name with params; replaces `sink.analytics` |
-| `analytics.queries.list` | analytics (planned) | Discover which queries a node exposes |
+`analytics.query` deliberately takes a query **name**, never a pipeline: the
+aggregation is the node's to define about its own documents, and the service's
+to bound. The bounds are enforced at declare time and again at query time — an
+allowlist of read-only stages (so `$out`, `$merge` and `$unionWith` are absent by
+default, which a blocklist could not guarantee because `$facet` can nest one), a
+stage cap, a `$limit` appended rather than merged, and a document/byte cap on the
+result.
 
 Commands are conventionally named `<subject>.<verb>`; node commands embed the
 node UUID rather than the node's per-instance sibling name
@@ -328,6 +333,38 @@ caller. SQLite access goes through a transaction factory (`internal/db.TXFactory
 No HTTP surface; serves the six `subscriptions.*` broker commands from SQLite.
 Same layering as hub minus HTTP.
 
+### analytics (`analytics/`)
+
+No HTTP surface. Two halves, one process:
+
+- **The declaration registry** (`internal/db/sqlite/declaration.go`) — one row
+  per declared query, primary key `(node_id, name)`. A `analytics.declare`
+  replaces the node's whole manifest in one transaction (delete, then insert),
+  because a manifest is a set: a re-declare that drops a query has to remove it
+  rather than leave a query behind that the node no longer offers. Binds are
+  `nodeID[:]`, the same BLOB storage class every other SQLite path uses.
+- **The executor** (`internal/usecases/query.go` over
+  `internal/db/mongo/query.go`) — resolves a query by name for a node, splices
+  the caller's parameters into the stored pipeline **as raw bytes** (decoding
+  into `map[string]any` would lose `$sort` operand order, which changes the
+  query's meaning), validates it, appends the document cap, and hands it to
+  Mongo as `[]bson.D` (order-preserving, for the same reason).
+
+Hardening lives on both sides of the wire: the manifest is validated at
+**declare** time (`validatePipeline`: a JSON array, non-empty, each stage an
+object holding exactly one operator) so a broken manifest is refused where it
+can still be fixed, and the pipeline is validated again at **query** time
+against an allowlist of 18 read-only stages plus a stage cap, a `$limit` that is
+appended rather than merged, and a result document/byte cap. `$out`, `$merge`,
+`$unionWith`, `$lookup` and `$graphLookup` are simply not in the allowlist —
+a blocklist would lose, because `$facet` can nest a writing stage inside a
+pipeline that looks read-only from the outside.
+
+The manifest is the node's; the bounds are the service's. That split is what
+lets `analytics.query` accept a query **name** and a parameter map instead of a
+pipeline, and it is also why the service can eventually run under Mongo
+credentials of its own rather than the root user the node holds.
+
 ### nodes (`nodes/`, Python)
 
 - `bustle.py` — CLI entrypoint (argparse), wiring, signal handling, graceful
@@ -482,22 +519,26 @@ meant to replace. None of it is a correctness defect in the shipped path.
   `make build-tx` (also build-rx/hub/subscriptions) for one;
   `RELEASE_TYPE=release` strips and trimpaths.
 - `make` runs lint, test, typecheck and build in that order.
-- Go tests exist for the RPC reply layer and the restart backoff only
-  (`internal/protocols/handlers_test.go`, the two `handlers` packages'
-  tests, `internal/backoff/backoff_test.go`); lint and those tests are the only
-  automated checks for everything else. The two `handlers` tests enumerate the
-  commands the service advertises (`AvailableCommand`) and fail when one has no
-  case, so registering a handler without covering its reply breaks the build.
+- Go tests cover the RPC reply layer, the restart backoff, the sibling wire
+  shape and revision warning, the rx data plane and SRT fan-out, the hub's
+  SQLite stores and HTTP handlers, and the analytics registry and query
+  executor; lint and those tests are the only automated checks for everything
+  else. Each `handlers` test enumerates the commands its service advertises
+  (`AvailableCommand`) and fails when one has no case, so registering a handler
+  without covering its reply breaks the build.
 - The Python node is covered by `nodes/tests/` (over `nodes/lib/core`: the
   wire shapes, the router's delivery/ack/abandoned-trackID paths, the RPC retry
   ladder, the ticker, logging setup and the GStreamer frame path) and type
   checked by `make typecheck`.
 
-## Planned evolution (not yet implemented on `main`)
+## Planned evolution
 
-Three workstreams have been designed but not built on the canonical branch.
-They are recorded here and in DESIGN.md so implementation follows the agreed
-shape; TODO.md tracks execution.
+Three workstreams were designed before implementation. Workstream 3 is done;
+workstream 1 is half-built — the `analytics/` service exists and serves all
+three commands, but nothing calls it yet, because the hub still proxies
+`GET /nodes/analytics` to `<node-id>.sink.analytics`. Workstream 2 has not
+started. They are recorded here and in DESIGN.md so implementation follows the
+agreed shape; TODO.md tracks execution.
 
 > **Note on provenance.** Workstreams 1 and 2 do exist outside `main`: an
 > abandoned `feat/analytics-service` branch (surviving only as dangling
@@ -509,10 +550,17 @@ shape; TODO.md tracks execution.
 > `nodes/node.py`, `nodes/workers/bustle/*`, deleting `nodes/lib/bustle/*`).
 > `main` is the canonical line and everything below is absent from it.
 
-### 1. Analytics service (CQRS with producer-owned read models)
+### 1. Analytics service (CQRS with producer-owned read models) — service built, cutover pending
 
 A new Go service `analytics/` becomes the sole reader of MongoDB; nodes become
-write-only. The core principle: **whoever writes the data also writes the
+write-only.
+
+**Status.** Steps 1–3 are implemented and tested (`analytics/cmd/analytics`,
+`analytics/internal/{db/sqlite,db/mongo,usecases,protocols/rabbitmq/handlers}`,
+deployed by `deploy/analytics.Dockerfile` and the `analytics` compose service).
+Step 1's *sender* is not implemented — nothing issues `analytics.declare` yet,
+because the node runtime that would carry the post-registration hook is
+workstream 2. Steps 4 and 5 are the cutover, TODO.md B5. The core principle: **whoever writes the data also writes the
 query** — the node declares its read models, the service executes them without
 understanding them.
 
@@ -555,7 +603,10 @@ Consequences:
 - The node-type contract shrinks to: decode chain + processing loop +
   document shape + query manifest.
 - The service must treat declared pipelines as semi-trusted input: operator
-  whitelist (no `$out`/`$merge`/`$unionWith`), stage cap, result-size cap.
+  whitelist (no `$out`/`$merge`/`$unionWith`), stage cap, result-size cap. This
+  is implemented as an **allowlist** in `analytics/internal/usecases/query.go`
+  rather than a blocklist, because `$facet` can nest a writing stage inside a
+  pipeline that looks read-only from the outside.
 
 ### 2. Nodes refactor (type-agnostic runtime extraction)
 

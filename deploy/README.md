@@ -1,13 +1,13 @@
 # Deploying surr
 
-A single compose stack: RabbitMQ as the bus, MongoDB for analytics, the three
+A single compose stack: RabbitMQ as the bus, MongoDB for analytics, the four
 Go control/data-plane services, and — behind profiles — a transmitter and a
 node.
 
 ```
 camera (RTSP) → tx ──SRT──→ rx ──SRT──→ bustle (Python, YOLO) ──→ MongoDB
                               ↑____________ RabbitMQ ____________↓
-                  hub (HTTP API, auth)   subscriptions (SQLite)
+      hub (HTTP API, auth)   subscriptions (SQLite)   analytics (read path)
 ```
 
 | service                 | what it is                                                   | profile |
@@ -16,8 +16,10 @@ camera (RTSP) → tx ──SRT──→ rx ──SRT──→ bustle (Python, YO
 | `mongo`                 | where nodes write their analytics documents                  | –       |
 | `migrate-hub`           | one-shot: creates `nodes`, `users` in the hub database       | –       |
 | `migrate-subscriptions` | one-shot: creates `subscriptions`, `subscribed_nodes`        | –       |
+| `migrate-analytics`     | one-shot: creates `declarations` in the analytics database   | –       |
 | `hub`                   | HTTP API (JWT auth, users, nodes, subscriptions) + SQLite    | –       |
 | `subscriptions`         | answers which nodes belong to a subscription                 | –       |
+| `analytics`             | read path over mongo: runs the queries nodes declared        | –       |
 | `rx`                    | terminates SRT ingress, exposes SRT egress for nodes to pull | –       |
 | `tx`                    | pulls an RTSP source, transcodes, publishes SRT              | `tx`    |
 | `bustle`                | a Python node: pulls frames, counts objects, writes to mongo | `nodes` |
@@ -276,8 +278,8 @@ do not reach.
 
 ## Things that will bite you
 
-**The services do not create their own tables.** `hub` and `subscriptions` only
-*verify* their schema at startup and exit with `database schema is missing` if
+**The services do not create their own tables.** `hub`, `subscriptions` and
+`analytics` only *verify* their schema at startup and exit with `database schema is missing` if
 a table is absent; the `migrate-*` jobs are what create it. If you reset a
 volume (`docker compose down -v`), the migrator has to run again — it will, on
 the next `up`, because `migrate up` is idempotent.

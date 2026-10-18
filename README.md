@@ -12,7 +12,8 @@ central orchestrator.
 > **Project status: the control plane runs, and every defect found in the 2026-10
 > review is fixed.** [TODO.md](TODO.md) section E is the tracker for those
 > findings — each defect as it was found, with the fix appended — and sections A
-> and B are the work still ahead (the nodes refactor and the analytics service).
+> and B are the work still ahead: the nodes refactor, and the `analytics` service,
+> which is built and deployed but not yet on the request path.
 > Tests cover the RPC reply layer, the restart backoff, the rx data plane and the
 > `nodes/lib/core` runtime, and `make typecheck` gates the Python side with
 > pyright; what is exercised by hand is the wiring — a real SRT socket and a real
@@ -29,8 +30,8 @@ camera (RTSP) ──→ tx ──── SRT ────→ rx ──── SRT 
                     │      RabbitMQ topic exchange    │
                     └───────┬────────────────┬───────┘
                             │                │
-                          hub          subscriptions
-                    (HTTP API, auth)      (SQLite)
+                          hub          subscriptions      analytics
+                    (HTTP API, auth)      (SQLite)       (mongo read path)
 ```
 
 | Service | Module | Role |
@@ -39,6 +40,7 @@ camera (RTSP) ──→ tx ──── SRT ────→ rx ──── SRT 
 | **rx** | `rx/` | Receiver/relay. Terminates SRT ingress, looks up which nodes belong to a subscription, and fans the stream out over SRT egress. |
 | **hub** | `hub/` | Control plane. HTTP API (JWT auth, users, nodes, subscriptions) backed by SQLite, plus broker handlers. |
 | **subscriptions** | `subscriptions/` | Answers which nodes belong to a subscription. SQLite-backed, no HTTP surface. |
+| **analytics** | `analytics/` | Read path over MongoDB. Keeps a registry of the aggregation queries each node declared about its own documents, and runs one by name on request. Not yet on the request path. |
 | **nodes** | `nodes/` | Python AI workers. Pull SRT frames, run inference, write results to MongoDB. |
 
 Every service broadcasts an `introduce` message advertising the commands it
@@ -51,8 +53,8 @@ nodes. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 - **Go 1.27+** — `rx` and `tx` declare `go 1.27.1`.
 - **RabbitMQ** — the message bus every service joins at runtime.
-- **SQLite3** — via `mattn/go-sqlite3`, so **cgo is required** to build `hub` and
-  `subscriptions`.
+- **SQLite3** — via `mattn/go-sqlite3`, so **cgo is required** to build `hub`,
+  `subscriptions` and `analytics`.
 - **GStreamer 1.0 + development headers** — required to build `tx` (go-gst) and
   to run the Python nodes.
 - **MongoDB** — analytics storage for nodes.
@@ -92,10 +94,11 @@ uv run python nodes/bustle.py --help    # run the node from the repo root
 ```
 
 `make build` builds each service into `bin/surr-<name>` (`bin/surr-hub`,
-`bin/surr-rx`, `bin/surr-subscriptions`, `bin/surr-tx`). Individual targets:
-`make build-hub`, `make build-rx`, `make build-subscriptions`, `make build-tx`.
-Likewise `make test-hub`, `make test-rx`, `make test-subscriptions`,
-`make test-tx`, `make test-root` test one module.
+`bin/surr-rx`, `bin/surr-subscriptions`, `bin/surr-analytics`, `bin/surr-tx`).
+Individual targets: `make build-hub`, `make build-rx`, `make build-subscriptions`,
+`make build-analytics`, `make build-tx`. Likewise `make test-hub`,
+`make test-rx`, `make test-subscriptions`, `make test-analytics`, `make test-tx`,
+`make test-root` test one module.
 
 Knobs: `RELEASE_TYPE=release` adds `-s -w -trimpath`; `TAGS` passes build tags;
 `GOFLAGS` / `LDFLAGS` are appended; `TESTFLAGS` is appended to `go test` (e.g.
