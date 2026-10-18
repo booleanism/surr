@@ -342,20 +342,27 @@ fi
 # The read path end to end: the hub asks the analytics service what this node
 # declared, runs every query in it and returns them under their own names. This
 # is the assertion that no query name is baked into the hub -- the report has to
-# contain the three bustle names because the node declared them, not because the
+# contain the four bustle names because the node declared them, not because the
 # hub knows them.
 report=$(curl -sS "${HUB_URL}/nodes/analytics?node_id=${NODE_ID}&time_cluster=minutes" \
     -H "Authorization: Bearer ${token}" 2>&1)
 
 declared_names=$(printf '%s' "$report" | jq -r '.queries[].name' 2>/dev/null | sort | tr '\n' ' ')
 check "the analytics endpoint returns the declared queries" \
-    "counts_detail counts_summary counts_totals " "${declared_names}"
+    "activity_by_class class_affinity occupancy rhythm " "${declared_names}"
 
-if printf '%s' "$report" | jq -e '.queries[] | select(.name == "counts_totals") | .data' >/dev/null 2>&1; then
+if printf '%s' "$report" | jq -e '.queries[] | select(.name == "rhythm") | .data' >/dev/null 2>&1; then
     ok "the endpoint answers a query that takes no bucket width"
 else
     no "the endpoint answers a query that takes no bucket width" "response was: ${report}"
 fi
+
+# A bucket label has to arrive as a string. The service marshals documents as
+# relaxed extended JSON, so a BSON date would reach a client as {"$date": ...}
+# -- an object no chart can label an axis with.
+bucket_type=$(printf '%s' "$report" \
+    | jq -r '[.queries[] | select(.name == "occupancy") | .data[0].timeline.buckets[0] | type] | first' 2>/dev/null)
+check "a bucket label is a string, not an extended-JSON date" "string" "${bucket_type}"
 
 # The window the hub chose, echoed back: minutes means a 5-minute window
 # bucketed by the second. A caller labels its chart from this rather than
