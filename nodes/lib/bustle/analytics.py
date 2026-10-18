@@ -74,6 +74,12 @@ logger = logging.getLogger(__name__)
 # are about the thing people are: the subject. Only "person" gets the
 # subject-relative queries, and a node that does not count people declares the
 # class-agnostic one alone rather than a report full of zeroes.
+# The node type, which is what a fleet is keyed by in the analytics registry.
+# Sent with every manifest so a node that declares nothing fleet can still be a
+# member of one: the fleet manifest belongs to the type, not to the node that
+# happened to publish it last.
+NODE_TYPE = "bustle"
+
 SUBJECT_CLASS = "person"
 
 # `$dayOfWeek` order, so index n-1 names the day it returns.
@@ -96,6 +102,7 @@ PARAMS_SCHEMA_ACTIVITY: dict[str, str] = {"start_time": "string", "unit_time": "
 PARAMS_SCHEMA_OCCUPANCY: dict[str, str] = {"start_time": "string", "unit_time": "string"}
 PARAMS_SCHEMA_RHYTHM: dict[str, str] = {"start_time": "string"}
 PARAMS_SCHEMA_AFFINITY: dict[str, str] = {"start_time": "string", "unit_time": "string"}
+PARAMS_SCHEMA_FLEET: dict[str, str] = {"start_time": "string", "unit_time": "string"}
 
 # How full the scene was, in people. Fixed boundaries rather than a caller
 # parameter because they are a judgement about what "crowded" means, not about
@@ -140,6 +147,10 @@ def _default_streaks() -> dict[str, typing.Any]:
 
 def _default_volatility() -> dict[str, typing.Any]:
     return {"stddev": 0, "average": 0, "peak": 0, "buckets": 0}
+
+
+def _default_fleet() -> dict[str, typing.Any]:
+    return {"buckets": [], "average": 0, "peak": 0}
 
 
 def _window(node_id: uuid.UUID, start_time: str) -> dict[str, typing.Any]:
@@ -1085,6 +1096,128 @@ def affinity_pipeline(
     ]
 
 
+# --- fleet -------------------------------------------------------------------
+
+def fleet_pipeline(
+    subject: str = SUBJECT_CLASS,
+    start_time: str = START_TIME_PARAM,
+    unit_time: str = UNIT_TIME_PARAM,
+) -> list[dict[str, typing.Any]]:
+    """The same window, but across every node of this type.
+
+    This is the one query whose pipeline does not match on ``node.id``. The
+    service unions the caller's collections before this pipeline runs, so a node
+    filter here would narrow the union straight back to one camera -- the query
+    would answer with the fleet's shape and one node's numbers.
+
+    Two views of one scan:
+
+    ``fleet``
+        the summed subject count per bucket across the whole fleet -- what the
+        deployment saw, which no single node's report can show.
+    ``nodes``
+        one row per contributing node, ordered by average, so "which camera is
+        busiest" is a reading rather than a comparison of N separate reports.
+
+    The arithmetic is two-staged and the order is load-bearing. First each node's
+    own value for a bucket is the **average** of the documents it wrote there --
+    a bucket holds several drain intervals, and summing them would report a
+    camera that sampled twice as often as seeing twice as many people. Only then
+    are the nodes' values for that bucket **summed**, because the fleet total is
+    what the deployment saw at that moment. Summing first overstates occupancy by
+    the sample rate; averaging the per-node averages afterwards would give a node
+    that reported twice the weight of one that reported once, so a camera
+    restarted mid-window would count for less than one that was not.
+    """
+    bucket = _bucket(unit_time)
+    value = _subject_value(subject)
+
+    # Shared first stage: one value per node per bucket.
+    per_node_bucket = [
+        {
+            "$group": {
+                "_id": {"node": "$node.id", "bucket": bucket},
+                "value": {"$avg": value},
+            }
+        },
+    ]
+
+    per_bucket = per_node_bucket + [
+        {"$group": {"_id": "$_id.bucket", "value": {"$sum": "$value"}}},
+        {"$sort": {"_id": 1}},
+    ]
+
+    return [
+        # No node.id filter: the union is the membership. $toDate for the same
+        # reason as everywhere else -- the parameter is a string and `timestamp`
+        # is a BSON date, and a string orders below every date.
+        {"$match": {"$expr": {"$gte": ["$timestamp", {"$toDate": start_time}]}}},
+        {
+            "$facet": {
+                "fleet": per_bucket
+                + [
+                    {
+                        "$group": {
+                            "_id": None,
+                            "buckets": {
+                                "$push": {"bucket": _iso("$_id"), "value": "$value"}
+                            },
+                            "average": {"$avg": "$value"},
+                            "peak": {"$max": "$value"},
+                        }
+                    },
+                    {
+                        "$project": {
+                            "_id": 0,
+                            "buckets": 1,
+                            "average": _round("$average"),
+                            "peak": _round("$peak"),
+                        }
+                    },
+                ],
+                "nodes": per_node_bucket
+                + [
+                    {
+                        "$group": {
+                            "_id": "$_id.node",
+                            "values": {"$push": "$value"},
+                        }
+                    },
+                    {
+                        "$project": {
+                            "_id": 0,
+                            "id": "$_id",
+                            "buckets": {"$size": "$values"},
+                            "average": _round({"$avg": "$values"}),
+                            "peak": {"$max": "$values"},
+                        }
+                    },
+                    {"$sort": {"average": -1, "id": 1}},
+                ],
+            }
+        },
+        {
+            "$replaceWith": {
+                "$mergeObjects": [
+                    {"fleet": _default_fleet(), "nodes": []},
+                    # The same tail as every other query: each facet result under
+                    # its own key, never the facet document itself. A fleet
+                    # report with `average` at the top level next to an empty
+                    # `fleet` is what the other form produces.
+                    {
+                        "fleet": {
+                            "$ifNull": [
+                                {"$arrayElemAt": ["$fleet", 0]},
+                                _default_fleet(),
+                            ]
+                        }
+                    },
+                    {"nodes": {"$ifNull": ["$nodes", []]}},
+                ]
+            }
+        },
+    ]
+
 # --- manifest ----------------------------------------------------------------
 
 
@@ -1159,6 +1292,7 @@ def manifest(
     if subject is None:
         return {
             "node_id": str(node_id),
+            "node_type": NODE_TYPE,
             "collection": collection,
             "queries": queries,
         }
@@ -1203,11 +1337,29 @@ def manifest(
                 "params_schema": PARAMS_SCHEMA_AFFINITY,
                 "pipeline": affinity_pipeline(node_id, subject),
             },
+            {
+                "name": "fleet_activity",
+                "description": (
+                    f"the {subject} count summed across every node of this type "
+                    "the caller may read, so one report describes the whole "
+                    "deployment; one document as {fleet: {buckets: [{bucket, "
+                    "value}], average, peak}, nodes: [{id, buckets, average, "
+                    "peak}]} -- nodes is ordered busiest first"
+                ),
+                "params_schema": PARAMS_SCHEMA_FLEET,
+                # The one query that reads across collections. Its scope is what
+                # the service unions the caller's nodes for; the pipeline itself
+                # deliberately has no node.id filter, or the union would be
+                # narrowed back to one camera.
+                "scope": "fleet",
+                "pipeline": fleet_pipeline(subject),
+            },
         ]
     )
 
     return {
         "node_id": str(node_id),
+        "node_type": NODE_TYPE,
         "collection": collection,
         "queries": queries,
     }

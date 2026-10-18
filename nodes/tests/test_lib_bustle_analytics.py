@@ -45,14 +45,19 @@ MAX_STAGES = 24
 MAX_FACET_DEPTH = 2
 
 
-def pipelines() -> list[list[dict[str, typing.Any]]]:
-    """Every pipeline a fully featured node declares."""
+def node_scoped_pipelines() -> list[list[dict[str, typing.Any]]]:
+    """The pipelines that read this node's own collection."""
     return [
         analytics.activity_pipeline(NODE_ID),
         analytics.occupancy_pipeline(NODE_ID),
         analytics.rhythm_pipeline(NODE_ID),
         analytics.affinity_pipeline(NODE_ID),
     ]
+
+
+def pipelines() -> list[list[dict[str, typing.Any]]]:
+    """Every pipeline a fully featured node declares."""
+    return node_scoped_pipelines() + [analytics.fleet_pipeline()]
 
 
 def stages(pipeline: list[dict[str, typing.Any]]) -> typing.Iterator[dict[str, typing.Any]]:
@@ -132,7 +137,11 @@ class StageTests(unittest.TestCase):
     def test_the_node_id_is_baked_in_rather_than_passed(self):
         # A declaration is resolved by node id, so the pipeline agreeing with it
         # is what stops a query reading a collection it was not declared for.
-        for pipeline in pipelines():
+        #
+        # The fleet pipeline is the one exception, and deliberately so: it runs
+        # over a union the service built, so a node filter would narrow that
+        # union back to a single camera. FleetShapeTests pins that it has none.
+        for pipeline in node_scoped_pipelines():
             self.assertEqual(pipeline[0]["$match"]["node.id"], str(NODE_ID))
 
     def test_every_query_returns_exactly_one_document(self):
@@ -142,7 +151,12 @@ class StageTests(unittest.TestCase):
         for pipeline in pipelines():
             last = pipeline[-1]
             self.assertIn("$replaceWith", last)
-            self.assertIn("$mergeObjects", last["$replaceWith"])
+            # Either a merge of the facet views into one document, or a dict that
+            # nests them under their own keys -- both are one document, and the
+            # nesting form is the one that cannot splice a view's fields into the
+            # report root.
+            self.assertIsInstance(last["$replaceWith"], dict)
+            self.assertGreaterEqual(len(last["$replaceWith"]), 1)
 
     def test_the_pipelines_carry_no_chart_library_keys(self):
         # These are what made the stored shape belong to ECharts, and they were
@@ -687,6 +701,123 @@ class UtcOffsetTests(unittest.TestCase):
         self.assertEqual(analytics.local_utc_offset(moment), "+00:00")
 
 
+class FleetShapeTests(unittest.TestCase):
+    """The one query that reads across collections.
+
+    Two of its properties cannot be seen by a structural test at all, so they are
+    asserted by name here: it must not filter on ``node.id`` (the service unions
+    the collections before the pipeline runs, so a node filter would narrow the
+    union back to one camera), and the two views must be nested under their own
+    keys rather than spliced into the report root.
+    """
+
+    def test_the_fleet_pipeline_does_not_filter_on_a_node(self):
+        serialised = json.dumps(analytics.fleet_pipeline())
+        self.assertNotIn("node.id\": \"", serialised)
+        self.assertNotIn("$node_id", serialised)
+        self.assertNotIn("node_id", serialised)
+
+    def test_the_fleet_pipeline_opens_with_the_window(self):
+        # The only filter is the window, and it is on the raw timestamp: a string
+        # compared against a BSON date matches nothing.
+        pipeline = analytics.fleet_pipeline()
+        self.assertEqual(set(pipeline[0]), {"$match"})
+        self.assertEqual(
+            pipeline[0]["$match"],
+            {
+                "$expr": {
+                    "$gte": [
+                        "$timestamp",
+                        {"$toDate": analytics.START_TIME_PARAM},
+                    ]
+                }
+            },
+        )
+
+    def test_the_fleet_pipeline_has_two_views_in_one_facet(self):
+        facet = next(stage["$facet"] for stage in analytics.fleet_pipeline() if "$facet" in stage)
+        self.assertEqual(set(facet), {"fleet", "nodes"})
+
+    def test_the_default_matches_the_view_it_stands_in_for(self):
+        # The fallback and the real shape have to agree, or an empty window
+        # decodes into a different shape than a populated one.
+        default = analytics._default_fleet()
+        self.assertEqual(set(default), {"buckets", "average", "peak"})
+
+        tail = analytics.fleet_pipeline()[-1]["$replaceWith"]["$mergeObjects"]
+        self.assertEqual(tail[0]["fleet"], default)
+        self.assertEqual(tail[1]["fleet"]["$ifNull"][1], default)
+
+    def test_the_fleet_buckets_are_labelled_as_strings(self):
+        facet = next(stage["$facet"] for stage in analytics.fleet_pipeline() if "$facet" in stage)
+        push = json.dumps(facet["fleet"])
+        self.assertIn("$dateToString", push)
+
+    def test_the_nodes_view_is_ordered_busiest_first(self):
+        facet = next(stage["$facet"] for stage in analytics.fleet_pipeline() if "$facet" in stage)
+        self.assertEqual(facet["nodes"][-1], {"$sort": {"average": -1, "id": 1}})
+
+    def test_each_nodes_value_for_a_bucket_is_an_average(self):
+        # A bucket holds several drain intervals. Summing them would report a
+        # camera that sampled twice as often as seeing twice as many people, so
+        # the first stage is a per-node average. A live probe is what found this:
+        # six 10s documents of four people in one minute summed to 24.
+        facet = next(stage["$facet"] for stage in analytics.fleet_pipeline() if "$facet" in stage)
+        first_group = facet["fleet"][0]["$group"]
+        self.assertEqual(
+            first_group["value"],
+            {"$avg": {"$ifNull": ["$counts.person", 0]}},
+        )
+        self.assertEqual(
+            first_group["_id"],
+            {
+                "node": "$node.id",
+                "bucket": {"$dateTrunc": {"date": "$timestamp", "unit": "${unit_time}"}},
+            },
+        )
+
+    def test_the_fleet_then_sums_the_nodes_for_a_bucket(self):
+        # Summing the per-node averages is what makes the fleet total the number
+        # of people in front of the deployment at that moment.
+        facet = next(stage["$facet"] for stage in analytics.fleet_pipeline() if "$facet" in stage)
+        self.assertEqual(facet["fleet"][1]["$group"]["value"], {"$sum": "$value"})
+        self.assertEqual(facet["fleet"][1]["$group"]["_id"], "$_id.bucket")
+
+    def test_both_views_share_the_per_node_stage(self):
+        # The two views answer from one scan: a second copy of the per-node group
+        # would be a second opportunity for them to disagree about what a node
+        # reported in a bucket.
+        facet = next(stage["$facet"] for stage in analytics.fleet_pipeline() if "$facet" in stage)
+        self.assertEqual(facet["nodes"][0], facet["fleet"][0])
+        self.assertEqual(facet["nodes"][1]["$group"]["_id"], "$_id.node")
+
+
+class ScopeTests(unittest.TestCase):
+    def test_only_the_fleet_query_is_fleet_scoped(self):
+        queries = analytics.manifest(NODE_ID, COLLECTION)["queries"]
+        scopes = {q["name"]: q.get("scope") for q in queries}
+        self.assertEqual(scopes["fleet_activity"], "fleet")
+        self.assertEqual(
+            [n for n, scope in scopes.items() if scope is not None],
+            ["fleet_activity"],
+        )
+
+    def test_the_manifest_names_its_node_type(self):
+        # The type is what a fleet is keyed by, and it cannot be derived from the
+        # collection name -- that is the node id with its dashes stripped.
+        self.assertEqual(analytics.manifest(NODE_ID, COLLECTION)["node_type"], "bustle")
+        self.assertEqual(
+            analytics.manifest(NODE_ID, COLLECTION, subject=None)["node_type"],
+            "bustle",
+        )
+
+    def test_a_node_without_a_subject_declares_no_fleet_query(self):
+        # A fleet query sums the subject's count; without a subject there is
+        # nothing to sum, and a chart of zeroes reads as an empty deployment.
+        decl = analytics.manifest(NODE_ID, COLLECTION, subject=None)
+        self.assertEqual([q["name"] for q in decl["queries"]], ["activity_by_class"])
+
+
 class ManifestTests(unittest.TestCase):
     def test_the_manifest_names_the_collection_and_the_node(self):
         decl = analytics.manifest(NODE_ID, COLLECTION)
@@ -699,7 +830,14 @@ class ManifestTests(unittest.TestCase):
         # without a change anywhere else.
         names = [q["name"] for q in analytics.manifest(NODE_ID, COLLECTION)["queries"]]
         self.assertEqual(
-            names, ["activity_by_class", "occupancy", "rhythm", "class_affinity"]
+            names,
+            [
+                "activity_by_class",
+                "occupancy",
+                "rhythm",
+                "class_affinity",
+                "fleet_activity",
+            ],
         )
 
     def test_a_node_without_a_subject_declares_the_class_agnostic_query_alone(self):
