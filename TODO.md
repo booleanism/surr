@@ -52,20 +52,44 @@ Ordered stages; each lands independently and is wire-compatible.
         (node_id, pipeline, model, chosen_classes, async_q, coll)
   - [ ] register(self, handlers_mgr) registers bound handlers
   - [ ] Command names and payloads stay byte-identical
-- [ ] A2. Extract lib/core/node.py (the real work)
-  - [ ] Node class: node_id/name/family/intro_interval/rpc_timeout, router,
-        siblings, handlers, pipeline (duck-typed start/stop),
-        registration_payload (opaque bytes), on_start(ctx) hook
-  - [ ] Node.run() owns: connect_robust, router.listen, introduce loop,
-        nodes.add with retry-until-sibling, graceful shutdown choreography
-        (stop pipeline → cancel tasks keeping listen alive → nodes.remove →
-        cancel listen)
-  - [ ] registration payload builder in lib/core/ (hub's {id, bitrate, width,
-        height} contract, node-type-generic)
-  - [ ] bustle.py shrinks to: parse args → build streamer/model/queue/
-        handlers instance → Node(...).run()
-  - [ ] Verify: pyright + tests + manual boot (introduce, nodes.add,
-        nodes.remove behave identically before/after)
+- [x] A2. Extract lib/core/node.py (the real work)
+  - [x] `Node(node_id, name, family, broker, version, register_payload,
+        worker, intro_interval, rpc_timeout, remove_timeout)`: the runtime owns
+        the handlers registry, the siblings registry, `run()` (connect_robust)
+        and `serve(channel, stop_event)`. The channel is a parameter rather
+        than opened inline because every part of the lifecycle can be driven
+        against a fake channel, and the parts that go wrong on shutdown are
+        exactly the parts a live broker would hide.
+  - [x] `Worker` base class, all four methods defaulted: `attach(hs)` (the
+        command names embed the node id, so they can only be registered at
+        startup), `start() -> list[asyncio.Task]`, `registered(router, sibs)`
+        (the post-registration hook B4 needs) and `stop()`.
+  - [x] `Node.serve()` owns: setup_router, router.listen, the introduce
+        ticker, `nodes.add` with retry-until-sibling, and the shutdown
+        choreography — `Worker.stop()` → cancel+await background tasks keeping
+        listen alive → `nodes.remove` → cancel listen. The ordering is
+        documented in the module docstring and pinned by tests that record the
+        call order, because none of those failures show up as an exception.
+  - [x] `register_payload(node_id, **fields)` in `lib/core/node.py`: builds the
+        hub's one-element list (`[{"id": ..., "bitrate": ..., "width": ...,
+        "height": ...}]`). It is a helper rather than an inline `json.dumps`
+        because the batch-list shape is the easy thing to get wrong when there
+        is exactly one node in it.
+  - [x] `bustle.py` shrank from 461 to 336 lines and is now: parse args → open
+        mongodb → build `BustleWorker` (streamer, detector, chosen classes,
+        queue, collection) → `Node(...).run(stop_event)`. `init_db` stays,
+        because a timeseries collection is bustle's own storage decision.
+  - [x] Verify: pyright clean, 161 Python tests OK (12 new in
+        `nodes/tests/test_lib_core_node.py`), `make` exit 0, and the behaviour
+        is unchanged — the same log lines, the same `nodes.add`/`nodes.remove`
+        payloads, the same `nodes.remove` skipped when registration never
+        completed. Mutation-checked: moving `Worker.stop()` after the
+        background gather, dropping the `registered_event` guard, dropping the
+        hook call, never cancelling the listener, and swallowing a failed
+        listener are each caught.
+  - Note: a `Worker.registered()` failure is logged, not raised. The node is
+        registered and serving by then, and what the hook publishes is
+        recoverable while the node's own commands are not.
 - [x] A3. Pipeline/worker hygiene
   - [x] SRTStreamer: decode chain as parameter (default current
         "tsdemux ! h264parse ! avdec_h264 ! videoconvert"); BGR frames stay
@@ -112,9 +136,10 @@ declare step).
 
 **Status:** B1–B3 are implemented, tested and deployed (`deploy/analytics.Dockerfile`,
 the `analytics` and `migrate-analytics` compose services). Nothing calls the
-service yet — B4's sender is what first issues `analytics.declare`, and it waits
-on A2. Until then the service runs beside `sink.analytics` and is exercised by
-its own tests, not by the stack.
+service yet — B4's sender is what first issues `analytics.declare`. A2 landed
+the hook it publishes from (`Worker.registered()`); what is missing is the
+manifest. Until then the service runs beside `sink.analytics` and is exercised
+by its own tests, not by the stack.
 
 - [x] B1. analytics service skeleton
   - [x] analytics/ module: cmdline (broker, family, name, mongo url, dsn),
@@ -160,9 +185,12 @@ its own tests, not by the stack.
         `lib/bustle/analytics.py`. They die with B4, which is the commit that
         makes the shape checkable; until then the service validates structure
         (read-only operators, caps) and not semantics.
-- [ ] B4. Node side (after A2)
-  - [ ] Node runtime: post-registration hook sends analytics.declare with the
-        entrypoint-supplied manifest, retry-until-sibling like nodes.add
+- [ ] B4. Node side (A2 is done; the hook exists)
+  - [x] Node runtime: `Worker.registered(router, sibs)` runs once `nodes.add`
+        succeeded and is where a declaration is published. A failure is logged
+        rather than raised — the node is registered and serving by then.
+  - [ ] bustle: publish the manifest from `BustleWorker.registered()`, with
+        retry-until-sibling like `nodes.add`
   - [ ] bustle: convert lib/bustle/analytics.py's two pipelines into a query
         manifest (params: time_cluster window + granularity via placeholders)
         — dropping the ECharts-shaped final $project stages (xAxis/yAxis/
@@ -182,8 +210,8 @@ its own tests, not by the stack.
         versions
 
 Sequencing: B1–B3 are done (additive; the service runs side by side with
-sink.analytics indefinitely). Then A2, then B4 (the node starts declaring), then
-B5 in one window. Nothing before B5 breaks anything.
+sink.analytics indefinitely), and A2 is done, so B4 is next (the node starts
+declaring), then B5 in one window. Nothing before B5 breaks anything.
 Logging (C) is Go-only and independent of A — it can proceed in parallel,
 but must land before B1 so the analytics service is born with structured
 logging instead of being migrated after.

@@ -112,14 +112,18 @@ in the `dev` dependency group, so `uv sync` installs them — and must **not** h
 over the real stubs and makes every GStreamer enum and constructor an
 unknown-attribute error.
 
-The Go tests cover the RPC reply layer and the backoff used by the restart loops.
-The Python suite in `nodes/tests` covers the `nodes/lib/core` runtime — the wire
-shapes, the router's ack/abandoned-trackID paths, the RPC retry ladder, the
-ticker, logging setup and the GStreamer frame path — and the classes that need
-the GStreamer bindings skip themselves where those are missing. `make typecheck`
-adds pyright in `standard` mode over `nodes/bustle.py`, `nodes/lib/` and
-`nodes/tests/`. Everything else (the SRT data plane, the SQLite
-layer, the tx pipelines) is exercised by hand. The two handler tests enumerate
+The Go tests cover the RPC reply layer, the backoff used by the restart loops,
+the rx data plane, the hub's SQLite stores and HTTP validation, the subscription
+adapters, the tx codec preference lists and the analytics query executor. The
+Python suite in `nodes/tests` covers the `nodes/lib/core` runtime — the wire
+shapes, the router's ack/abandoned-trackID paths, the RPC retry ladder, the node
+runtime's shutdown ordering, sibling expiry, the ticker, logging setup and the
+GStreamer frame path — and the classes that need the GStreamer bindings skip
+themselves where those are missing. `make typecheck` adds pyright in `standard`
+mode over `nodes/bustle.py`, `nodes/lib/` and `nodes/tests/`. What is exercised
+by hand is the wiring rather than the logic: a real SRT socket and a real
+GStreamer pipeline, through the compose stack in [deploy/](deploy/README.md).
+The two handler tests enumerate
 the commands their service advertises and fail when one has no case, so
 registering a handler without a test breaks `make test`.
 

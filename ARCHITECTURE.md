@@ -180,6 +180,13 @@ data-plane identity that survives a rename or restart.
   the broker connection. A SIGKILL'd node leaves a stale row in the hub's
   `nodes` table, but its sibling entry expires `SiblingTTL` (15s) later, so a
   dispatch to it fails at once instead of spending a full command timeout.
+- That choreography lives in `nodes/lib/core/node.py`, not in the node type.
+  `Node` owns the router, the introduce ticker, `nodes.add`/`nodes.remove` and
+  the shutdown order — `Worker.stop()` (the frame source) → cancel and await the
+  background tasks with the listener still up → `nodes.remove` → cancel the
+  listener. A node type supplies a `Worker`: `attach` (register its command
+  handlers), `start` (background tasks), `registered` (post-registration hook,
+  where a declaration is published) and `stop`.
 
 ## Data plane: SRT topology
 
@@ -367,13 +374,15 @@ credentials of its own rather than the root user the node holds.
 
 ### nodes (`nodes/`, Python)
 
-- `bustle.py` — CLI entrypoint (argparse), wiring, signal handling, graceful
-  shutdown (stop streamer → cancel background tasks → `nodes.remove` → stop
-  router listen).
-- `lib/core/` — protocol runtime mirroring the Go side: `router.py`,
-  `siblings.py`, `handlers.py`, `rpc.py` (retrying command-resolving call),
-  `pipeline.py` (`SRTStreamer`, the appsink pipeline), `ticker.py`,
-  `logging_setup.py` (stdlib logging with a `node_id` filter).
+- `bustle.py` — CLI entrypoint (argparse), Mongo setup, and the `BustleWorker`
+  that names the three commands and the drain loop. It does not touch the
+  broker.
+- `lib/core/` — protocol runtime mirroring the Go side: `node.py` (the `Node`
+  runtime and the `Worker` base class: router, introduce ticker, registration
+  and the shutdown choreography), `router.py`, `siblings.py`, `handlers.py`,
+  `rpc.py` (retrying command-resolving call), `pipeline.py` (`SRTStreamer`, the
+  appsink pipeline), `ticker.py`, `logging_setup.py` (stdlib logging with a
+  `node_id` filter).
 - `lib/bustle/` — the actual worker: `handlers.py`
   (`<node-id>.sink.start/stop/analytics`), `processing.py` (frame_worker thread
   running `detector.detect` + async normalizer draining into MongoDB),
@@ -610,17 +619,17 @@ Consequences:
 
 ### 2. Nodes refactor (type-agnostic runtime extraction)
 
-Staged internal refactor of `nodes/` — no architecture change, wire-compatible
-throughout (see TODO.md for the ordered stages). Highlights: de-singleton
-`BustleHandlers`, extract the generic `Node` runtime into `lib/core/node.py`
-(owning boot/registration/declare/shutdown), parameterize the decode chain,
-fix the frame-worker busy-loop, add a `nodes/` test suite. The Node runtime
-gains the `analytics.declare` post-registration hook as part of this work.
+Internal refactor of `nodes/` — no architecture change, wire-compatible
+throughout (see TODO.md for the ordered stages). Done: the generic `Node`
+runtime lives in `lib/core/node.py` and owns boot/registration/shutdown (the
+`Worker.registered()` hook is where `analytics.declare` will be published), the
+decode chain is a parameter, and the frame-worker busy-loop is gone. Remaining:
+de-singleton `BustleHandlers` (A1).
 
 ### 3. Structured logging (zerolog) — ✅ implemented
 
 All Go services now use zerolog via the shared `internal/logging` package
-(imported by all four service modules including tx), with context-propagated
+(imported by all five service modules including tx), with context-propagated
 loggers, a documented level and field policy, and a strict never-log list
 (credentials, tokens, credential-bearing URIs, full payloads). `internal/logging`
 also provides `Cleanups`, the mutex-guarded replacement for the old

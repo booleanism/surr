@@ -413,22 +413,32 @@ now.
 
 ### 12. Nodes runtime: type-agnostic core (planned, not on `main`)
 
-Not yet implemented on `main` — see TODO.md for staged execution. (A version
-of this refactor exists on `refs/remotes/gitea/main` as commit `66e308b
-"nodes: pythonic refactor"`, which restructures `nodes/` into
+**Status: landed** (`lib/core/node.py`, A2). (A version of this refactor also
+exists on `refs/remotes/gitea/main` as commit `66e308b "nodes: pythonic
+refactor"`, which restructures `nodes/` into
 `core/{cli,config,detector,registry,service,storage,stream,worker}.py`,
-`node.py`, and `workers/bustle/*` — those modules now belong under
-`nodes/lib/core/` on `main`. It is not on `main` and should be treated
-as prior art, not as landed code.)
+`node.py`, and `workers/bustle/*`. It was never merged and its modules now
+belong under `nodes/lib/core/` on `main`; treat it as prior art.)
 
-The `nodes/` refactor extracts the type-agnostic lifecycle (boot, introduce
-loop, registration, shutdown choreography — ~90% of `bustle.py`'s finally-block)
-into `lib/core/node.py` so a new node type is an entrypoint + `lib/<type>/`
-package, never a copy of `bustle.py`. Two rules keep it honest: `lib/core/`
-contains no AI/model/database specifics (they enter only via hooks and the
-pipeline object), and the refactor is wire-compatible at every stage. The
-`analytics.declare` call from §11 becomes a post-registration hook on this
-runtime. See ARCHITECTURE.md "Planned evolution" for the shape.
+The `nodes/` refactor extracted the type-agnostic lifecycle (boot, introduce
+loop, registration, shutdown choreography — ~90% of the old `bustle.py`) into
+`lib/core/node.py`, so a new node type is an entrypoint plus a `lib/<type>/`
+package rather than a copy of `bustle.py`. Two rules keep it honest: `lib/core/`
+contains no AI/model/database specifics (they enter only through the `Worker`
+hooks and the pipeline object), and every stage was wire-compatible. The
+`analytics.declare` call from §11 becomes the `Worker.registered()` hook on this
+runtime. See ARCHITECTURE.md "Node lifecycle" for the ordering.
+
+The reason the shutdown choreography was worth moving rather than copying is
+that each of its four steps depends on something the next one still needs
+alive: the frame source must stop before the tasks reading it are cancelled
+(cancelling a task does not stop the thread it is waiting on), `nodes.remove`
+must be sent while the listener is still up or the reply has nowhere to go, and
+the listener must be cancelled last or the consumer stays parked on its future
+while the connection closes underneath it. Every one of those mistakes produces
+a node that hangs on shutdown or leaves a stale row, and none of them raises an
+exception — which is why the runtime's tests assert the *order* of the calls
+rather than their results.
 
 ### 13. Logging: zerolog, context-first (implemented)
 
