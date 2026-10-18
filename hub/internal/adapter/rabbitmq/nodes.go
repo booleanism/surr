@@ -47,6 +47,15 @@ func NewNodes(r protocols.Router, s Siblings, t RunTask) nodes {
 // something the endpoint cannot supply is reported as such instead of failing
 // the whole report.
 func (n nodes) GetAnalytics(ctx context.Context, nodeID uuid.UUID, f AnalyticsFilters, buf *[]byte) (int, error) {
+	// Checked before the round trip, and after the caller has established that
+	// this user owns the node: a manifest outlives the node that declared it, so
+	// without this the endpoint answers every query with its empty shape and the
+	// report reads as "this node saw nothing" instead of "this node is gone"
+	// (TODO.md F6).
+	if !n.s.NodeAlive(nodeID) {
+		return 0, models.ErrNodeUnavailable
+	}
+
 	win := analyticsWindow(f.TimeCluster, time.Now())
 
 	infos := make([]models.QueryInfo, 0, 8)

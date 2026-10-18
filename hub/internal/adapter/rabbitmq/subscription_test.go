@@ -15,12 +15,19 @@ import (
 
 type fakeSiblings struct {
 	names []protocols.SiblingName
+	dead  bool
 }
 
 func (f fakeSiblings) GetName(_ protocols.Command, sn *[]protocols.SiblingName) int {
 	*sn = append((*sn)[:0], f.names...)
 
 	return len(f.names)
+}
+
+// NodeAlive reports the inverse of dead, so a test says which state it is
+// testing rather than which zero value it got.
+func (f fakeSiblings) NodeAlive(_ uuid.UUID) bool {
+	return !f.dead
 }
 
 // inlineRunner runs the task on the calling goroutine, which is what the real

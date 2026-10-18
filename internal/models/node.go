@@ -25,6 +25,19 @@ var ErrSubscriptionNotFound = errors.New("subscription not found")
 // constraint failure and the hub has to turn that into 409.
 var ErrNodeAlreadySubscribed = errors.New("node is already subscribed")
 
+// ErrNodeUnavailable reports that a node is not advertising itself on the
+// broker, so a request that would be answered from its stored data would be
+// answered from a node that will never write again.
+//
+// The hub knows this from the sibling registry, not from its `nodes` table: a
+// row there cannot be dated (`nodes.add` is sent once per run and carries no
+// timestamp), so a node killed without a graceful `nodes.remove` leaves a row
+// that is indistinguishable from a live one. Answering an analytics report for
+// such a row is the failure mode this guards: every query comes back with its
+// empty shape, which reads as "this node saw nothing" rather than "this node is
+// gone" (TODO.md F6).
+var ErrNodeUnavailable = errors.New("node is not running")
+
 type Node struct {
 	ID      uuid.UUID `json:"id,omitzero"`
 	Bitrate int64     `json:"bitrate,omitempty"`

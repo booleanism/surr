@@ -9,6 +9,7 @@ import (
 	"github.com/booleanism/surr/internal/models"
 	"github.com/booleanism/surr/internal/pools"
 	"github.com/booleanism/surr/internal/protocols"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
@@ -16,8 +17,15 @@ type RunTask interface {
 	Run(ctx context.Context, t pools.TaskFunc) error
 }
 
+// Siblings is the sibling registry as the adapters need it: which peer serves a
+// command, and whether a node is advertising itself right now.
+//
+// The two questions are one interface because they are one object in main, and
+// because a caller that can dispatch a command to a peer but cannot tell whether
+// that peer is alive is the state this repository spent a defect on.
 type Siblings interface {
 	GetName(c protocols.Command, sn *[]protocols.SiblingName) int
+	NodeAlive(id uuid.UUID) bool
 }
 
 type subscription struct {

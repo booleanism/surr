@@ -508,3 +508,30 @@ func (r *failingRouter) Recv(_ context.Context, _ uuid.UUID, _ *protocols.Router
 }
 
 func (r *failingRouter) Forget(_ uuid.UUID) {}
+
+// TestGetAnalyticsRefusesANodeThatIsNotRunning pins the F6 guard: a declaration
+// outlives the node that made it, so answering for a node that is not
+// advertising itself would produce a report of empty shapes that reads exactly
+// like a node that saw nothing.
+func TestGetAnalyticsRefusesANodeThatIsNotRunning(t *testing.T) {
+	r := &analyticsRouter{}
+
+	n := NewNodes(
+		r,
+		fakeSiblings{names: []protocols.SiblingName{"rpc.direct.analytics0"}, dead: true},
+		inlineRunner{},
+	)
+
+	buf := make([]byte, 0, 4096)
+
+	_, err := n.GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: "hours"}, &buf)
+	if !errors.Is(err, models.ErrNodeUnavailable) {
+		t.Fatalf("GetAnalytics error is %v, want ErrNodeUnavailable", err)
+	}
+
+	// Nothing was asked of the analytics service: a refused report must not cost
+	// a round trip.
+	if len(r.calls) != 0 {
+		t.Errorf("GetAnalytics sent %d commands to a node that is not running", len(r.calls))
+	}
+}
