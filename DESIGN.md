@@ -227,11 +227,7 @@ worker's drop-oldest frame queue (`maxsize=1`) both bias toward recent state.
 **Chart-library-agnostic output is the contract, and nothing in the stack
 breaks it.** The data contract is generic chart data: axes/categories, series
 names, values (e.g. min/avg/max per class, time-bucketed averages), with the
-rendering library chosen entirely by the presentation layer. The three
-pipelines in `nodes/lib/bustle/analytics.py` emit exactly that — `counts_detail`
-returns one document per class as `{name, points: [[bucket, value], ...]}`,
-`counts_summary` one document as `{categories: [...], series: [{name, values}]}`,
-`counts_totals` one document as `{categories: [...], values: [...]}`. The ECharts
+rendering library chosen entirely by the presentation layer. The ECharts
 option objects the old pipelines built (`xAxis {type: "category"}`, `yAxis`,
 `legend`, `series.type`, `showSymbol`) and the `to_echarts` shim that briefly
 mapped rows for the legacy handler are both gone with that handler. Keeping the
@@ -239,6 +235,46 @@ mapping out of the aggregation is what makes the same pipelines publishable as
 the node's query manifest: a pipeline that returns a renderer's option object
 could not be validated by the service and could not be reused by a second
 renderer.
+
+**Four queries, one document each.** `nodes/lib/bustle/analytics.py` declares
+four pipelines, and every one of them ends as a single `$facet` document. The
+shape is forced by the service's caps — 2000 documents and 1 MiB — but it is
+also the right shape: a query that returned one document per bucket would hit
+the cap on a long window and cost a separate pass over the collection for every
+chart. One document per query means one scan per query and a report whose size
+depends on the number of views, not on the length of the window.
+
+| query | subject | answers |
+| --- | --- | --- |
+| `activity_by_class` | any | per class: total, average, min, max, stddev, buckets, peak bucket, share of all detections — plus `coverage` |
+| `occupancy` | required | `timeline`, `crowd` (band histogram), `moments` (busiest buckets), `trend` (first half vs second), `streaks` (longest busy/quiet run), `volatility` |
+| `rhythm` | required | average and peak by hour of day and by day of week, in the node's own offset |
+| `class_affinity` | required | how often each other class shares a bucket with the subject |
+
+`coverage` is not a chart; it is the answer to "should I believe the other
+three". A node that spent half the window unable to pull frames produces a
+perfectly well-formed report about a scene it was not watching, and only the
+sample count and the first/last timestamps show it.
+
+**The subject is resolved, not assumed.** Three of the four queries are about a
+*subject* class — the one whose presence defines occupancy. `resolve_subject()`
+returns `person` only when the node's `--chosen-classes` actually include it,
+and the manifest then declares `activity_by_class` alone: a vehicle-counting node
+reporting three empty occupancy charts would look exactly like an empty venue,
+which is a lie the class-agnostic query does not tell.
+
+**Every average is per bucket, never per document.** The drain interval is not
+constant (a restart, a slow batch), so averaging raw documents would let a
+densely sampled minute outvote a sparsely sampled hour. Each query groups to
+`$dateTrunc(unit_time)` first and averages the bucket averages.
+
+**Bucket labels leave as strings.** The service marshals documents as relaxed
+extended JSON, so a BSON date reaches the client as `{"$date": ...}` — an object
+no chart can label an axis with. `_iso()` wraps every emitted timestamp in
+`$dateToString` with an ISO-8601 UTC format; truncation still groups on the real
+date, so ordering and bucketing are unaffected. The day-of-week axis is renamed
+from `$dayOfWeek`'s 1..7 to `Sun`..`Sat` for the same reason: a number the client
+has to decode is not an insight.
 
 **The charts belong to the node type.** `GET /nodes/analytics` names no query.
 It asks the analytics service what the node declared and runs that list, so a
@@ -262,13 +298,18 @@ declares: sending `unit_time` to a query that does not take it is a payload
 error at the service, and withholding it from one that does is a missing
 parameter.
 
-One consequence worth stating: `counts_detail` returns a *per-class* document
-list rather than a shared category axis. A bucket can be missing for one class
-and present for another (a class added to `--chosen-classes` mid-run has no
-earlier buckets), and zero-filling it would assert a measurement that was never
-taken. The consumer takes the union of the points it receives; only
-`counts_summary` has an axis, and there all three series come out of the same
-`$group` so they cannot misalign.
+One consequence worth stating: each query returns one document of named keys
+rather than rows, so the consumer reads keys rather than joining axes.
+`occupancy` gives six views of one scan; `activity_by_class` gives one entry per
+class. A bucket can be missing for one class and present for another (a class
+added to `--chosen-classes` mid-run has no earlier buckets), and zero-filling it
+would assert a measurement that was never taken. `class_affinity` is the one
+place where a zero is a real answer: `buckets` counts the buckets the class was
+actually seen in, and `share` divides `together` by the subject's own
+occupied-bucket count — its own `$facet` view, because a per-class group cannot
+see how many buckets the subject filled. Counting every bucket instead made
+`share` a constant `1.0` for every class, a defect no unit test could see and a
+live probe could.
 
 One data-shape caveat in the same path: classes with zero detections in an
 interval are omitted rather than zero-filled, so the unwound series has gaps.
@@ -389,8 +430,8 @@ at query time by the service. Declared pipelines must return **generic chart
 data** (axes/categories, series names, values) — never rendering-library
 structures like ECharts option objects; library mapping is the presentation
 layer's job. **Status: landed.** `nodes/lib/bustle/analytics.py` builds the
-manifest (`counts_detail`, `counts_summary`, `counts_totals`) and the node
-publishes
+manifest (`activity_by_class`, plus `occupancy`, `rhythm` and `class_affinity`
+when the node counts a subject — §8) and the node publishes
 it from `BustleWorker.registered()`, which the runtime runs once `nodes.add`
 has succeeded — retried while the service is still booting, bounded at thirty
 attempts so a deployment with no analytics service logs a warning a second for
@@ -944,8 +985,9 @@ evidence.
 6. `nodes/lib/core/` must stay node-type-agnostic: no AI/model/database specifics
    may land there (they enter via hooks, the pipeline object, or manifests).
    Enforced as part of the nodes refactor (DESIGN.md §12). `logging_setup.py`
-   complies; `pipeline.py` currently hard-codes the H264/BGR decode chain
-   (TODO.md A3 parameterizes it).
+   complies; `pipeline.py` takes its decode chain as a parameter
+   (`DEFAULT_DECODE_CHAIN`, `--decode-chain`), so the codec a node type reads is
+   its own choice rather than the runtime's.
 7. Writer-owned queries: any read model for a node type's data must be
    declared by that node type (query manifest), never coded into the
    analytics service (DESIGN.md §11).

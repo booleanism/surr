@@ -77,11 +77,14 @@ packages (`internal/logging`) at build time.
    the charts belong to the node type, so a future detector with a different
    story to tell declares different queries and appears in the report with no
    hub change.
-   The pipelines emit **generic chart data** — for bustle, `counts_detail` gives
-   one document per class as `{name, points: [[bucket, value], ...]}`,
-   `counts_summary` one document as `{categories: [...], series: [{name,
-   values}]}`, and `counts_totals` one document as `{categories: [...], values:
-   [...]}`. Nothing chart-library-specific is baked into a stored pipeline, and
+   The pipelines emit **generic chart data** — for bustle, four queries that
+   each end as one `$facet` document: `activity_by_class` (per-class totals,
+   spread, peak bucket and share, plus `coverage`), `occupancy` (timeline, crowd
+   bands, busiest moments, first-half/second-half trend, busy and quiet streaks,
+   volatility), `rhythm` (average and peak by hour and by day, in the node's own
+   offset) and `class_affinity` (how often each class shares a bucket with the
+   subject). The three that need a subject are only declared when the node
+   actually counts one. Nothing chart-library-specific is baked into a stored pipeline, and
    no renderer's vocabulary appears anywhere in the stack: mapping rows onto a
    chart is the presentation layer's job, which is what DESIGN invariant #8
    asks for. See "Planned evolution"
@@ -389,8 +392,8 @@ credentials of its own rather than the root user the node holds.
 - `lib/bustle/` — the actual worker: `handlers.py`
   (`<node-id>.sink.start/stop`), `processing.py` (frame_worker thread running
   `detector.detect` + async normalizer draining into MongoDB), `analytics.py`
-  (the node's query manifest: `counts_detail`, `counts_summary` and
-  `counts_totals`, read-only stages only, emitting generic chart data). The
+  (the node's query manifest: `activity_by_class`, `occupancy`, `rhythm` and
+  `class_affinity`, read-only stages only, emitting generic chart data). The
   node publishes the manifest from `BustleWorker.registered()` and runs no
   query itself — it holds a write credential on its own collection and no read
   handle at all, so the aggregation is the analytics service's to execute.

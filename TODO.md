@@ -138,8 +138,9 @@ declare step).
 (`deploy/analytics.Dockerfile`, the `analytics` and `migrate-analytics` compose
 services). A node publishes its query manifest at boot, `GET /nodes/analytics`
 asks the service what that node declared and runs every query in it, and the
-node no longer reads its own collection. Only B6 (fleet-wide rollups) is left,
-and it is optional.
+node no longer reads its own collection. B7 (the rewrite of what the bustle
+queries actually say) is also done. Only B6 (fleet-wide rollups) is left, and it
+is optional.
 
 - [x] B1. analytics service skeleton
   - [x] analytics/ module: cmdline (broker, family, name, mongo url, dsn),
@@ -264,15 +265,71 @@ and it is optional.
         directory, so an existing `mongo-data` volume would never get the users.
         bustle uses the writer, analytics the reader: the split is enforced by
         credentials, not convention.
+- [x] B7. Bustle analytics rewrite — the queries now say something, and they
+        landed before B6 (which is optional) rather than after it.
+  - [x] Replaced the three demo-shaped queries with four that answer questions
+        about a scene: `activity_by_class` (class-agnostic: per-class total,
+        average, min, max, stddev, peak bucket, share of all detections, plus a
+        `coverage` block), `occupancy` (six views of one scan: `timeline`,
+        `crowd` band histogram, `moments`, `trend` first-half vs second-half,
+        `streaks`, `volatility`), `rhythm` (average and peak by hour of day and
+        day of week) and `class_affinity` (how often each other class shares a
+        bucket with the subject). The user's instruction was explicitly "don't
+        keep existing", so `counts_detail`/`counts_summary`/`counts_totals` are
+        gone rather than kept alongside.
+  - [x] Every query ends as ONE `$facet` document. The service caps a result at
+        2000 documents and 1 MiB and appends `$limit` to the pipeline, so a
+        query returning one document per bucket would truncate on a long window
+        and would cost a pass over the collection per chart; one document per
+        query means one scan per query and a report whose size depends on the
+        number of views, not the length of the window.
+  - [x] The subject is resolved, not assumed: `resolve_subject()` returns
+        `person` only when the node's `--chosen-classes` include it, and the
+        manifest then declares `activity_by_class` alone. A vehicle node
+        reporting three empty occupancy charts would be indistinguishable from
+        an empty venue.
+  - [x] `rhythm` buckets in the node's OWN offset (`local_utc_offset()`,
+        formatted `±HH:MM` from the node's clock rather than a flag that would
+        default to UTC and silently shift every peak). Day names replace
+        `$dayOfWeek`'s 1..7 so the axis is labelable.
+  - [x] Bucket labels leave as ISO strings via `_iso()`: the service marshals
+        relaxed extended JSON, so a BSON date reaches the client as
+        `{"$date": ...}` and no chart can label an axis with it.
+  - [x] Averages are per bucket, never per document — the drain interval is not
+        constant, so a densely sampled minute would otherwise outvote a sparsely
+        sampled hour.
+  - [x] `nodes/bustle.py` wires `subject` and `utc_offset` into
+        `bustle_analytics.declare` from `BustleWorker.__init__`; both are fixed
+        for the process (they depend only on the detector's class table and the
+        wall clock).
+  - [x] Seven defects found by writing the tests and by probing real MongoDB
+        (`tmp_probe_analytics.py`, 4800 seeded documents over three hours with a
+        deliberate 10-minute gap): `$case` instead of the bare `case` key;
+        `$mergeObjects` matching a `$merge` substring check; `affinity_pipeline`
+        emitting no document at all on an empty window (no `$facet`, so a bare
+        `$group` over nothing produces nothing); the facet results being spliced
+        into the report root instead of nested under their own keys (the
+        `$arrayElemAt` merge); `rhythm`'s facet views spliced the same way;
+        `class_affinity`'s `share` counting every bucket instead of the subject's
+        occupied ones; and BSON dates reaching the client as objects. Only the
+        live probe found the last three — the unit tests asserted shapes, not
+        values, which is why `tmp_probe_analytics.py` was worth writing.
+  - [x] `nodes/tests/test_lib_bustle_analytics.py` rewritten (228 Python tests
+        total, was 183): a `stages()` generator recurses into `$facet`
+        sub-pipelines and `keys()` walks every dict key, so `$mergeObjects` is
+        not mistaken for `$merge` and the stage count is checked through the
+        nesting rather than at the top level.
+  - [x] Docs: DESIGN.md §8/§11, ARCHITECTURE.md, this file, deploy/README.md,
+        and `deploy/smoke.sh` (four names plus a bucket-label-is-a-string check).
 - [ ] B6. Later (only if needed)
   - [ ] Fleet/wildcard declarations for cross-node rollups
   - [ ] Versioned query names (counts_by_minute@2) if rolling deploys mix
         versions
 
-Sequencing: B1–B5 are done, so the service is the read path and the node-side
-aggregation code is gone. What remains is B6, which is optional: fleet-wide
-rollups need a declaration that is not scoped to one node, and nothing today
-asks for one.
+Sequencing: B1–B5 and B7 are done, so the service is the read path and the
+node-side aggregation code is gone. What remains is B6, which is optional:
+fleet-wide rollups need a declaration that is not scoped to one node, and
+nothing today asks for one.
 Logging (C) is Go-only and independent of A — it can proceed in parallel,
 but must land before B1 so the analytics service is born with structured
 logging instead of being migrated after.

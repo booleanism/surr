@@ -263,13 +263,16 @@ stack down afterwards unless you pass `KEEP=1`. It checks, in order:
    serialised, resolved to the analytics service and accepted. Nothing else on
    the live path exercises `analytics.declare`.
    Then the read path end to end: `GET /nodes/analytics` has to come back with
-   the three queries the node declared (`counts_detail`, `counts_summary`,
-   `counts_totals`), each with its own rows, plus the window the hub chose.
-   Those names appear because the node declared them — the hub holds none of
-   them, which is what makes a new node type's charts work without a hub
-   change. `counts_totals` is the one worth watching: it takes no bucket width,
-   so it only answers if the hub sends each query the parameters *its* schema
-   declares and no others.
+   the four queries the node declared (`activity_by_class`, `occupancy`,
+   `rhythm`, `class_affinity`), each with its own rows, plus the window the hub
+   chose. Those names appear because the node declared them — the hub holds none
+   of them, which is what makes a new node type's charts work without a hub
+   change. `rhythm` is the one worth watching: it takes no bucket width, so it
+   only answers if the hub sends each query the parameters *its* schema declares
+   and no others. One more check reads a bucket label and asserts it is a
+   string: the service marshals documents as relaxed extended JSON, so a BSON
+   date would arrive as `{"$date": ...}` and no chart could label an axis with
+   it.
 4. **`tx` exits 0 on SIGTERM.** The assertion that was never made: an
    unreachable source used to make `tx` die of SIGSEGV, and rebuilding with a
    reachable one showed the abort was in the *shutdown* path, so it fired on a
