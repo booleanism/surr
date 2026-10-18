@@ -171,7 +171,8 @@ declare step).
 services). A node publishes its query manifest at boot, `GET /nodes/analytics`
 asks the service what that node declared and runs every query in it, and the
 node no longer reads its own collection. B7 (the rewrite of what the bustle
-queries actually say) is also done. Only B6 (fleet-wide rollups) is left, and it
+queries actually say) is also done, as is B6 (fleet-wide rollups). The only
+remaining item is versioned query names, and it
 is optional.
 
 - [x] B1. analytics service skeleton
@@ -353,15 +354,52 @@ is optional.
         nesting rather than at the top level.
   - [x] Docs: DESIGN.md §8/§11, ARCHITECTURE.md, this file, deploy/README.md,
         and `deploy/smoke.sh` (four names plus a bucket-label-is-a-string check).
-- [ ] B6. Later (only if needed)
-  - [ ] Fleet/wildcard declarations for cross-node rollups
+- [x] B6. Fleet declarations (done; versioned query names still deferred)
+  - [x] A declaration carries `node_type` and `scope` (`node` | `fleet`), added
+        by migration `000002_fleet_scope` with a `(node_type, scope)` index.
+        `scope` defaults to `'node'`, so the rows that predate it keep their
+        meaning with no backfill.
+  - [x] The fleet manifest is owned by the **node type**, not the node:
+        `UpsertDeclaration` deletes the type's `scope='fleet'` rows and inserts
+        the incoming ones in the same transaction, so a node that declares no
+        fleet query leaves the type's manifest alone while a node that does
+        replaces it whole. The last declaring node of a type owns the rollup.
+  - [x] `fleet_activity` is declared by the bustle node next to the four
+        per-node queries, and only when the node counts a subject (a rollup of a
+        class nobody counts is three empty charts).
+  - [x] The hub passes the caller's **own** node set with every query, because
+        the scope belongs to the node type's manifest and the hub knows no query
+        names. The service intersects that set with the type's declarations to
+        get the member collections, so a fleet query can only ever read
+        collections the caller owns.
+  - [x] The executor prepends one `$unionWith` per member beyond the first. The
+        member's own collection stays the aggregate target, so a one-node fleet
+        is the plain query with no union at all.
+  - [x] No members is `models.ErrEmptyFleet` rather than an empty answer: a
+        report of empty arrays reads as "the fleet saw nothing".
+  - [x] `$unionWith` stays **out** of the node pipeline allowlist. It is
+        injected by the executor after validation, so a manifest still cannot
+        name a collection it does not own — and `$lookup`/`$graphLookup` remain
+        refused for the same reason.
+  - [x] Two-stage arithmetic, and the order is load-bearing: per node per bucket
+        the value is the **average** of that node's documents (a bucket holds
+        several drain intervals; summing them reports a camera that sampled
+        twice as often as seeing twice as many people), and only then are the
+        nodes' values **summed** (the fleet total at that moment). A live probe
+        against two seeded collections is what found the first version summing
+        inside the bucket -- six 10s documents of four people summed to 24 per
+        minute.
+  - [x] Tests: 250 Python (the fleet arithmetic, both views sharing one per-node
+        stage, the default shape), and Go coverage of the scope round-trip, the
+        type-owned replace, the member intersection, the union prepend, the
+        empty fleet and the hub's fleet payload.
   - [ ] Versioned query names (counts_by_minute@2) if rolling deploys mix
         versions
 
-Sequencing: B1–B5 and B7 are done, so the service is the read path and the
-node-side aggregation code is gone. What remains is B6, which is optional:
-fleet-wide rollups need a declaration that is not scoped to one node, and
-nothing today asks for one.
+Sequencing: B1–B7 are done, so the analytics service is the whole read path,
+the node-side aggregation code is gone, and a report can answer across a fleet.
+What is left in B is one optional hardening item: versioned query names, which
+only matters once two builds of the same node type run at once.
 Logging (C) is Go-only and independent of A — it can proceed in parallel,
 but must land before B1 so the analytics service is born with structured
 logging instead of being migrated after.

@@ -11,10 +11,11 @@ central orchestrator.
 
 > **Project status: the control plane runs, and every defect found in the 2026-10
 > review is fixed.** [TODO.md](TODO.md) section E is the tracker for those
-> findings — each defect as it was found, with the fix appended — and sections A
-> and B are the work still ahead: the last of the nodes refactor (packaging and
-> the "add a node type" recipe) and, in B, only the optional fleet-wide analytics
-> rollups. The `analytics` service is on the request path.
+> findings — each defect as it was found, with the fix appended — and section A
+> is what is left (nodes packaging). The `analytics` service is the whole read
+> path: a node declares its queries as data, the service runs them under its own
+> bounds, and a fleet-scoped declaration rolls a node type up across every one of
+> its nodes the caller owns.
 > Tests cover the RPC reply layer, the restart backoff, the rx data plane and the
 > `nodes/lib/core` runtime, and `make typecheck` gates the Python side with
 > pyright; what is exercised by hand is the wiring — a real SRT socket and a real

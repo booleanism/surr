@@ -495,9 +495,38 @@ now.
 - Query names become part of the wire contract between node author and
   presentation layer — hence `analytics.queries.list` is part of the design,
   not decoration.
-- Cross-node (fleet) aggregation is a fan-out over per-node collections by
-  the service, not a join; acceptable now, extensible later via wildcard
-  declarations.
+- **Cross-node (fleet) aggregation is a `$unionWith` fan-out over the members'
+  collections, and the membership comes from the caller, not from the query.**
+  A fleet query is declared by the node type (`scope: "fleet"`, plus the
+  `node_type` it belongs to) and stored once for the type rather than once per
+  node. At query time the hub sends the set of node ids the caller owns, the
+  service intersects that set with the type's declarations to get the member
+  collections, and the executor prepends one `$unionWith` per member beyond the
+  first. Three consequences are the point of the design:
+
+  - **The query names no collection.** `$unionWith` is injected *after* the
+    pipeline is validated, so `$unionWith` stays out of the manifest allowlist
+    and no manifest — however it arrived — can read a collection its author does
+    not own. `$lookup`/`$graphLookup` remain refused for the same reason.
+  - **The hub still knows no query name.** It cannot decide whether a query is
+    fleet-scoped, so it sends the membership with every query and the service
+    ignores it for a node-scoped one. The alternative — the hub classifying
+    queries — would put a node's vocabulary back into the control plane, which
+    is the coupling §11 exists to remove.
+  - **No members is an error, not an empty report.** `models.ErrEmptyFleet`
+    surfaces as a per-query error, because a fleet report full of empty arrays
+    reads as "the deployment saw nothing" — the same lie the hub's liveness
+    check refuses for a single node.
+- **The fleet arithmetic is two-staged, and the order is load-bearing.** Per
+  node per bucket the value is the **average** of that node's documents in the
+  bucket; only then are the nodes' values for that bucket **summed**. A bucket
+  holds several drain intervals, so summing them first reports a camera that
+  sampled twice as often as seeing twice as many people — the first version did
+  exactly that, and a live probe (six 10s documents of four people summing to 24
+  in one minute) is what caught it, because a structural test cannot see
+  arithmetic. Averaging the per-node averages afterwards would be the opposite
+  error: a node that reported twice as heavily would count twice as much, so a
+  camera restarted mid-window would weigh less than one that was not.
 - Rolling deploys can briefly mix query versions across instances of the same
   node type; mitigated by versioned query names if it ever bites.
 - **A declaration outlives the node that made it, so liveness is a separate

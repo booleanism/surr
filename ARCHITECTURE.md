@@ -170,6 +170,19 @@ default, which a blocklist could not guarantee because `$facet` can nest one), a
 stage cap, a `$limit` appended rather than merged, and a document/byte cap on the
 result.
 
+A declaration is scoped either to the node (`scope: "node"`, the default) or to
+the node's **type** (`scope: "fleet"`, which additionally requires `node_type`).
+A fleet query is the only one the service runs across more than one collection:
+the request carries the caller's own node ids, the service intersects them with
+the type's declarations to get the member collections, and the executor prepends
+one `$unionWith` per member beyond the first. Both halves are deliberate — the
+node declares the rollup, because only the node knows what its documents mean,
+and the caller supplies the membership, because the hub must not have to know a
+query's name to know whether it is safe to run. `$unionWith` is therefore
+injected *after* validation rather than allowed in a manifest, so no manifest can
+name a collection its author does not own. A caller with no member of that type
+gets `models.ErrEmptyFleet` rather than a report of empty arrays.
+
 Commands are conventionally named `<subject>.<verb>`; node commands embed the
 node UUID rather than the node's per-instance sibling name
 (`rpc.direct.<name>`, e.g. `bustle0`) because the UUID is the stable
@@ -515,10 +528,11 @@ for their status.
 
 ### Open
 
-Every defect in TODO.md sections E and F is fixed. What remains is tracked in
-TODO.md sections A (nodes refactor, packaging) and B (analytics service, where
-B1–B5 are done and only B6 — fleet-wide declarations — is left). No correctness
-defect is open in the shipped path.
+Every defect in TODO.md sections E and F is fixed, and the analytics plan is
+complete through B7 including fleet declarations (B6). What remains is tracked in
+TODO.md sections A (nodes packaging) and B (versioned query names, which only
+matters once two builds of one node type run at once). No correctness defect is
+open in the shipped path.
 
 ## Build & tooling
 
@@ -597,17 +611,23 @@ understanding them.
 node (writer)                         analytics service (reader)
 ──────────────────────────────        ───────────────────────────────
 owns document shape                   owns nothing node-specific
-owns write path                       registry: (node_id) → query manifest
+owns write path                       registry: (node_id, name) → query
 owns query manifest (as data)         sanitized executor (operator whitelist)
 ```
+
+A fleet-scoped query is the one exception to the left column, and it is still
+the node's: the node type declares it, and the row is keyed by
+`(node_type, scope='fleet')` rather than by a node id, so the last declaring node
+of that type owns the rollup.
 
 Flow:
 
 1. On boot, after `nodes.add`, the node declares its query manifest over the
    broker: `analytics.declare` with
-   `{node_id, collection, queries: [{name, params_schema?, pipeline}]}`.
+   `{node_id, node_type, collection, queries: [{name, params_schema?, pipeline, scope?}]}`.
    Idempotent — re-declared every boot, so upgraded aggregation logic ships
-   with the upgraded writer.
+   with the upgraded writer. A `scope: "fleet"` query is stored once for the
+   node's type instead of once per node.
 2. The service upserts the manifest (SQLite registry) and serves
    `analytics.query {node_id, query_name, params}` — substitutes params,
    appends the time-range `$match`, runs the aggregation read-only, returns
