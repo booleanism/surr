@@ -1,14 +1,11 @@
 import argparse
 import asyncio
-import json
 import logging
 import os
-import signal
 import sys
 import typing
 import uuid
 
-import aio_pika
 import pymongo
 from pymongo import collection
 from pymongo.errors import CollectionInvalid
@@ -19,11 +16,8 @@ from lib.bustle import handlers as bustle_handlers
 from lib.bustle import processing as bustle_processing
 from lib.core import handlers as core_handlers
 from lib.core import logging_setup
+from lib.core import node as core_node
 from lib.core import pipeline as core_pipeline
-from lib.core import rpc as core_rpc
-from lib.core import router as core_router
-from lib.core import siblings as core_siblings
-from lib.core import ticker as core_ticker
 
 logger = logging.getLogger("bustle")
 
@@ -185,24 +179,61 @@ def parse_args(argv: typing.Optional[typing.List[str]] = None) -> argparse.Names
     return parser.parse_args(argv)
 
 
-async def introduce(
-    interval: float,
-    router: core_router.Router,
-    version: str,
-) -> None:
-    ticker_gen = core_ticker.ticker(interval)
-    async for _ in ticker_gen:
-        await router.introduce(version)
+class BustleWorker(core_node.Worker):
+    """The bustle node type: three commands and one drain loop.
 
+    Everything about broker membership -- the router, the introduce ticker,
+    registration and the shutdown ordering -- belongs to the runtime, so it is
+    not here. What is here is what only an object counter has.
+    """
 
-def install_signal_handlers(stop_event: asyncio.Event) -> None:
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop_event.set)
-        except NotImplementedError:
-            pass
+    def __init__(
+        self,
+        node_id: uuid.UUID,
+        streamer: core_pipeline.SRTStreamer,
+        detector: lib_detector.Detector,
+        chosen_classes: typing.List[int],
+        async_q: asyncio.Queue[dict[str, int]],
+        coll: collection.Collection,
+        drain_interval: float,
+        node_type: str,
+    ) -> None:
+        self._node_id = node_id
+        self._streamer = streamer
+        self._detector = detector
+        self._chosen_classes = chosen_classes
+        self._async_q = async_q
+        self._coll = coll
+        self._drain_interval = drain_interval
+        self._node_type = node_type
 
+    def attach(self, hs: core_handlers.Handlers) -> None:
+        bustle_handlers.BustleHandlers.setup(
+            self._node_id,
+            hs,
+            self._streamer,
+            self._detector,
+            self._chosen_classes,
+            self._async_q,
+            self._coll,
+        )
+
+    def start(self) -> list[asyncio.Task[typing.Any]]:
+        task = asyncio.create_task(
+            bustle_processing.normalizer(
+                self._async_q,
+                self._drain_interval,
+                self._node_id,
+                self._node_type,
+                self._coll,
+            )
+        )
+        logger.info("starting normalizer")
+        return [task]
+
+    async def stop(self) -> None:
+        # set_state(NULL) blocks, so keep it off the event loop.
+        await asyncio.to_thread(self._streamer.stop)
 
 def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> tuple[pymongo.MongoClient, collection.Collection]:
     # serverSelectionTimeoutMS keeps a dead or unreachable mongod from parking
@@ -228,7 +259,6 @@ def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> tuple[pymongo.
         pass
 
     return mongo_client, nodes_db.get_collection(id)
-
 
 async def main() -> int:
     args = parse_args()
@@ -257,199 +287,43 @@ async def main() -> int:
         logger.error("error opening database connection node_id=%s: %s", args.node_id, e)
         return 1
 
-    handlers = core_handlers.Handlers()
-    siblings = core_siblings.Siblings()
-    streamer = core_pipeline.SRTStreamer(args.node_id, args.decode_chain)
-    async_q: asyncio.Queue[dict[str, int]] = asyncio.Queue()
-    detector = lib_detector.LibreYOLODetector(args.model, args.confidence)
-
-    bustle_handlers.BustleHandlers.setup(
+    worker = BustleWorker(
         args.node_id,
-        handlers,
-        streamer,
-        detector,
+        core_pipeline.SRTStreamer(args.node_id, args.decode_chain),
+        lib_detector.LibreYOLODetector(args.model, args.confidence),
         args.chosen_classes,
-        async_q,
+        asyncio.Queue(),
         coll,
+        args.drain_interval,
+        args.node_type,
     )
 
-    tasks: list[asyncio.Task] = []
-    router: typing.Optional[core_router.Router] = None
-    listen_task: typing.Optional[asyncio.Task] = None
-    stop_waiter: typing.Optional[asyncio.Task] = None
-
-    reg_payload = json.dumps(
-        [
-            {
-                "id": str(args.node_id),
-                "bitrate": args.bitrate,
-                "width": args.width,
-                "height": args.height,
-            }
-        ]
-    ).encode()
-
-    registered_event = asyncio.Event()
-
-    async def register(r: core_router.Router) -> None:
-        """Register the node once, retrying until the hub is discovered.
-
-        Retries (rather than failing outright) because the node may start
-        before the hub has introduced itself.
-        """
-        await core_rpc.call(
-            r,
-            siblings,
-            "nodes.add",
-            reg_payload,
-            timeout=DEFAULT_RPC_TIMEOUT,
-            retry_interval=args.intro_interval,
-        )
-        logger.info("node registered command=nodes.add node_id=%s", args.node_id)
-        registered_event.set()
-
     stop_event = asyncio.Event()
-    install_signal_handlers(stop_event)
+    core_node.install_signal_handlers(stop_event)
 
-    connection = await aio_pika.connect_robust(args.broker)
-    async with connection:
-        try:
-            channel = await connection.channel()
-            queue, exchange, routing_id = await core_router.setup_router(
-                channel, args.node_name, args.family
-            )
-            router = core_router.Router(
-                channel, queue, exchange, routing_id, handlers, siblings
-            )
+    n = core_node.Node(
+        node_id=args.node_id,
+        name=args.node_name,
+        family=args.family,
+        broker=args.broker,
+        version=lib_version.VERSION,
+        register_payload=core_node.register_payload(
+            args.node_id,
+            bitrate=args.bitrate,
+            width=args.width,
+            height=args.height,
+        ),
+        worker=worker,
+        intro_interval=args.intro_interval,
+    )
 
-            listen_task = asyncio.create_task(router.listen())
-            logger.info("starting router listen")
-
-            intro_task = asyncio.create_task(
-                introduce(args.intro_interval, router, lib_version.VERSION)
-            )
-
-            normalizer_task = asyncio.create_task(
-                bustle_processing.normalizer(
-                    async_q,
-                    args.drain_interval,
-                    args.node_id,
-                    args.node_type,
-                    coll,
-                )
-            )
-            logger.info("starting normalizer")
-
-            register_task = asyncio.create_task(register(router))
-            logger.info("starting registration")
-
-            def on_register_done(task: asyncio.Task) -> None:
-                """Report a registration that gave up.
-
-                register_task is excluded from the wait set below because it
-                completing successfully must not stop the node; without this
-                callback its failure would only surface (if at all) at
-                shutdown, as a node that quietly stopped being reachable.
-                """
-                if task.cancelled():
-                    return
-
-                exc = task.exception()
-                if exc is not None:
-                    logger.error(
-                        "node registration failed node_id=%s: %s", args.node_id, exc
-                    )
-
-            register_task.add_done_callback(on_register_done)
-
-            stop_waiter = asyncio.create_task(stop_event.wait())
-
-            tasks.extend([listen_task, intro_task, normalizer_task, register_task])
-
-            # listen/intro/normalizer never complete on their own, so any
-            # completion here means shutdown or a crashed task. register_task
-            # is deliberately excluded: it finishes once nodes.add succeeds
-            # and the node keeps running afterwards.
-            done, _ = await asyncio.wait(
-                [listen_task, intro_task, normalizer_task, stop_waiter],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            if stop_waiter in done:
-                logger.info("shutdown signal received, stopping bustle node")
-            else:
-                for task in done:
-                    exc = task.exception()
-                    if exc is not None:
-                        raise exc
-
-        except asyncio.CancelledError:
-            logger.info("shutting down bustle node")
-        finally:
-            # set_state(NULL) blocks, so keep it off the event loop.
-            await asyncio.to_thread(streamer.stop)
-
-            # stop background work first; listen stays alive so the
-            # nodes.remove reply can still be received
-            background = [t for t in tasks if t is not listen_task]
-            for task in background:
-                if not task.done():
-                    task.cancel()
-
-            if background:
-                # return_exceptions=True keeps one failure from hiding the
-                # others, but it also discards them: report each one instead
-                # of letting a crashed task vanish.
-                for result in await asyncio.gather(*background, return_exceptions=True):
-                    if isinstance(result, asyncio.CancelledError):
-                        continue
-
-                    if isinstance(result, BaseException):
-                        logger.error("background task failed: %s", result, exc_info=result)
-
-            if (
-                registered_event.is_set()
-                and listen_task is not None
-                and not listen_task.done()
-                and router is not None
-            ):
-                try:
-                    await asyncio.wait_for(
-                        core_rpc.call(
-                            router,
-                            siblings,
-                            "nodes.remove",
-                            reg_payload,
-                            timeout=2.0,
-                            retry_interval=0.0,
-                            retries=0,
-                        ),
-                        timeout=DEFAULT_RPC_TIMEOUT,
-                    )
-                    logger.info("node deregistered command=nodes.remove node_id=%s", args.node_id)
-                except Exception as e:
-                    logger.warning(
-                        "nodes.remove failed (stale row may remain in hub) node_id=%s: %s",
-                        args.node_id,
-                        e,
-                    )
-
-            # Stop the consumer even when registration never completed:
-            # otherwise it stays parked on its future while `async with
-            # connection` closes the channel underneath it.
-            if listen_task is not None and not listen_task.done():
-                listen_task.cancel()
-                await asyncio.gather(listen_task, return_exceptions=True)
-
-            if stop_waiter is not None and not stop_waiter.done():
-                stop_waiter.cancel()
+    await n.run(stop_event)
 
     # Closed after the connection so a late insert from a cancelled normalizer
     # cannot use a client that is already torn down.
     mongo_client.close()
 
     return 0
-
 
 if __name__ == "__main__":
     try:
