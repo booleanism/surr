@@ -14,6 +14,15 @@ import (
 // have to import the one below it.
 var ErrQueryTooLarge = errors.New("query result too large")
 
+// ErrEmptyFleet reports a fleet-scoped query with no collection to aggregate.
+//
+// It is its own sentinel because it is not a missing declaration and not a
+// malformed one: the query exists and is well formed, but the caller owns no
+// node of the type that declared it, so there is nothing to union. Answering
+// with an empty result would read as a fleet that saw nothing, which is the same
+// defect the hub's liveness check exists to prevent for one node.
+var ErrEmptyFleet = errors.New("no nodes to aggregate")
+
 // ErrDeclarationNotFound reports a lookup for a query a node never declared. It
 // lives here for the same reason as ErrQueryTooLarge: the SQLite store raises
 // it, the usecase passes it on and the handler turns it into the not-found reply
@@ -39,8 +48,43 @@ var ErrDeclarationNotFound = errors.New("declaration not found")
 type Query struct {
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
+	Scope        string          `json:"scope,omitempty"`
 	Pipeline     json.RawMessage `json:"pipeline"`
 	ParamsSchema json.RawMessage `json:"params_schema,omitempty"`
+}
+
+// The two scopes a declared query can have.
+//
+// ScopeNode reads the collection of the node the query was declared by, which is
+// every query this service served before fleet declarations existed. ScopeFleet
+// reads the collections of every node of the same type that the caller is
+// allowed to see, unioned by the service itself.
+//
+// The distinction exists because a rollup across cameras cannot be expressed as
+// one aggregation over one collection, and the alternatives are worse: a node
+// naming the collections to union would put the boundary this service exists to
+// hold into the manifest, and merging N single-collection answers in the service
+// would be wrong for any pipeline that groups -- two halves of a fleet each
+// averaging 3 people do not average 3 together.
+const (
+	ScopeNode  = "node"
+	ScopeFleet = "fleet"
+)
+
+// NormalizedScope returns the scope a declared query means, treating an absent
+// scope as ScopeNode. It exists so the empty string has one meaning rather than
+// being compared against "" in one place and ScopeNode in another.
+func (q Query) NormalizedScope() string {
+	if q.Scope == "" {
+		return ScopeNode
+	}
+
+	return q.Scope
+}
+
+// IsFleet reports whether the query aggregates across nodes.
+func (q Query) IsFleet() bool {
+	return q.NormalizedScope() == ScopeFleet
 }
 
 // Declaration is the manifest a node publishes with analytics.declare.
@@ -50,8 +94,16 @@ type Query struct {
 // removes it instead of leaving a query behind that the node no longer offers.
 //
 // Field order follows the same rule as Query's; see the note there.
+// NodeType names the kind of node that published it -- "bustle" today. It is
+// what makes a fleet resolvable: a fleet-scoped query is stored against the type,
+// and its members are the nodes of that type the caller may read.
+//
+// It is sent by the node rather than inferred from the collection name, because
+// the collection name is the node id with its dashes stripped and carries no
+// type at all.
 type Declaration struct {
 	Collection string    `json:"collection"`
+	NodeType   string    `json:"node_type,omitempty"`
 	Queries    []Query   `json:"queries"`
 	NodeID     uuid.UUID `json:"node_id"`
 }
@@ -60,9 +112,17 @@ type Declaration struct {
 //
 // The collection is per node rather than per query, so a lookup by query name
 // has to carry both back to the caller.
+//
+// Collections is populated only for a fleet-scoped query, and it is the resolved
+// membership rather than something the caller supplied: the executor runs the
+// first and unions the rest. Keeping the list here means the node's manifest
+// never names a collection, and the executor never has to go back to the
+// registry mid-query.
 type DeclaredQuery struct {
-	Collection string `json:"collection"`
-	Query      Query  `json:"query"`
+	Collection  string   `json:"collection"`
+	Scope       string   `json:"scope,omitempty"`
+	Query       Query    `json:"query"`
+	Collections []string `json:"collections,omitempty"`
 }
 
 // NodeRef is the payload of a command that acts on one node and nothing else.
@@ -77,9 +137,19 @@ type NodeRef struct {
 
 // AnalyticsQueryRequest is the payload of analytics.query.
 // Field order follows the same rule as Query's; see the note there.
+// Fleet is the set of nodes the caller is allowed to read, named by id rather
+// than by collection. The service resolves each id to the collection that node
+// declared, so the authorization stays with the caller and the boundary this
+// service holds -- a manifest never names a collection -- is unchanged.
+//
+// It is sent with every query and ignored by a node-scoped one, because the
+// caller does not know which scope a name has and should not have to: the scope
+// belongs to the node type's manifest, and the hub deliberately knows no query
+// names.
 type AnalyticsQueryRequest struct {
 	Params    map[string]any `json:"params,omitempty"`
 	QueryName string         `json:"query_name"`
+	Fleet     []uuid.UUID    `json:"fleet,omitempty"`
 	NodeID    uuid.UUID      `json:"node_id"`
 }
 
@@ -93,6 +163,7 @@ type AnalyticsQueryRequest struct {
 type QueryInfo struct {
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
+	Scope        string          `json:"scope,omitempty"`
 	ParamsSchema json.RawMessage `json:"params_schema,omitempty"`
 }
 
