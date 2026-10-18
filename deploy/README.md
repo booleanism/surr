@@ -257,7 +257,11 @@ stack down afterwards unless you pass `KEEP=1`. It checks, in order:
    an add with no nodes is a `400` rather than an empty subscription, and adding
    a node that is already subscribed is a `409` rather than a `500`.
 3. **frames reach the node and land in mongo** — the count is read twice, 30s
-   apart, and has to climb.
+   apart, and has to climb. Also that the node **declared its analytics
+   queries**: the declaration is published from the post-registration hook, so
+   a `declared analytics queries` line means the manifest was built,
+   serialised, resolved to the analytics service and accepted. Nothing else on
+   the live path exercises `analytics.declare`.
 4. **`tx` exits 0 on SIGTERM.** The assertion that was never made: an
    unreachable source used to make `tx` die of SIGSEGV, and rebuilding with a
    reachable one showed the abort was in the *shutdown* path, so it fired on a

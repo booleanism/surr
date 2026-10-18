@@ -13,7 +13,8 @@
 #   2. the HTTP API answers, and the client mistakes are client errors: a
 #      duplicate signup is 409 rather than 500, a body using `password` is 400,
 #      an add with no nodes is 400 and an already-subscribed node is 409
-#   3. the node registers itself, and frames reach it and land in mongo
+#   3. the node registers itself, declares its analytics queries, and frames
+#      reach it and land in mongo
 #   4. tx exits 0 on SIGTERM instead of dying of a GLib assertion
 #   5. an absent node does not make rx reconnect in a tight loop, and the chain
 #      recovers by itself once the node comes back
@@ -253,6 +254,28 @@ if [ -z "$available" ]; then
     printf '\n'
     no "the node registered and is unsubscribed" \
         "not in /nodes/availability after 180s; docker compose logs bustle hub"
+fi
+
+# The declaration is the node's own proof that it reached the analytics service:
+# it is published from the post-registration hook, so a line here means the
+# manifest was built, serialised, resolved to the right sibling and accepted.
+# Nothing else on the live path exercises analytics.declare.
+printf '  waiting for the node to declare its queries'
+declared=""
+for _ in $(seq 1 20); do
+    declared=$(docker logs surr-bustle-1 2>&1 | grep -c 'declared analytics queries')
+    if [ "${declared:-0}" -gt 0 ]; then
+        printf '\n'
+        ok "the node declared its analytics queries"
+        break
+    fi
+    printf '.'
+    sleep 2
+done
+if [ "${declared:-0}" -eq 0 ]; then
+    printf '\n'
+    no "the node declared its analytics queries" \
+        "no 'declared analytics queries' in 40s; docker logs surr-bustle-1 surr-analytics-1"
 fi
 
 # ----------------------------------------------------------- 5. the data plane
