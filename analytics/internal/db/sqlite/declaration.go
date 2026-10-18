@@ -36,6 +36,7 @@ const (
 	`
 	deleteDeclarationStmt = `DELETE FROM declarations WHERE node_id = ?`
 	selectQueryNamesStmt  = `SELECT name FROM declarations WHERE node_id = ? ORDER BY name`
+	selectQueryInfosStmt  = `SELECT name, description, params_schema FROM declarations WHERE node_id = ? ORDER BY name`
 	selectQueryStmt       = `SELECT collection, description, params_schema, pipeline FROM declarations WHERE node_id = ? AND name = ?`
 )
 
@@ -121,6 +122,40 @@ func (d declaration) SelectQueryNames(ctx context.Context, nodeID uuid.UUID, nam
 			return i, err
 		}
 
+		i++
+	}
+
+	return i, rws.Err()
+}
+
+// SelectQueryInfos returns every declared query for one node, sorted by name,
+// with the metadata a caller needs to run each of them and nothing else.
+//
+// Sorted for the same reason as SelectQueryNames: the reply drives what a human
+// is shown, and SQLite's row order is not otherwise promised. The order is also
+// what makes a report stable across requests.
+func (d declaration) SelectQueryInfos(ctx context.Context, nodeID uuid.UUID, infos *[]models.QueryInfo) (int, error) {
+	rws, err := d.DB.QueryContext(ctx, selectQueryInfosStmt, nodeID[:])
+	if err != nil {
+		return 0, err
+	}
+	defer rws.Close() //nolint:errcheck
+
+	i := 0
+	for rws.Next() {
+		if i >= cap(*infos) {
+			return i, fmt.Errorf("%w: stopped after %d rows", ErrBufferFull, i)
+		}
+
+		*infos = append(*infos, models.QueryInfo{})
+
+		var paramsSchema string
+
+		if err = rws.Scan(&(*infos)[i].Name, &(*infos)[i].Description, &paramsSchema); err != nil {
+			return i, err
+		}
+
+		(*infos)[i].ParamsSchema = json.RawMessage(paramsSchema)
 		i++
 	}
 

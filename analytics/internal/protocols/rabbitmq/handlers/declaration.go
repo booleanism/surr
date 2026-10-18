@@ -24,7 +24,7 @@ type SetHandler interface {
 // -- the same split as subscriptions' handlers.Subscriptions.
 type Declarations interface {
 	Declare(ctx context.Context, decl models.Declaration) error
-	ListQueries(ctx context.Context, nodeID uuid.UUID, names *[]string) (int, error)
+	ListQueries(ctx context.Context, nodeID uuid.UUID, infos *[]models.QueryInfo) (int, error)
 }
 
 type declaration struct {
@@ -106,7 +106,12 @@ func (d declaration) declareHandler(ctx context.Context, trackID uuid.UUID, req 
 	_ = rep(ctx, protocols.ResultResponse(res))
 }
 
-// listQueriesHandler answers which query names a node has declared.
+// listQueriesHandler answers what a node declared: each query's name, its
+// description and the parameters it takes.
+//
+// The pipeline is not in the reply. A caller runs a query by name, so the
+// aggregation never has to leave the service -- and a list that carried every
+// pipeline would hand the node's document shape to every reader of the list.
 func (d declaration) listQueriesHandler(ctx context.Context, trackID uuid.UUID, req protocols.RouterRequest, rep protocols.ReplyFunc) {
 	const command = "analytics.queries.list"
 
@@ -122,9 +127,9 @@ func (d declaration) listQueriesHandler(ctx context.Context, trackID uuid.UUID, 
 		return
 	}
 
-	names := make([]string, 0, 8)
+	infos := make([]models.QueryInfo, 0, 8)
 
-	n, err := d.d.ListQueries(ctx, ref.NodeID, &names)
+	n, err := d.d.ListQueries(ctx, ref.NodeID, &infos)
 	if err != nil {
 		d.logFail(ctx, command, protocols.CodeDomain, err)
 		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeDomain, err))
@@ -132,7 +137,7 @@ func (d declaration) listQueriesHandler(ctx context.Context, trackID uuid.UUID, 
 		return
 	}
 
-	res, err := json.Marshal(names[:n])
+	res, err := json.Marshal(infos[:n])
 	if err != nil {
 		d.logFail(ctx, command, protocols.CodeMarshalReply, err)
 		_ = rep(ctx, protocols.ErrorResponse(protocols.CodeMarshalReply, err))

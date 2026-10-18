@@ -93,7 +93,7 @@ type fakeDeclarations struct {
 	declareErr  error
 	listErr     error
 	declared    []models.Declaration
-	names       []string
+	infos       []models.QueryInfo
 	reportedRow int
 	askedFor    uuid.UUID
 }
@@ -108,16 +108,16 @@ func (f *fakeDeclarations) Declare(_ context.Context, decl models.Declaration) e
 	return nil
 }
 
-func (f *fakeDeclarations) ListQueries(_ context.Context, nodeID uuid.UUID, names *[]string) (int, error) {
+func (f *fakeDeclarations) ListQueries(_ context.Context, nodeID uuid.UUID, infos *[]models.QueryInfo) (int, error) {
 	f.askedFor = nodeID
 
 	if f.listErr != nil {
 		return 0, f.listErr
 	}
 
-	(*names) = append((*names), f.names...)
+	(*infos) = append((*infos), f.infos...)
 
-	n := len(f.names)
+	n := len(f.infos)
 	if f.reportedRow >= 0 && f.reportedRow < n {
 		n = f.reportedRow
 	}
@@ -188,16 +188,23 @@ func TestDeclarationHandlers(t *testing.T) {
 		},
 		{
 			name: "list success", command: "analytics.queries.list", payload: node,
-			decls:    &fakeDeclarations{names: []string{"detail", "summary"}, reportedRow: -1},
+			decls: &fakeDeclarations{reportedRow: -1, infos: []models.QueryInfo{
+				{Name: "detail", Description: "over time", ParamsSchema: []byte(`{"unit_time":"string"}`)},
+				{Name: "summary"},
+			}},
 			wantCode: protocols.CodeSuccess,
-			wantBody: `["detail","summary"]`,
+			// The schema travels with the name: the caller reads it to decide
+			// which parameters each query takes. The pipeline does not travel.
+			wantBody: `[{"name":"detail","description":"over time","params_schema":{"unit_time":"string"}},{"name":"summary"}]`,
 		},
 		{
 			// A truncated read must not be replied as if it were complete.
 			name: "list truncates to the reported count", command: "analytics.queries.list", payload: node,
-			decls:    &fakeDeclarations{names: []string{"a", "b", "c"}, reportedRow: 2},
+			decls: &fakeDeclarations{reportedRow: 2, infos: []models.QueryInfo{
+				{Name: "a"}, {Name: "b"}, {Name: "c"},
+			}},
 			wantCode: protocols.CodeSuccess,
-			wantBody: `["a","b"]`,
+			wantBody: `[{"name":"a"},{"name":"b"}]`,
 		},
 		{
 			name: "list of nothing", command: "analytics.queries.list", payload: node,
@@ -276,7 +283,7 @@ func TestDeclarationHandlers(t *testing.T) {
 // wrong name, and one no node would ever send, so the handler answered an empty
 // list and looked like an empty registry.
 func TestListQueriesReadsTheNodeIDField(t *testing.T) {
-	decls := &fakeDeclarations{names: []string{"detail"}, reportedRow: -1}
+	decls := &fakeDeclarations{reportedRow: -1, infos: []models.QueryInfo{{Name: "detail"}}}
 
 	hs := newCaptureHandlers()
 	if err := SetupDeclaration(decls, hs); err != nil {

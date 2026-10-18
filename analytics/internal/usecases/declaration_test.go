@@ -17,7 +17,7 @@ type fakeStore struct {
 	upsertErr error
 	queryErr  error
 	stored    []models.Declaration
-	names     []string
+	infos     []models.QueryInfo
 }
 
 func (f *fakeStore) UpsertDeclaration(_ context.Context, decl models.Declaration) error {
@@ -30,14 +30,14 @@ func (f *fakeStore) UpsertDeclaration(_ context.Context, decl models.Declaration
 	return nil
 }
 
-func (f *fakeStore) SelectQueryNames(_ context.Context, _ uuid.UUID, names *[]string) (int, error) {
+func (f *fakeStore) SelectQueryInfos(_ context.Context, _ uuid.UUID, infos *[]models.QueryInfo) (int, error) {
 	if f.queryErr != nil {
 		return 0, f.queryErr
 	}
 
-	(*names) = append((*names), f.names...)
+	(*infos) = append((*infos), f.infos...)
 
-	return len(f.names), nil
+	return len(f.infos), nil
 }
 
 func (f *fakeStore) SelectQuery(_ context.Context, _ uuid.UUID, _ string) (models.DeclaredQuery, error) {
@@ -252,17 +252,26 @@ func TestDeclareReportsAStorageFailureAsItself(t *testing.T) {
 	}
 }
 
-func TestListQueriesPassesTheNamesThrough(t *testing.T) {
-	store := &fakeStore{names: []string{"detail", "summary"}}
-	names := make([]string, 0, 8)
+func TestListQueriesPassesTheDeclarationsThrough(t *testing.T) {
+	store := &fakeStore{infos: []models.QueryInfo{
+		{Name: "detail", ParamsSchema: []byte(`{"start_time":"string","unit_time":"string"}`)},
+		{Name: "summary"},
+	}}
+	infos := make([]models.QueryInfo, 0, 8)
 
-	n, err := NewDeclaration(store).ListQueries(context.Background(), uuid.New(), &names)
+	n, err := NewDeclaration(store).ListQueries(context.Background(), uuid.New(), &infos)
 	if err != nil {
 		t.Fatalf("list queries: %v", err)
 	}
 
-	if n != 2 || len(names) != 2 {
-		t.Fatalf("got %d names %v, want 2", n, names)
+	if n != 2 || len(infos) != 2 {
+		t.Fatalf("got %d declarations %v, want 2", n, infos)
+	}
+
+	// The schema has to survive the trip: the caller that runs the queries reads
+	// it to decide which parameters each one takes.
+	if string(infos[0].ParamsSchema) != `{"start_time":"string","unit_time":"string"}` {
+		t.Fatalf("the params schema was dropped: %s", infos[0].ParamsSchema)
 	}
 }
 

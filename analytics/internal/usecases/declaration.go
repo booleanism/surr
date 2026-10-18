@@ -43,7 +43,7 @@ var queryNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 // subscriptions' usecases.
 type Declaration interface {
 	UpsertDeclaration(ctx context.Context, decl models.Declaration) error
-	SelectQueryNames(ctx context.Context, nodeID uuid.UUID, names *[]string) (int, error)
+	SelectQueryInfos(ctx context.Context, nodeID uuid.UUID, infos *[]models.QueryInfo) (int, error)
 	SelectQuery(ctx context.Context, nodeID uuid.UUID, name string) (models.DeclaredQuery, error)
 }
 
@@ -71,8 +71,14 @@ func (d declaration) Declare(ctx context.Context, decl models.Declaration) error
 	return d.d.UpsertDeclaration(ctx, decl)
 }
 
-func (d declaration) ListQueries(ctx context.Context, nodeID uuid.UUID, names *[]string) (int, error) {
-	return d.d.SelectQueryNames(ctx, nodeID, names)
+// ListQueries returns what the node declared, in name order.
+//
+// It carries the params schema as well as the name because the caller that runs
+// the queries has to know which parameters each one takes: a report endpoint
+// supplies a window, and a query that asks for something else has to be reported
+// as unanswerable rather than sent a parameter it never declared.
+func (d declaration) ListQueries(ctx context.Context, nodeID uuid.UUID, infos *[]models.QueryInfo) (int, error) {
+	return d.d.SelectQueryInfos(ctx, nodeID, infos)
 }
 
 func (d declaration) GetQuery(ctx context.Context, nodeID uuid.UUID, name string) (models.DeclaredQuery, error) {

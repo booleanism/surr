@@ -272,6 +272,43 @@ func TestSelectQueryNamesReportsAFullBuffer(t *testing.T) {
 	}
 }
 
+// The list a caller runs queries from has to carry the params schema: without it
+// the caller cannot tell which parameters each query takes, and would send a
+// parameter the query never declared (a payload error) or omit one it did (a
+// missing parameter).
+func TestSelectQueryInfosCarriesTheParamsSchema(t *testing.T) {
+	store := newTestDeclaration(t)
+	ctx := context.Background()
+	nodeID := uuid.New()
+
+	decl := testDeclaration(nodeID)
+	decl.Queries[0].ParamsSchema = []byte(`{"start_time":"string","unit_time":"string"}`)
+	decl.Queries[0].Description = "average per class over time"
+
+	if err := store.UpsertDeclaration(ctx, decl); err != nil {
+		t.Fatalf("upsert declaration: %v", err)
+	}
+
+	infos := make([]models.QueryInfo, 0, 8)
+
+	n, err := store.SelectQueryInfos(ctx, nodeID, &infos)
+	if err != nil {
+		t.Fatalf("select query infos: %v", err)
+	}
+
+	if n != len(decl.Queries) || len(infos) != n {
+		t.Fatalf("got %d infos, want %d", len(infos), len(decl.Queries))
+	}
+
+	if string(infos[0].ParamsSchema) != `{"start_time":"string","unit_time":"string"}` {
+		t.Fatalf("the params schema came back as %s", infos[0].ParamsSchema)
+	}
+
+	if infos[0].Description != "average per class over time" {
+		t.Fatalf("the description came back as %q", infos[0].Description)
+	}
+}
+
 // A node id is a BLOB column. Binding it as TEXT would match nothing, silently,
 // so this pins that a declaration stored under one node is invisible to another.
 func TestDeclarationsAreScopedToTheirNode(t *testing.T) {
