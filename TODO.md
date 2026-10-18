@@ -28,8 +28,9 @@ they were found in, not to the fixed tree.
 system, on a `docker compose` stack built from a single commit and driven by
 `deploy/smoke.sh`. Every one of them needs a live process to be reachable — a
 node that dies between two broker calls, a duplicate row left in a database by
-a previous run, a reply code nothing consumed. Four are fixed; F5 is the
-registry staleness that made two of them reachable and is still open.
+a previous run, a reply code nothing consumed. F1-F5 are fixed; F6 (dead nodes
+leaving rows behind) is open and LOW, and was found by the same sweep run again
+after the analytics rewrite.
 
 ## A. Nodes refactor (type-agnostic runtime) — DESIGN.md §12
 
@@ -1171,7 +1172,7 @@ The venv is `./.venv` at the repo root, while all the node code stays in
       rather than printed; urfave/cli prints its own usage, so nothing is lost,
       but a log line would be better than a silent exit.
 
-## F. Defects found by the live deployment sweep (all fixed)
+## F. Defects found by the live deployment sweep (all fixed except F6)
 
 Section E came from reading the code. This section came from running it: a
 `docker compose` stack built from one commit (`1911b36`), driven end-to-end by
@@ -1315,3 +1316,29 @@ retried once every two seconds rather than ~34 times a second.
       against an injected clock, plus `test_the_ttl_mirrors_the_go_side` — a Go
       service and a node disagreeing about when a peer is dead is a difference
       in behaviour that nothing on the wire reveals.
+
+### F6. Dead nodes leave rows in the hub and the analytics registry (LOW) — open
+
+- [ ] Found while verifying the analytics rewrite on the live stack, not by a
+      test: after a handful of `deploy/smoke.sh` runs the hub's `nodes` table
+      held eleven rows for one live node, and the analytics `declarations` table
+      held two dead nodes' manifests — still carrying the retired
+      `counts_detail`/`counts_summary`/`counts_totals` query names.
+- [ ] Why it is only LOW: `GET /nodes/availability` reads the sibling registry,
+      not the table, and answered 204 with one node running, so nothing
+      user-visible lists the dead rows. `UpsertDeclaration` is
+      delete-then-insert, so a node that comes back with the same id replaces
+      its manifest rather than merging into it; the stale names cannot be
+      answered for a live node.
+- [ ] Why it is still worth fixing: the growth is unbounded — every smoke run
+      mints a fresh node id (deliberately, because `subscribed_nodes.node_id` is
+      UNIQUE and the API cannot move a node between subscriptions), so a
+      persistent `hub-db` volume accumulates a row and four declarations per
+      run. `GET /nodes/analytics?node_id=<dead>` answers from a manifest for a
+      node that will never run again, which reads like a live report.
+- [ ] The shape of the fix is F5's: expire what nobody has re-announced. The
+      hub knows when a node last registered (`nodes.add` is idempotent and
+      carries no timestamp today), so a `last_seen` column plus a sweep — or the
+      same lazy check on read — would let both tables forget. Not done here
+      because it needs a migration, and a migration is not a documentation
+      change.
