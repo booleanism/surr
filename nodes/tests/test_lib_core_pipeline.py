@@ -206,6 +206,59 @@ class FrameViewTests(unittest.TestCase):
 
         numpy.testing.assert_array_equal(frame, expected)
 
+class DecodeChainTests(unittest.TestCase):
+    """The chain is the node type's, the sink is the runtime's."""
+
+    def test_the_default_chain_is_the_one_every_node_receives(self):
+        # A node type that changes this changes what tx must be sending it, so
+        # the default is asserted rather than left to the docstring.
+        from lib.core.pipeline import DEFAULT_DECODE_CHAIN
+
+        self.assertEqual(
+            DEFAULT_DECODE_CHAIN, "tsdemux ! h264parse ! avdec_h264 ! videoconvert"
+        )
+
+    def test_a_streamer_keeps_the_chain_it_was_given(self):
+        streamer = SRTStreamer(uuid.uuid4(), "tsdemux ! h265parse ! avdec_h265 ! videoconvert")
+
+        self.assertEqual(
+            streamer.decode_chain, "tsdemux ! h265parse ! avdec_h265 ! videoconvert"
+        )
+
+    def test_a_streamer_without_a_chain_uses_the_default(self):
+        from lib.core.pipeline import DEFAULT_DECODE_CHAIN
+
+        self.assertEqual(SRTStreamer(uuid.uuid4()).decode_chain, DEFAULT_DECODE_CHAIN)
+
+    def test_an_empty_chain_is_rejected_at_construction(self):
+        # The alternative is a launch line with a doubled "!" that fails inside
+        # Gst.parse_launch with a message about whatever element follows it.
+        for chain in ("", "   ", "\n"):
+            with self.subTest(chain=chain):
+                with self.assertRaises(ValueError):
+                    SRTStreamer(uuid.uuid4(), chain)
+
+    def test_the_chain_is_spliced_between_the_source_and_the_sink(self):
+        # Asserted on the launch line rather than on a parse_launch result: the
+        # CI runner installs plugins-base only, so tsdemux (plugins-bad) and
+        # avdec_h264 (libav) are absent there and a parse would fail for a
+        # reason that has nothing to do with the splice.
+        streamer = SRTStreamer(uuid.uuid4(), "tsdemux ! h265parse ! avdec_h265 ! videoconvert")
+
+        self.assertEqual(
+            streamer.pipeline_string(),
+            'srtsrc name=src poll-timeout=10000 ! '
+            'tsdemux ! h265parse ! avdec_h265 ! videoconvert ! '
+            'video/x-raw, format=BGR ! appsink name=app_sink emit-signals=true max-buffers=1 drop=true',
+        )
+
+    def test_the_sink_caps_do_not_follow_the_chain(self):
+        # A node type may change how frames are decoded, never what the worker
+        # receives: BGR numpy arrays are the contract frame_worker reads.
+        streamer = SRTStreamer(uuid.uuid4(), "tsdemux ! h265parse ! avdec_h265 ! videoconvert")
+
+        self.assertIn("video/x-raw, format=BGR ! appsink", streamer.pipeline_string())
+
 @unittest.skipUnless(GST_AVAILABLE, f"GStreamer bindings unavailable ({GST_ERROR})")
 class OnNewSampleTests(unittest.TestCase):
     WIDTH, HEIGHT = 1279, 8

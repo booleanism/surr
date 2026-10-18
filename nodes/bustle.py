@@ -168,6 +168,15 @@ def parse_args(argv: typing.Optional[typing.List[str]] = None) -> argparse.Names
         help="stream bitrate advertised to the hub on nodes.add",
     )
     parser.add_argument(
+        "--decode-chain",
+        dest="decode_chain",
+        default=core_pipeline.DEFAULT_DECODE_CHAIN,
+        help=(
+            "GStreamer elements between the SRT source and the appsink "
+            "(default: the h264-in-MPEG-TS chain every node receives)"
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         dest="log_level",
         default="info",
@@ -250,7 +259,7 @@ async def main() -> int:
 
     handlers = core_handlers.Handlers()
     siblings = core_siblings.Siblings()
-    streamer = core_pipeline.SRTStreamer(args.node_id)
+    streamer = core_pipeline.SRTStreamer(args.node_id, args.decode_chain)
     async_q: asyncio.Queue[dict[str, int]] = asyncio.Queue()
     detector = lib_detector.LibreYOLODetector(args.model, args.confidence)
 

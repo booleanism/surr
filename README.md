@@ -239,9 +239,12 @@ relative to `./weights/` and downloaded from Hugging Face on first use; pass
 committed to this repository. `--conf` (default `0.25`) drops detections below a
 score and matters more than it looks: DEIM decodes top-K with **no NMS**, so
 every box the model reports above the threshold is counted. `--mongo-url`,
-`--mongo-db`, `--broker`, `-f/--family`, `-c/--chosen-classes` and
-`--drain-interval` are the other knobs; `uv run python nodes/bustle.py --help`
-lists them all.
+`--mongo-db`, `--broker`, `-f/--family`, `-c/--chosen-classes`,
+`--decode-chain` and `--drain-interval` are the other knobs; `uv run python
+nodes/bustle.py --help` lists them all. `--decode-chain` is the GStreamer
+chain between the SRT source and the appsink, defaulting to the
+h264-in-MPEG-TS path `tx` sends; change it only for a node type fed a
+different codec, since the BGR frame the worker receives is fixed.
 
 The node self-registers with `hub` on boot (`nodes.add`) and deregisters on
 graceful shutdown (`nodes.remove`). It retries registration until the hub

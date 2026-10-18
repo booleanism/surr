@@ -11,9 +11,20 @@ gi.require_version('GstVideo', '1.0')
 
 from gi.repository import Gst, GstVideo
 
+# The decode chain a node type needs before its frames are usable. A node type
+# that receives a different codec overrides it with --decode-chain; the tail is
+# fixed by the contract SRTStreamer offers, which is BGR numpy arrays whatever
+# produced them.
+DEFAULT_DECODE_CHAIN = "tsdemux ! h264parse ! avdec_h264 ! videoconvert"
+
 class SRTStreamer:
-    def __init__(self, node_id: uuid.UUID):
+    def __init__(self, node_id: uuid.UUID, decode_chain: str = DEFAULT_DECODE_CHAIN):
         self.node_id = node_id
+        # Stored, not pasted together later, so start() can be called more than
+        # once and a bad chain fails loudly at the one place that reports it.
+        self.decode_chain = decode_chain.strip()
+        if not self.decode_chain:
+            raise ValueError("decode chain is empty")
         self.pipeline = None
         self.running = False
         self._frame_q: queue.Queue[numpy.ndarray] = queue.Queue(maxsize=1)
@@ -130,12 +141,24 @@ class SRTStreamer:
             strides=(stride, 3, 1),
         )
 
-    def start(self, srt_address: str):
-        pipeline_str = (
+    def pipeline_string(self) -> str:
+        """The launch line start() builds.
+
+        The chain is spliced in between the source and the appsink: the node
+        type decides how frames are decoded, while the sink and its caps stay
+        here because the BGR contract is what every worker reads. Kept as its
+        own method so the splice can be asserted without a GStreamer element
+        registry (the CI runner has no plugins-bad and no libav, so a
+        parse_launch assertion would fail there for the wrong reason).
+        """
+        return (
             'srtsrc name=src poll-timeout=10000 ! '
-            'tsdemux ! h264parse ! avdec_h264 ! videoconvert ! '
+            f'{self.decode_chain} ! '
             'video/x-raw, format=BGR ! appsink name=app_sink emit-signals=true max-buffers=1 drop=true'
         )
+
+    def start(self, srt_address: str):
+        pipeline_str = self.pipeline_string()
 
         pipeline = typing.cast(Gst.Pipeline, Gst.parse_launch(pipeline_str))
         if not pipeline:

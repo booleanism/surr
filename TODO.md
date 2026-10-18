@@ -66,14 +66,31 @@ Ordered stages; each lands independently and is wire-compatible.
         handlers instance → Node(...).run()
   - [ ] Verify: pyright + tests + manual boot (introduce, nodes.add,
         nodes.remove behave identically before/after)
-- [ ] A3. Pipeline/worker hygiene
-  - [ ] SRTStreamer: decode chain as parameter (default current
+- [x] A3. Pipeline/worker hygiene
+  - [x] SRTStreamer: decode chain as parameter (default current
         "tsdemux ! h264parse ! avdec_h264 ! videoconvert"); BGR frames stay
-        the contract
-  - [ ] Fix frame_worker busy-loop (lib/bustle/processing.py:67-69): add
-        get_frame(timeout) via queue.get(block=True, timeout=...)
-  - [ ] Thread-safety: guard start()/stop() against the appsink callback
-        thread (lock or event)
+        the contract. `DEFAULT_DECODE_CHAIN` + `SRTStreamer(node_id,
+        decode_chain)` + `pipeline_string()`, exposed as `--decode-chain` on
+        bustle. An empty chain is a `ValueError` at construction rather than a
+        launch line with a doubled `!`. Tests assert the default, the splice
+        and that the BGR caps do not follow the chain; asserted on the launch
+        line, not on a `parse_launch` result, because the CI runner installs
+        plugins-base only and has neither `tsdemux` (plugins-bad) nor
+        `avdec_h264` (libav).
+  - [x] Fix frame_worker busy-loop (lib/bustle/processing.py:67-69): add
+        get_frame(timeout) via queue.get(block=True, timeout=...) — already
+        done: `get_frame(timeout=...)` with `timeout=None` kept non-blocking
+        for the old `get_nowait()` callers, and `frame_worker` passes
+        `FRAME_WAIT_SECONDS`. Pinned by
+        `test_get_frame_without_a_timeout_does_not_block` (run off-thread so a
+        regression fails instead of hanging the suite).
+  - [x] Thread-safety: guard start()/stop() against the appsink callback
+        thread (lock or event) — already done: `self._lock` guards
+        `pipeline`/`running`, `start()` publishes the fully wired pipeline
+        under it, and `stop()` clears it under the lock but calls
+        `set_state(NULL)` *outside*, because that call blocks until the
+        streaming thread stops and the streaming thread takes the same lock in
+        `_on_new_sample` — taking it there would deadlock.
 - [ ] A4. Lifecycle hardening (opt-in only)
   - [ ] Periodic re-registration (--reregister flag, default off; hub upsert
         is idempotent so this is safe)

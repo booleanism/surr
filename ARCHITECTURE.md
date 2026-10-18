@@ -357,10 +357,17 @@ Same layering as hub minus HTTP.
   deliberately not used (LibreYOLO's `predict` reports no ids, and the counter
   never read them).
 - Pipeline string (`nodes/lib/core/pipeline.py`):
-  `srtsrc name=src poll-timeout=10000 ! tsdemux ! h264parse ! avdec_h264 !
-  videoconvert ! video/x-raw, format=BGR ! appsink name=app_sink
-  emit-signals=true max-buffers=1 drop=true`, connected with
-  `srt://<addr>?mode=caller&streamid=subscribe:<node-id>`.
+  `srtsrc name=src poll-timeout=10000 ! <decode chain> ! video/x-raw,
+  format=BGR ! appsink name=app_sink emit-signals=true max-buffers=1
+  drop=true`, connected with
+  `srt://<addr>?mode=caller&streamid=subscribe:<node-id>`. The decode chain is
+  the node type's, not the runtime's: `DEFAULT_DECODE_CHAIN` is
+  `tsdemux ! h264parse ! avdec_h264 ! videoconvert` (what `tx` sends) and
+  `--decode-chain` overrides it. The sink and its BGR caps stay in the runtime,
+  because a BGR numpy array is the contract every worker reads — a node type
+  may change how frames are decoded, never what it receives. `pipeline_string()`
+  is the launch line as one testable string, so the splice can be asserted on a
+  runner whose element registry has neither `tsdemux` nor `avdec_h264`.
 - Environment: `.venv` at the repo root (PyGObject/GStreamer, LibreYOLO,
   pymongo, aio-pika, torch), created by `uv sync` from the root
   `pyproject.toml` — which pins the direct dependencies exactly (plus
