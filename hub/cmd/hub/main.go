@@ -172,7 +172,7 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 
 	subsCase := usecases.NewSubscription(subsAdapter, usersRepo)
 	userCase := usecases.NewUser(usersRepo, argon)
-	nodeCase := usecases.NewNode(nodesRepo, subsAdapter)
+	nodeCase := usecases.NewNode(nodesRepo, subsAdapter, siblings)
 	analCase := usecases.NewAnalytics(subsAdapter, nodesAdapter)
 
 	err = rabbitmqHandlers.SetupNode(nodeCase, routerHandlers)
