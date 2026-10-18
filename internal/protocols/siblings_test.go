@@ -2,8 +2,11 @@ package protocols
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // TestSiblingWireShape pins the introduce payload. Both the Go services and the
@@ -143,5 +146,129 @@ func TestExpiryIsPerSibling(t *testing.T) {
 	var names []SiblingName
 	if n := sibs.GetName("sink.start", &names); n != 1 || names[0] != "rpc.direct.alive" {
 		t.Fatalf("GetName returned %d names %v, want 1 [rpc.direct.alive]", n, names)
+	}
+}
+
+// TestLiveNodeIDsReadsTheNodeIDOutOfItsCommands is the F6 oracle: a node's
+// commands embed its id, so the introduce stream says which nodes are up without
+// the hub having to date a row in SQLite.
+func TestLiveNodeIDsReadsTheNodeIDOutOfItsCommands(t *testing.T) {
+	sibs := NewSiblings()
+
+	nodeA := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	nodeB := uuid.MustParse("22222222-2222-4222-8222-222222222222")
+
+	if err := sibs.Set("rpc.direct.bustle0", Sibling{
+		Commands: []Command{Command(nodeA.String() + ".sink.start"), Command(nodeA.String() + ".sink.stop")},
+	}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if err := sibs.Set("rpc.direct.bustle1", Sibling{
+		Commands: []Command{Command(nodeB.String() + ".sink.start")},
+	}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	// A service introduces itself with commands that are not node commands, and
+	// must not be mistaken for a node with an id.
+	if err := sibs.Set("rpc.direct.hub0", Sibling{Commands: []Command{"nodes.add", "users.get"}}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	var ids []uuid.UUID
+	if n := sibs.LiveNodeIDs(&ids); n != 2 {
+		t.Fatalf("LiveNodeIDs reported %d ids %v, want 2", n, ids)
+	}
+
+	// One entry per node, not one per command: node A advertises two.
+	if !slices.Contains(ids, nodeA) || !slices.Contains(ids, nodeB) {
+		t.Fatalf("LiveNodeIDs returned %v, want both %s and %s", ids, nodeA, nodeB)
+	}
+}
+
+// TestLiveNodeIDsForgetsAPeerThatStoppedIntroducing is the F5 half of F6: the
+// same TTL that stops GetName naming a dead peer must stop the availability list
+// offering it.
+func TestLiveNodeIDsForgetsAPeerThatStoppedIntroducing(t *testing.T) {
+	id := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+
+	// Two registries, because expiry deletes the entry: one shared registry would
+	// let the first call hide the evidence from the second, and each assertion
+	// would then pass for a reason it is not testing.
+	listing := NewSiblings()
+	aged(listing, "rpc.direct.bustle0", Sibling{Commands: []Command{Command(id.String() + ".sink.start")}})
+
+	var ids []uuid.UUID
+	if n := listing.LiveNodeIDs(&ids); n != 0 {
+		t.Fatalf("LiveNodeIDs reported %d ids %v for a peer that stopped introducing, want 0", n, ids)
+	}
+
+	asking := NewSiblings()
+	aged(asking, "rpc.direct.bustle0", Sibling{Commands: []Command{Command(id.String() + ".sink.start")}})
+
+	if asking.NodeAlive(id) {
+		t.Error("NodeAlive still reports a peer that stopped introducing as alive")
+	}
+}
+
+// TestLiveNodeIDsTruncatesTheSlice keeps the pooled-slice contract: the caller
+// hands in a buffer it does not reset, and a stale entry left behind would be
+// read as a live node.
+func TestLiveNodeIDsTruncatesTheSlice(t *testing.T) {
+	sibs := NewSiblings()
+
+	id := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	if err := sibs.Set("rpc.direct.bustle0", Sibling{Commands: []Command{Command(id.String() + ".sink.start")}}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	ids := []uuid.UUID{uuid.New(), uuid.New()}
+
+	if n := sibs.LiveNodeIDs(&ids); n != 1 || len(ids) != 1 || ids[0] != id {
+		t.Fatalf("LiveNodeIDs returned %d ids %v, want 1 [%s]", n, ids, id)
+	}
+}
+
+// TestNodeAliveIgnoresAnotherNodesCommands pins the prefix match: an id that is
+// a prefix of another must not answer for it.
+func TestNodeAliveIgnoresAnotherNodesCommands(t *testing.T) {
+	sibs := NewSiblings()
+
+	id := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	if err := sibs.Set("rpc.direct.bustle0", Sibling{Commands: []Command{Command(id.String() + ".sink.start")}}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if !sibs.NodeAlive(id) {
+		t.Error("NodeAlive does not report the node whose commands are advertised")
+	}
+
+	if sibs.NodeAlive(uuid.MustParse("11111111-1111-4111-8111-111111111112")) {
+		t.Error("NodeAlive reports a node that advertises nothing")
+	}
+}
+
+// TestNodeAliveOnlyMatchesTheIdPrefix is the same contract as LiveNodeIDs: the
+// node id is the whole segment before the first dot. A match anywhere in the
+// command would make the two answers to "is this node up" disagree, and the
+// failure that produces is a node that is offered and then unreachable.
+func TestNodeAliveOnlyMatchesTheIdPrefix(t *testing.T) {
+	sibs := NewSiblings()
+
+	id := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	if err := sibs.Set("rpc.direct.odd", Sibling{
+		Commands: []Command{Command("prefix." + id.String() + ".sink.start")},
+	}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	if sibs.NodeAlive(id) {
+		t.Error("NodeAlive matched a node id that is not the command's prefix")
+	}
+
+	var ids []uuid.UUID
+	if n := sibs.LiveNodeIDs(&ids); n != 0 {
+		t.Fatalf("LiveNodeIDs reported %d ids %v for a command with a non-id prefix, want 0", n, ids)
 	}
 }

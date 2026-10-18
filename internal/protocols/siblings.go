@@ -1,8 +1,11 @@
 package protocols
 
 import (
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ProtocolRevision is the wire revision of the sibling RPC protocol. Bump it
@@ -137,4 +140,86 @@ func (s *siblings) GetName(c Command, sn *[]SiblingName) int {
 	}
 
 	return i
+}
+
+// LiveNodeIDs appends the ids of the nodes currently advertising themselves and
+// returns how many it appended. The slice is truncated first, so a pooled slice
+// can be passed straight in.
+//
+// This is the hub's only honest liveness signal for a row in its SQLite `nodes`
+// table. `nodes.add` is sent once per run and carries no timestamp, so the table
+// cannot date a row: a node killed without a graceful `nodes.remove` leaves a row
+// that is indistinguishable from a live one, and the availability list offers it
+// forever (TODO.md F6). Every peer, on the other hand, re-broadcasts its command
+// set once a second, and a node's commands embed its id -- `<node-id>.sink.start`
+// -- so the introduce stream says exactly which nodes are up.
+//
+// The TTL is the same SiblingTTL GetName uses. Two answers to "is this peer
+// alive" would be a difference in behaviour between listing a node and calling
+// it, and the failure that produces is a node that is offered and then
+// unreachable.
+func (s *siblings) LiveNodeIDs(ids *[]uuid.UUID) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	(*ids) = (*ids)[:0]
+
+	// A node advertises two commands with the same id prefix, and a peer could
+	// in principle advertise more, so the seen set is what keeps the result one
+	// entry per node.
+	seen := make(map[uuid.UUID]struct{}, len(s.m))
+
+	for k, e := range s.m {
+		if !s.fresh(k, e) {
+			continue
+		}
+
+		for _, c := range e.sibling.Commands {
+			// The id is the whole prefix before the first dot. A uuid never
+			// contains one, so this cannot split a command in the wrong place;
+			// a service command (`nodes.add`, `analytics.query`) has a
+			// non-uuid prefix and is skipped by the parse below.
+			prefix, _, ok := strings.Cut(string(c), ".")
+			if !ok {
+				continue
+			}
+
+			id, err := uuid.Parse(prefix)
+			if err != nil {
+				continue
+			}
+
+			if _, dup := seen[id]; dup {
+				continue
+			}
+
+			seen[id] = struct{}{}
+			(*ids) = append((*ids), id)
+		}
+	}
+
+	return len(*ids)
+}
+
+// NodeAlive reports whether a node is advertising itself right now. It is the
+// single-node form of LiveNodeIDs, for a caller that has one id in hand.
+func (s *siblings) NodeAlive(id uuid.UUID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	prefix := id.String() + "."
+
+	for k, e := range s.m {
+		if !s.fresh(k, e) {
+			continue
+		}
+
+		for _, c := range e.sibling.Commands {
+			if strings.HasPrefix(string(c), prefix) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
