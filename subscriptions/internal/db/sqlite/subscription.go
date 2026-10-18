@@ -94,7 +94,7 @@ func (s subscription) InsertSubscriptions(ctx context.Context, subsNodesList []m
 			// node_id is UNIQUE: a node already attached to another
 			// subscription is a conflict the caller can explain, not a
 			// generic write failure.
-			if isUniqueViolation(err) {
+			if db.IsUniqueViolation(err) {
 				return fmt.Errorf("%w: node insert", ErrNodeAlreadySubscribed)
 			}
 

@@ -30,7 +30,7 @@ func (ur users) InsertUser(ctx context.Context, user models.User) error {
 	// The email column is UNIQUE, so a second signup for the same address is a
 	// constraint failure. Translated here because only this layer sees the
 	// driver error, and the handler has to answer 409 rather than 500.
-	if isUniqueViolation(err) {
+	if db.IsUniqueViolation(err) {
 		return fmt.Errorf("%w: %s", models.ErrUserExists, user.Email)
 	}
 

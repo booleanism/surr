@@ -171,6 +171,11 @@ func (fakeDialect) TransactionalDDL() bool { return true }
 
 func (fakeDialect) BindVar(int) string { return "?" }
 
+// IsUniqueViolation is part of the interface, so the fake has to answer it, but no
+// migration test depends on the answer: it is tested where it is implemented, in
+// internal/db/dialect_sqlite.go's own tests.
+func (fakeDialect) IsUniqueViolation(error) bool { return false }
+
 // splittingDialect is fakeDialect plus the optional parser. The wrapper exists so
 // fakeDialect itself does NOT satisfy statementSplitter -- otherwise the
 // "no splitter" branch is unreachable and its test passes for the wrong reason.

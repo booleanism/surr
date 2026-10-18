@@ -16,8 +16,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 // sqliteDialect is the SQLite implementation. Every string in it is a fact about
@@ -55,6 +56,18 @@ func (sqliteDialect) MultiStatement() bool { return true }
 func (sqliteDialect) TransactionalDDL() bool { return true }
 
 func (sqliteDialect) BindVar(int) string { return "?" }
+
+// IsUniqueViolation matches the EXTENDED code, not the primary one: SQLITE_CONSTRAINT
+// also covers NOT NULL, CHECK and foreign-key failures, so the primary code would
+// report a missing column as a duplicate row.
+func (sqliteDialect) IsUniqueViolation(err error) bool {
+	var sqliteErr sqlite3.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+
+	return sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
+}
 
 // dialectFor is the single point where the build tag picks an implementation.
 func dialectFor() dialect { return sqliteDialect{} }

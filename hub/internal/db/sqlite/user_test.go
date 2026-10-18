@@ -63,7 +63,7 @@ func TestInsertUserReportsADuplicateEmail(t *testing.T) {
 // constraint to trip.
 func TestIsUniqueViolationOnlyMatchesUniqueFailures(t *testing.T) {
 	unique := sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: sqlite3.ErrConstraintUnique}
-	if !isUniqueViolation(unique) {
+	if !db.IsUniqueViolation(unique) {
 		t.Error("a UNIQUE failure was not recognised")
 	}
 
@@ -73,12 +73,12 @@ func TestIsUniqueViolationOnlyMatchesUniqueFailures(t *testing.T) {
 		sqlite3.ErrConstraintForeignKey,
 	} {
 		other := sqlite3.Error{Code: sqlite3.ErrConstraint, ExtendedCode: extended}
-		if isUniqueViolation(other) {
+		if db.IsUniqueViolation(other) {
 			t.Errorf("%v was reported as a duplicate", extended)
 		}
 	}
 
-	if isUniqueViolation(errors.New("no such table: users")) {
+	if db.IsUniqueViolation(errors.New("no such table: users")) {
 		t.Error("a non-driver error was reported as a duplicate")
 	}
 }

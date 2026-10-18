@@ -53,6 +53,17 @@ type dialect interface {
 	// "?", Postgres writes "$1"; a hardcoded "?" is a runtime error on Postgres,
 	// not a compile error, so it belongs here with the rest.
 	BindVar(n int) string
+
+	// IsUniqueViolation reports whether err is the engine refusing a duplicate
+	// value for a UNIQUE column.
+	//
+	// It is on the dialect because "unique violation" is not one error value: the
+	// SQLite driver reports a typed error with an extended code, Postgres reports
+	// SQLSTATE 23505 through a different type entirely. Matching on the primary
+	// code is the trap -- SQLITE_CONSTRAINT also covers NOT NULL, CHECK and
+	// foreign-key failures, so a missing column would be reported as a duplicate
+	// row and the caller would answer 409 for a bug.
+	IsUniqueViolation(err error) bool
 }
 
 // StatementSplitter is implemented by a dialect whose driver refuses a
@@ -63,4 +74,14 @@ type dialect interface {
 // a generic split on ';'.
 type statementSplitter interface {
 	SplitStatements(body string) []string
+}
+
+// IsUniqueViolation reports whether err is the engine refusing a duplicate value
+// for a UNIQUE column, for the engine this binary was built against.
+//
+// It is the exported face of the dialect method so the services do not each keep
+// a copy: the copy was previously justified by the root module not linking the
+// SQLite driver, which stopped being true when the migrator moved here.
+func IsUniqueViolation(err error) bool {
+	return dialectFor().IsUniqueViolation(err)
 }
