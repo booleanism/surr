@@ -265,13 +265,14 @@ visible.
 ## Storage
 
 - **hub SQLite** (`hub.db`): `users`, `nodes` (see
-  `hub/internal/migrations/sqlite/`). UUIDs stored as 16-byte BLOBs. Schemas are
-  applied out-of-band with the golang-migrate CLI — the service never creates
-  its own tables, but it does verify them: `db.VerifySchema` runs at startup and
-  exits with one error naming any missing table and the `migrate ... up` command.
+  `hub/internal/migrations/sqlite/`). UUIDs stored as 16-byte BLOBs. The
+  migrations are compiled in and applied by `surr-hub migrate`; the service never
+  creates its own tables, but it does verify them: `db.VerifySchema` runs at
+  startup and exits with one error naming any missing table and the `migrate ... up`
+  command.
 - **subscriptions SQLite** (`subscriptions.db`): `subscriptions`,
-  `subscribed_nodes` join table, likewise applied with golang-migrate and
-  likewise verified at startup. Inserts and reads both bind `ID[:]` (BLOB); the
+  `subscribed_nodes` join table, likewise applied with `surr-subscriptions migrate`
+  and likewise verified at startup. Inserts and reads both bind `ID[:]` (BLOB); the
   write path used to bind `uuid.UUID` values (→ TEXT), which made every
   membership lookup match nothing.
 - **MongoDB** (`nodes` DB): one timeseries collection per node (name = node ID

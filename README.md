@@ -161,34 +161,32 @@ RabbitMQ on `127.0.0.1:5672`, MongoDB on `127.0.0.1:27017`, and an RTSP source
 
 ### 2. Run the SQLite migrations
 
-The services contain no migration code — they never create their own tables. The
-`.sql` files in `internal/migrations/sqlite/` follow the
-[golang-migrate](https://github.com/golang-migrate/migrate) naming convention and
-are applied with the `migrate` CLI:
+The services never create their own tables. Each of `hub`, `subscriptions` and
+`analytics` carries its migrations compiled in and applies them with its own
+`migrate` subcommand, so the schema and the binary that expects it cannot come
+from different checkouts:
 
 ```sh
-migrate -path hub/internal/migrations/sqlite \
-        -database "sqlite3://$PWD/hub.db" up
-migrate -path subscriptions/internal/migrations/sqlite \
-        -database "sqlite3://$PWD/subscriptions.db" up
-migrate -path analytics/internal/migrations/sqlite \
-        -database "sqlite3://$PWD/analytics.db" up
+./bin/surr-hub migrate -d "$PWD/hub.db" up
+./bin/surr-subscriptions migrate -d "$PWD/subscriptions.db" up
+./bin/surr-analytics migrate -d "$PWD/analytics.db" up
 ```
 
-This creates the tables and a `schema_migrations` bookkeeping table. Use `down`
-to roll back one version. Run this before starting `hub`, `subscriptions` and
-`analytics`: each checks for its tables at startup (`internal/db/schema.go`) and
-exits with one error naming the missing tables and the `migrate ... up` command,
-rather than opening an empty database and failing one query at a time.
+The mode is the leaf command — `up` (the default), `down`, or `status` — and
+`-d/--database` is accepted on either side of it. `up` names each migration it
+applies and prints the resulting version; `down` reverts exactly one version;
+`status` only reports. The `.sql` files stay in `<svc>/internal/migrations/sqlite/`
+and keep the [golang-migrate](https://github.com/golang-migrate/migrate) naming
+convention (`000001_init_table.up.sql` / `.down.sql`), so the tables and the
+`schema_migrations` bookkeeping table are the same shape the CLI produces and
+either tool can read a database the other migrated.
 
-> **The `migrate` CLI must be built with the `sqlite3` driver.** Stock
-> `golang-migrate` release binaries do not include it, so `sqlite3://` fails
-> with `unknown driver sqlite3`. Build your own (needs cgo, because the driver
-> is `mattn/go-sqlite3`):
->
-> ```sh
-> go install -tags 'sqlite3' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-> ```
+Run this before starting a service: each verifies its tables at startup
+(`internal/db/schema.go`) and exits with one error naming the missing tables,
+rather than opening an empty database and failing one query at a time. The
+`migrate` subcommand exits non-zero on failure, unlike `run` — a deploy script
+that carries on after a failed migration starts a service against the wrong
+schema.
 
 ### 3. Start the control plane
 

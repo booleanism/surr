@@ -1482,3 +1482,73 @@ deployment could not be diagnosed from its own logs.
       unsupported install path. The supported path is a checkout — `make build`
       — and publishing the submodules would need `hub/vX.Y.Z`-style tags and a
       release process of its own, for an install route nothing here uses.
+
+## H. Migrations: an embedded runner, and the engine as a build choice
+
+The golang-migrate CLI was the only way to create the three SQLite files, and it
+was a bad fit twice over. Its stock release binary cannot open SQLite at all —
+the drivers are behind build tags and upstream's release build omits the sqlite3
+one, so `sqlite3://` answers `unknown driver sqlite3` and the operator has to
+build the tool themselves with `CGO_ENABLED=1 go install -tags sqlite3`. And
+because it ran out-of-band, nothing tied the schema to the binary that expects
+it: a service could be started from one checkout against a database migrated by
+another, which surfaces as "no such table" from a code path that has nothing to
+do with the cause.
+
+- [x] **`<svc> migrate` subcommand** on `hub`, `subscriptions` and `analytics`.
+      The mode is the leaf command (`up` default, `down`, `status`) and
+      `-d/--database` is accepted on either side of it. `migrate` exits non-zero
+      on failure while `run` exits 0 on a clean shutdown, so each
+      `cmd/<svc>/main.go` became `func main() { os.Exit(mainEntry()) }` with
+      `mainEntry() int` — `os.Exit` skips deferred calls, and the deferred
+      cancellation is what lets the cleanup hooks run at all. `up` names each
+      migration it applied (`applied 000001_init_table`) and `down` names the one
+      it reverted, because the status listing that follows says what the database
+      *contains*, not what the command *did*, and a deploy log is read to answer
+      the second question.
+- [x] **Migrations compiled in** — `<svc>/internal/migrations/embed.go` with
+      `//go:build !postgres` as its first line (a build directive after the
+      package doc comment is a `misplaced compiler directive` error), exporting
+      `FS` and `Dir`. The `.sql` files keep the golang-migrate naming convention
+      and `schema_migrations` shape, so the CLI can read a database the
+      subcommand migrated and vice versa; the subcommand exists to remove the
+      friction of building that CLI, not to fork the format.
+- [x] **`internal/db/migrate.go` is engine-agnostic; the engine is a build tag.**
+      The runner was SQLite-specific in seven places and said so nowhere:
+      `PRAGMA busy_timeout`, `CREATE TABLE schema_migrations (version uint64,
+      dirty bool)` (`uint64` is not a Postgres type), `BEGIN IMMEDIATE`, one
+      `Exec` per file relying on the sqlite3 driver running every statement,
+      `ROLLBACK` on a DDL failure (only atomic where DDL is transactional),
+      `sql.Open("sqlite3", ...)`, and the `.sql` files themselves. All of it moved
+      behind `dialect` (`internal/db/dialect.go`): `DriverName`,
+      `CreateVersionTable`, `BeginLocking`, `MultiStatement`, `TransactionalDDL`,
+      `BindVar`, plus an optional `statementSplitter` for a driver that refuses a
+      multi-statement `Exec`. `internal/db/dialect_sqlite.go` implements it under
+      `//go:build !postgres`, and `dialectFor()` is the single dispatch point.
+      Chosen because the engine is not a runtime choice: the migrations are SQL
+      in one dialect, so a flag could only ever produce a run that fails at the
+      first statement. `-tags postgres` today fails with `build constraints
+      exclude all Go files in .../internal/migrations`, which is the intended
+      signal that a second engine needs its own migrations package.
+- [x] **`internal/db` now links `mattn/go-sqlite3` itself** (root `go.mod`). It
+      used to name a driver it never imported: the registration came from a blank
+      import in each service's `main`, three layers away, so the shared package
+      compiled against a driver it did not link and would have failed at run time
+      with `unknown driver "sqlite3"`. The cost is that the root module needs
+      cgo; `tx` and `rx` are separate modules that do not import `internal/db`, so
+      their builds are unaffected. Caught by `GOWORK=off go build ./...`, which
+      the workspace had been masking.
+- [x] **The `migrate` subcommand used to hang, and `-d` was silently ignored.**
+      Two defects in the first version, both found by running it. `main` waited
+      on `<-cleanupDone` while the drain goroutine was parked on `<-ctx.Done()`
+      with no canceller on the migrate-success path, so a successful migration
+      never exited — a deploy script reads that as a slow migration. Fixed with
+      `logging.DrainCleanups(cancel, done)` (`internal/logging/drain.go`), which
+      cancels *then* waits; both halves are load-bearing and the doc comment says
+      so. And the `migrate` subcommand re-applied the `--database` default after
+      the global flag had been parsed, so the flag never reached the migrator —
+      every run echoed `./hub.db (up)` regardless of what was passed, which is
+      why a test against a temporary path was really testing the file in the
+      working directory. Both are pinned by
+      `hub/cmd/hub/cmdline_test.go` (flag position × 4, leaf mode × 4) and
+      `internal/db/migrate_test.go`.

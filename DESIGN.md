@@ -954,11 +954,15 @@ end-to-end run did not. TODO.md section F has the evidence.
    longer logs the email, subscription removal is ownership-checked, request
    bodies are capped at 1 MiB with full server timeouts, and the DASH control
    routes require a token (loopback-only otherwise).
-7. **Storage hygiene**: schemas are still applied out-of-band with the
-   golang-migrate CLI (the services contain no migration code), but `hub` and
-   `subscriptions` now call `db.VerifySchema` at startup and exit with one
-   error naming the missing tables and the `migrate ... up` command instead of
-   failing one "no such table" at a time. `DeleteSubscriptions` now deletes
+7. **Storage hygiene**: schemas are applied explicitly, never implicitly — each
+   of `hub`, `subscriptions` and `analytics` carries its migrations compiled in
+   and applies them with its own `migrate` subcommand, so the schema and the
+   binary that expects it always come from the same checkout. They still keep the
+   golang-migrate naming convention and `schema_migrations` shape, so the CLI can
+   read a database the subcommand migrated and vice versa. `hub`,
+   `subscriptions` and `analytics` call `db.VerifySchema` at startup and exit
+   with one error naming the missing tables and the `migrate ... up` command
+   instead of failing one "no such table" at a time. `DeleteSubscriptions` now deletes
    `subscribed_nodes` before `subscriptions` in one transaction, an empty list
    is rejected up front rather than panicking, empty node lists are skipped,
    `SelectAllNodesByID` is gone, and expired refresh tokens are swept by

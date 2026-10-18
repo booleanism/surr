@@ -35,16 +35,15 @@ it works. For why the system is shaped this way, see
 | uv | any recent | Creates `./.venv` from `pyproject.toml` + `uv.lock`. |
 | RabbitMQ | 4.x | The broker every process introduces itself on. |
 | MongoDB | 8.x | Timeseries collections for the node's documents; the analytics service reads them. |
-| golang-migrate | 4.x, **built with `-tags sqlite3`** | Applies the migrations. The stock release binary cannot open SQLite — see section 5. |
+| (none extra) | — | The migrations are compiled into each service, so no separate `migrate` tool is needed — see section 5. |
 | curl, jq | any | Only for `smoke.sh`. |
 
 A PyGObject/GStreamer Python binding is needed too (`python3-gi` on Debian,
 `PyGObject` from PyPI elsewhere); `uv sync` builds the Python side but cannot
 install the system typelibs.
 
-Debian trixie satisfies all of the above except Rust, the plugin package for
-`intersrc`, and golang-migrate. It ships GStreamer 1.26.2, GLib 2.84 and libsrt
-1.5.4.
+Debian trixie satisfies all of the above except Rust and the plugin package for
+`intersrc`. It ships GStreamer 1.26.2, GLib 2.84 and libsrt 1.5.4.
 
 ## 2. The one dependency your distro will not have
 
@@ -211,28 +210,28 @@ Three SQLite files, each owned by one service. They are not created on demand:
 the service verifies its schema at startup and exits with one actionable error
 if a table is missing.
 
-```sh
-make build-migrate   # or: CGO_ENABLED=1 go install -tags sqlite3 \
-                     #     github.com/golang-migrate/migrate/v4/cmd/migrate@v4.20.1
-```
-
-**The stock `migrate` release binary cannot open SQLite.** golang-migrate gates
-its drivers behind build tags and upstream's release build does not include the
-sqlite3 one, so the official image answers
-`database driver: unknown driver sqlite3 (forgotten import?)`. Build it with
-`-tags sqlite3`, which pulls in `mattn/go-sqlite3` — the same driver the services
-link, so the writer and the readers share one engine.
+The migrations are compiled into the binary that needs them, so there is no
+separate tool to install and no way for the schema and the service to come from
+different checkouts:
 
 ```sh
-migrate -path hub/internal/migrations/sqlite           -database "sqlite3://$PWD/hub.db" up
-migrate -path subscriptions/internal/migrations/sqlite -database "sqlite3://$PWD/subscriptions.db" up
-migrate -path analytics/internal/migrations/sqlite     -database "sqlite3://$PWD/analytics.db" up
+./bin/surr-hub migrate -d "$PWD/hub.db" up
+./bin/surr-subscriptions migrate -d "$PWD/subscriptions.db" up
+./bin/surr-analytics migrate -d "$PWD/analytics.db" up
 ```
 
-If your `migrate` was built with `-tags sqlite` instead (the pure-Go
-`modernc.org/sqlite` driver), the scheme is `sqlite://` rather than `sqlite3://`.
-Check with `migrate -help` — it prints `Database drivers:` — and use the one that
-is listed. `smoke.sh` does this automatically.
+The mode is the leaf command — `up` (the default), `down`, or `status` — and
+`-d/--database` is accepted on either side of it. `up` names each migration it
+applied and prints the resulting version; `down` reverts exactly one version.
+`migrate` exits non-zero on failure, unlike `run`, so a deploy script stops
+instead of starting a service against the wrong schema.
+
+The `.sql` files still use the
+[golang-migrate](https://github.com/golang-migrate/migrate) naming convention and
+the same `schema_migrations` bookkeeping table, so if you prefer the CLI it can
+read and continue a database the subcommand migrated — but it has to be built
+with `-tags sqlite3` (the stock release binary answers `unknown driver sqlite3`),
+which is exactly the friction the subcommand exists to remove.
 
 Verify:
 
@@ -242,8 +241,9 @@ sqlite3 subscriptions.db ".tables"  # schema_migrations subscribed_nodes subscri
 sqlite3 analytics.db ".tables"      # declarations schema_migrations
 ```
 
-The services do not migrate themselves. A service started against an
-unmigrated database stops immediately rather than serving half a schema.
+The services never migrate implicitly — only the explicit `migrate` subcommand
+does. A service started against an unmigrated database stops immediately rather
+than serving half a schema.
 
 ## 6. Start the services
 
