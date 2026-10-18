@@ -632,8 +632,10 @@ Internal refactor of `nodes/` — no architecture change, wire-compatible
 throughout (see TODO.md for the ordered stages). Done: the generic `Node`
 runtime lives in `lib/core/node.py` and owns boot/registration/shutdown (the
 `Worker.registered()` hook is where `analytics.declare` will be published), the
-decode chain is a parameter, and the frame-worker busy-loop is gone. Remaining:
-de-singleton `BustleHandlers` (A1).
+decode chain is a parameter, the frame-worker busy-loop is gone, and
+`BustleHandlers` is an ordinary object constructed with its dependencies rather
+than a class-attribute singleton (A1). Remaining: packaging and the
+"add a node type" recipe (A5).
 
 ### 3. Structured logging (zerolog) — ✅ implemented
 

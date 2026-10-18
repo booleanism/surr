@@ -215,16 +215,20 @@ class BustleWorker(core_node.Worker):
         # for the life of the process.
         self._subject = bustle_analytics.resolve_subject(detector.names, chosen_classes)
         self._utc_offset = bustle_analytics.local_utc_offset()
+        # Constructed here, not in attach(), so the node owns the command
+        # object's lifetime: the handlers registry holds bound methods, and a
+        # handlers object built and dropped inside attach() would keep the
+        # instance alive only by that reference.
+        self._handlers = bustle_handlers.BustleHandlers(
+            node_id,
+            streamer,
+            detector,
+            chosen_classes,
+            async_q,
+        )
 
     def attach(self, hs: core_handlers.Handlers) -> None:
-        bustle_handlers.BustleHandlers.setup(
-            self._node_id,
-            hs,
-            self._streamer,
-            self._detector,
-            self._chosen_classes,
-            self._async_q,
-        )
+        self._handlers.register(hs)
 
     def start(self) -> list[asyncio.Task[typing.Any]]:
         task = asyncio.create_task(

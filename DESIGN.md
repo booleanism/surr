@@ -938,9 +938,14 @@ evidence.
    configures Pyright (`standard`, venv-pinned, `extraPaths = ["nodes"]`);
    `uv.lock` records the transitive graph and `uv sync` is the setup step, so
    `requirements.txt` is gone; `make typecheck` is the gate.
-10. **`BustleHandlers` is a class-attribute singleton** (`setup()` classmethod):
-    one node instance per process, global mutable state. Resolved by the
-    planned nodes refactor — see §12 and TODO.md.
+10. **`BustleHandlers` was a class-attribute singleton** (fixed, A1): the
+    `setup()` classmethod wrote the pipeline, detector and node id onto the
+    class, so a second instance replaced the first's dependencies without
+    raising and the first node then counted frames from the second's pipeline.
+    It is now an ordinary object constructed with its dependencies and
+    registered by `register(handlers_mgr)`; the only mutable state left is the
+    per-sink worker task. The defect survived because the module had no test
+    file at all — `nodes/tests/test_lib_bustle_handlers.py` is new with the fix.
 11. **Single RabbitMQ channel per service**: a channel-level error still needs
     the infrastructure to be re-declared. The supervisor now does exactly that
     on a connection drop (`SetupRouter` + `qSetup` + `ReplaceChannel`), but a

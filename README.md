@@ -12,8 +12,8 @@ central orchestrator.
 > **Project status: the control plane runs, and every defect found in the 2026-10
 > review is fixed.** [TODO.md](TODO.md) section E is the tracker for those
 > findings — each defect as it was found, with the fix appended — and sections A
-> and B are the work still ahead: the nodes refactor (packaging, the last
-> `BustleHandlers` singleton) and, in B, only the optional fleet-wide analytics
+> and B are the work still ahead: the last of the nodes refactor (packaging and
+> the "add a node type" recipe) and, in B, only the optional fleet-wide analytics
 > rollups. The `analytics` service is on the request path.
 > Tests cover the RPC reply layer, the restart backoff, the rx data plane and the
 > `nodes/lib/core` runtime, and `make typecheck` gates the Python side with

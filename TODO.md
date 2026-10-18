@@ -48,11 +48,31 @@ Ordered stages; each lands independently and is wire-compatible.
     - [x] ticker: spacing holds under simulated delay
   - [x] Golden-file test: one captured to_json() output asserted byte-for-byte
         so accidental wire changes fail CI
-- [ ] A1. De-singleton BustleHandlers (lib/bustle/handlers.py)
-  - [ ] Class attributes + setup() classmethod → `__init__` instance deps
-        (node_id, pipeline, model, chosen_classes, async_q, coll)
-  - [ ] register(self, handlers_mgr) registers bound handlers
-  - [ ] Command names and payloads stay byte-identical
+- [x] A1. De-singleton BustleHandlers (lib/bustle/handlers.py)
+  - [x] Class attributes + setup() classmethod → `__init__` instance deps
+        (node_id, pipeline, model, chosen_classes, async_q, coll). `setup()`
+        is gone; `BustleWorker.__init__` builds the object and `attach()` calls
+        `register(hs)`. The object is built in `__init__` rather than `attach()`
+        so the node owns its lifetime — the registry stores bound methods, and
+        an object created and dropped inside `attach()` would be kept alive
+        only by that reference.
+  - [x] register(self, handlers_mgr) registers bound handlers
+  - [x] Command names and payloads stay byte-identical
+  - [x] `nodes/tests/test_lib_bustle_handlers.py` (NEW, 10 tests) — there was
+        no test file for this module at all, which is why the defect survived:
+        every dependency lived on the class, so a second instance silently
+        replaced the first's pipeline and node id and the first node counted
+        the wrong frames. The test patches `processing.frame_worker` with one
+        that blocks on an event, so "a task was created" and "a task was
+        cancelled" are assertable without a pipeline, a detector or a thread
+        that outlives the test. Mutation-checked: writing the dependencies back
+        onto the class fails `test_two_instances_keep_their_own_node_ids` and
+        `test_one_nodes_stop_leaves_the_others_worker_alone`.
+  - Note on the second mutation result: `assertFalse(task.done())` alone did
+    NOT catch the shared class attribute, because the first node's stop cancels
+    the second node's task and leaves the *class* holding it, so the second
+    still looks alive until the cancellation lands. The assertion that fails is
+    `assertFalse(task.cancelled())`.
 - [x] A2. Extract lib/core/node.py (the real work)
   - [x] `Node(node_id, name, family, broker, version, register_payload,
         worker, intro_interval, rpc_timeout, remove_timeout)`: the runtime owns
