@@ -413,16 +413,24 @@ stage and the bustle torch wheels do not fit on one disk together) and pushes to
 reports that tag, because "the images came from the commit I tagged" is the one
 thing the earlier stack could not answer for itself.
 
-GHCR packages are created **private** even when the repository is public, so the
-first publish needs one manual step: open the package's settings and change its
-visibility to public. Until then `docker pull` needs a login, which is fine for
-CI and for you, and not fine for a stranger following this README.
+The packages are pullable anonymously once published (`docker run --rm
+ghcr.io/booleanism/surr/hub:v0.1.0 --version` needs no login). A package created
+by a workflow against a *private* repository inherits that visibility instead, so
+making the repository private later silently requires a login to pull — check the
+package's own settings page rather than assuming the repository's.
 
 To run a published build instead of building it, drop the `build:` blocks from
 `docker-compose.yml` (or override the image) — the deployment needs nothing from
 the build stage beyond the binary.
 
 ### What a rebuild actually costs
+
+**Do not prune the builder cache to make room for a rebuild.** Freeing space by
+throwing away the cache and then immediately rebuilding pays for every download
+twice — the cache *is* what makes the rebuild cheap. If the disk is too full to
+build, stop and ask the operator for space; do not reclaim it yourself. The one
+reclamation that is safe without asking is `docker builder prune --filter
+until=1h`, which leaves the cache the current build just wrote.
 
 Builds are cached, and two of the caches are expensive to rebuild, so know what
 you are throwing away before you prune:
