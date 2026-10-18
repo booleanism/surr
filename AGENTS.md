@@ -50,6 +50,8 @@ Knobs: `RELEASE_TYPE=release` (adds `-s -w -trimpath`), `TAGS` (build tags), `GO
 
 `VERSION` defaults to `git describe --tags --always --dirty` and is injected into every binary with `-X main.Version`, so `--version` and the `version=` field on every log line report the build. `LDFLAGS` appends to it rather than replacing it. The Python node resolves the same string independently (`nodes/lib/version.py`), which is what makes a mixed deployment's two build ids comparable. Do not reintroduce a hand-written version constant: the point of the injection is that no constant has to be kept in sync by hand.
 
+Releases are `.github/workflows/release.yml`: a `v*` tag builds and publishes all seven images to `ghcr.io/<owner>/<repo>/<service>`, one runner each, with the tag as the build id, then a `verify` job pulls the published hub image and fails unless `--version` reports that tag. Nothing else publishes — the images in `deploy/` are otherwise built from whatever tree is checked out, which is how one stack once came up carrying four different build ids. `go install` is deliberately unsupported: the `replace` directives a published module cannot resolve are the same ones that keep a local `internal/` edit visible to a service build.
+
 CI is `.github/workflows/ci.yml`: `make lint`, `make test-go` and `make build` on one runner, `make test-nodes` and `make typecheck` on another (PyGObject built from source). `make test` is the two halves combined.
 
 The Go job runs inside a `golang:1.27.1-trixie` container rather than directly on the runner, and both halves of that image tag are load-bearing:

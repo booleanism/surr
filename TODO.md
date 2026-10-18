@@ -1454,3 +1454,51 @@ retried once every two seconds rather than ~34 times a second.
       pinning the same parse `LiveNodeIDs` does), and the expiry test called
       `LiveNodeIDs` before `NodeAlive` on one registry — and expiry *deletes*,
       so the first call hid the evidence from the second.
+
+## G. Release mechanics
+
+Code quality was never the gap between this repository and one somebody can
+run: the tree lints, tests and builds on every push. What was missing was
+everything around the artifact. The first full deployment proved it — a stack
+came up carrying **four different build ids** (`surr-hub version unknown`,
+`surr-rx 0231136-dirty`, `surr-subscriptions unknown`, `surr-tx 1f9ae9d-dirty`)
+because each image had been built from whatever tree happened to be checked out,
+and nothing asserted the images came from one commit. Every check in
+`deploy/smoke.sh` would have passed anyway.
+
+- [x] One version for the repository, injected rather than hand-written:
+      `VERSION ?= $(shell git describe --tags --always --dirty)` in the Makefile,
+      passed to every image as a build arg and to every binary as
+      `-X main.Version`. `--version` and the `version=` field on every log line
+      report it, and the Python node resolves the same string independently
+      (`nodes/lib/version.py`), so a mixed deployment's two build ids are
+      comparable.
+- [x] `ProtocolRevision` in the `introduce` payload, mirrored in
+      `nodes/lib/core/siblings.py`, warned about rather than refused.
+- [x] `deploy/smoke.sh` asserts against the *running* system what
+      `docker compose ps` cannot show: the images are the build you think they
+      are, the data plane works, `tx` exits 0 on SIGTERM, and an absent node does
+      not make rx spin.
+- [x] `.github/workflows/ci.yml`: `make lint`, `make test-go` and `make build` in
+      `golang:1.27.1-trixie` (both halves of that tag are load-bearing — the
+      distro because tx needs GStreamer 1.26 for `C.GstIdStr`, the patch version
+      because golangci-lint v2.13.2 cannot read Go 1.27.2 export data), and the
+      Python half on the runner where PyGObject builds from source.
+- [x] `.github/workflows/release.yml`: a `v*` tag builds and publishes all seven
+      images to GHCR, one runner each, stamped with the tag as their version.
+      A `verify` job then pulls the published hub image and fails unless
+      `--version` reports the tag — the assertion the first deployment was
+      missing.
+- [x] `v0.1.0` tagged. GHCR packages start private even for a public repository,
+      so making them pullable is a one-time setting in the package's own
+      settings page; `deploy/README.md` says so.
+- [ ] **`go install github.com/booleanism/surr/hub/cmd/hub@latest` does not
+      work, and this is a decision rather than an oversight.** The five service
+      modules carry `replace github.com/booleanism/surr => ../`, which a
+      published module cannot resolve. Dropping them was tried and reverted:
+      with them gone, a local edit to `internal/models` became invisible to a
+      service build that still exited 0, which is a worse failure than an
+      unsupported install path. The supported path is the published image or a
+      checkout, and both are documented; publishing the submodules would need
+      `hub/vX.Y.Z`-style tags and a release process of its own, for an install
+      route nothing in `deploy/` uses.

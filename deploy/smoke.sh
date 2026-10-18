@@ -423,6 +423,31 @@ step "a publisher connecting into an absent node does not spin"
 # established stream does not notice the node leaving. The cycle only happens
 # on a NEW handshake, which is the cold-start case, so tx has to reconnect.
 docker stop surr-bustle-1 >/dev/null 2>&1
+
+# A dead node must not answer a report. Its declaration outlives it -- nothing
+# deletes a row, because `nodes.add` carries no timestamp to date one with -- so
+# the read path has to ask the sibling registry whether the node is running.
+# Without that check every query comes back with its empty shape, which reads as
+# "this node saw nothing" rather than "this node is gone".
+#
+# The wait is the registry's own TTL (15s), not a guess: the entry survives until
+# fifteen missed `introduce` broadcasts have passed.
+printf '  waiting for the hub to expire the node'
+dead_code=""
+for _ in $(seq 1 15); do
+    dead_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+        "${HUB_URL}/nodes/analytics?node_id=${NODE_ID}&time_cluster=minutes" \
+        -H "Authorization: Bearer ${token}" 2>/dev/null)
+    if [ "${dead_code}" = "409" ]; then
+        printf '\n'
+        break
+    fi
+    printf '.'
+    sleep 2
+done
+[ "${dead_code}" = "409" ] || printf '\n'
+check "analytics answers 409 for a node that is not running" "409" "${dead_code}"
+
 TX_SUBSCRIPTION_ID="${sub:-}" BUSTLE_NODE_ID="$NODE_ID" "${COMPOSE[@]}" up -d --force-recreate tx >/dev/null 2>&1
 
 printf '  letting tx connect into the absent node'
@@ -465,6 +490,14 @@ if [ "$recovered" = "no" ]; then
     printf '\n'
     no "the chain recovers once the node returns" "no 'publisher started' within 60s"
 fi
+
+# The 409 has to be about liveness and not about the node having lost its
+# declaration: the same request that was refused while the node was down must
+# answer once it is introducing itself again.
+live_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    "${HUB_URL}/nodes/analytics?node_id=${NODE_ID}&time_cluster=minutes" \
+    -H "Authorization: Bearer ${token}" 2>/dev/null)
+check "analytics answers again once the node is back" "200" "${live_code}"
 
 # ------------------------------------------------------------------- the result
 

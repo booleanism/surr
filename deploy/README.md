@@ -277,6 +277,12 @@ stack down afterwards unless you pass `KEEP=1`. It checks, in order:
    string: the service marshals documents as relaxed extended JSON, so a BSON
    date would arrive as `{"$date": ...}` and no chart could label an axis with
    it.
+   Two more checks bracket the moment the node is stopped, and they are the
+   only place the read path's liveness rule is exercised end to end: the
+   declaration outlives the node (nothing deletes a row, because `nodes.add`
+   carries no timestamp), so `/nodes/analytics` has to answer **409** while the
+   node is gone and **200** again once it is back. The 15s the first one waits
+   is the sibling registry's own TTL, not a guess.
 4. **`tx` exits 0 on SIGTERM.** The assertion that was never made: an
    unreachable source used to make `tx` die of SIGSEGV, and rebuilding with a
    reachable one showed the abort was in the *shutdown* path, so it fired on a
@@ -391,6 +397,30 @@ sibling protocol revision mismatch  peer_protocol_revision=1  protocol_revision=
 The protocol revision is the compatibility contract between peers — the version
 string is just the build id, and two different builds of the same revision are
 compatible by definition.
+
+### Published images
+
+A `v*` tag publishes all seven images instead of building them locally:
+
+```sh
+git tag -a v0.1.0 -m "..." && git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` builds each one on its own runner (the tx Rust
+stage and the bustle torch wheels do not fit on one disk together) and pushes to
+`ghcr.io/<owner>/<repo>/<service>:<tag>`, with the tag as the build id. A
+`verify` job then pulls the published hub image and fails unless `--version`
+reports that tag, because "the images came from the commit I tagged" is the one
+thing the earlier stack could not answer for itself.
+
+GHCR packages are created **private** even when the repository is public, so the
+first publish needs one manual step: open the package's settings and change its
+visibility to public. Until then `docker pull` needs a login, which is fine for
+CI and for you, and not fine for a stranger following this README.
+
+To run a published build instead of building it, drop the `build:` blocks from
+`docker-compose.yml` (or override the image) — the deployment needs nothing from
+the build stage beyond the binary.
 
 ### What a rebuild actually costs
 
