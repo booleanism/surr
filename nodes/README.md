@@ -223,9 +223,9 @@ type:
 (5 s and 2 s) rather than flags: bustle does not pass them, and a type that
 needs to should pass them explicitly instead of inventing a flag nobody sets.
 
-`deploy/docker-compose.yml` and `deploy/nodes.Dockerfile` are the other places
-that know about a node type: a new flag belongs there too, and `deploy/smoke.sh`
-is what catches the wiring.
+A new flag is the type's whole interface to the operator, so it belongs in the
+`--help` text and nowhere else: nothing outside `nodes/` enumerates a node type's
+flags, which is what lets a second type be added without editing a service.
 
 ## Checklist
 

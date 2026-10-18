@@ -25,12 +25,11 @@ was reproduced from the source. **All of E0–E11 is fixed and committed**
 they were found in, not to the fixed tree.
 
 **Section F is different again**: it tracks defects found by *running* the
-system, on a `docker compose` stack built from a single commit and driven by
-`deploy/smoke.sh`. Every one of them needs a live process to be reachable — a
-node that dies between two broker calls, a duplicate row left in a database by
-a previous run, a reply code nothing consumed. All six are fixed. F6 (dead
-nodes leaving rows behind) was found by the same sweep run again after the
-analytics rewrite.
+system — a full stack from one commit, exercised end to end. Every one of them
+needs a live process to be reachable: a node that dies between two broker
+calls, a duplicate row left in a database by a previous run, a reply code
+nothing consumed. All six are fixed. F6 (dead nodes leaving rows behind) was
+found by the same sweep run again after the analytics rewrite.
 
 ## A. Nodes refactor (type-agnostic runtime) — DESIGN.md §12
 
@@ -166,9 +165,8 @@ router + SQLite registry + read-only Mongo executor. Nodes become write-only;
 the service becomes the sole reader. Builds on A2 (the Node runtime hosts the
 declare step).
 
-**Status:** B1–B5 are implemented, tested, deployed and on the read path
-(`deploy/analytics.Dockerfile`, the `analytics` and `migrate-analytics` compose
-services). A node publishes its query manifest at boot, `GET /nodes/analytics`
+**Status:** B1–B5 are implemented, tested and on the read path. A node
+publishes its query manifest at boot, `GET /nodes/analytics`
 asks the service what that node declared and runs every query in it, and the
 node no longer reads its own collection. B7 (the rewrite of what the bustle
 queries actually say) is also done, as is B6 (fleet-wide rollups). The only
@@ -291,13 +289,12 @@ is optional.
         also exercises the per-query parameter selection end to end.
   - [x] Docs: ARCHITECTURE.md command catalog + data flow step 7, DESIGN.md
         §8/§9/§11, this file, AGENTS.md invariants.
-  - [x] Mongo credential split: `deploy/mongo-init.js` creates `surr-writer`
-        (`readWrite` on the nodes database) and `surr-reader` (`read`), as a
-        one-shot `mongo-init` compose service rather than a
-        `/docker-entrypoint-initdb.d` script — those only fire on an empty data
-        directory, so an existing `mongo-data` volume would never get the users.
-        bustle uses the writer, analytics the reader: the split is enforced by
-        credentials, not convention.
+  - [x] Mongo credential split: `surr-writer` (`readWrite` on the nodes
+        database) and `surr-reader` (`read`). bustle uses the writer, analytics
+        the reader: the split is enforced by credentials, not convention, so a
+        query path that tried to write would be refused by the server. Both
+        URLs name `authSource`, because a driver URL with no database path
+        authenticates against `admin` and the users live in the nodes database.
 - [x] B7. Bustle analytics rewrite — the queries now say something, and they
         landed before B6 (which is optional) rather than after it.
   - [x] Replaced the three demo-shaped queries with four that answer questions
@@ -352,8 +349,7 @@ is optional.
         sub-pipelines and `keys()` walks every dict key, so `$mergeObjects` is
         not mistaken for `$merge` and the stage count is checked through the
         nesting rather than at the top level.
-  - [x] Docs: DESIGN.md §8/§11, ARCHITECTURE.md, this file, deploy/README.md,
-        and `deploy/smoke.sh` (four names plus a bucket-label-is-a-string check).
+  - [x] Docs: DESIGN.md §8/§11, ARCHITECTURE.md, this file.
 - [x] B6. Fleet declarations (done; versioned query names still deferred)
   - [x] A declaration carries `node_type` and `scope` (`node` | `fleet`), added
         by migration `000002_fleet_scope` with a `(node_type, scope)` index.
@@ -528,7 +524,7 @@ the DESIGN.md §13 policy exactly — logs must carry context values
       runs from `make test-nodes`, wired into `make test`, with
       `make typecheck` gating it with pyright. What is still untested is the
       wiring rather than the logic: no test drives a real SRT socket or a real
-      GStreamer pipeline — those are exercised by the compose stack.
+      GStreamer pipeline, because that needs a source and a peer.
 - [ ] PostgreSQL support (README TODO)
 - [ ] Analytics presentation layer (README TODO)
 
@@ -797,8 +793,9 @@ data-plane and tx paths have no test" — was closed by the E6/E7/E11 pass:
       and writing."`, then
       `GLib-GIO:ERROR:../../../gio/gthreadedresolver.c:1487:cancelled_cb: assertion
       failed: (g_cancellable_is_cancelled (cancellable))` and `Bail out!`, and
-      exits **139**. Under `restart: unless-stopped` that is a restart every few
-      seconds, which is what the compose stack did until `TX_SRC` was corrected.
+      exits **139**. Under a supervisor that restarts on failure that is a
+      restart every few seconds, which is what the stack did until the source
+      was corrected.
       Note the sink is already publishing to `rx` by the time the source fails,
       so `rx` accepts a publisher that will never carry frames. **Fixed.** The
       abort turned out to be a *shutdown-path* defect rather than a
@@ -1244,8 +1241,8 @@ The venv is `./.venv` at the repo root, while all the node code stays in
 ## F. Defects found by the live deployment sweep (all fixed)
 
 Section E came from reading the code. This section came from running it: a
-`docker compose` stack built from one commit (`1911b36`), driven end-to-end by
-`deploy/smoke.sh`. Four defects and one root enabler. Every one of them was
+full stack built from one commit (`1911b36`), exercised end to end. Four
+defects and one root enabler. Every one of them was
 invisible to the review pass, because each needs a *running* system to be
 reachable — a node that dies between two broker calls, a duplicate row left in
 a database by a previous run, a reply code nothing consumed.
@@ -1388,23 +1385,22 @@ retried once every two seconds rather than ~34 times a second.
 
 ### F6. Dead nodes leave rows in the hub and the analytics registry — fixed
 
-- [x] Found while verifying the analytics rewrite on the live stack, not by a
-      test: after a handful of `deploy/smoke.sh` runs the hub's `nodes` table
+- [x] Found while verifying the analytics rewrite on a running stack, not by a
+      test: after a handful of end-to-end runs the hub's `nodes` table
       held eleven rows for one live node, and the analytics `declarations` table
       held two dead nodes' manifests — still carrying the retired
       `counts_detail`/`counts_summary`/`counts_totals` query names.
-- [x] The growth is unbounded and is by design: every smoke run mints a fresh
-      node id (because `subscribed_nodes.node_id` is UNIQUE and the API cannot
-      move a node between subscriptions), so a persistent `hub-db` volume
-      accumulates a row and four declarations per run. Nothing sweeps either
-      table, and `nodes.add` carries no timestamp, so a row cannot even be
-      dated.
+- [x] The growth is unbounded and is by design: every run mints a fresh node
+      id (because `subscribed_nodes.node_id` is UNIQUE and the API cannot move a
+      node between subscriptions), so a persistent `hub-db` accumulates a row
+      and four declarations per run. Nothing sweeps either table, and
+      `nodes.add` carries no timestamp, so a row cannot even be dated.
 - [x] **Correction to the original write-up.** It claimed
       `GET /nodes/availability` "reads the sibling registry, not the table" and
       that the 204 therefore proved the dead rows were invisible. That was
       wrong: `AvailableNodes` read `SelectAllNodes` — the table — and filtered
       only by subscription, so an unsubscribed dead row *was* offered. The 204
-      in that run meant every row was subscribed (smoke.sh subscribes the node
+      in that run meant every row was subscribed (the run subscribes the node
       it mints), which is a different fact. A client that had never subscribed
       would have been offered a node that would never answer, and the failure
       would have surfaced much later as a sink that refused to start.
@@ -1455,16 +1451,13 @@ retried once every two seconds rather than ~34 times a second.
       `LiveNodeIDs` before `NodeAlive` on one registry — and expiry *deletes*,
       so the first call hid the evidence from the second.
 
-## G. Release mechanics
+## G. Build identity
 
-Code quality was never the gap between this repository and one somebody can
-run: the tree lints, tests and builds on every push. What was missing was
-everything around the artifact. The first full deployment proved it — a stack
-came up carrying **four different build ids** (`surr-hub version unknown`,
-`surr-rx 0231136-dirty`, `surr-subscriptions unknown`, `surr-tx 1f9ae9d-dirty`)
-because each image had been built from whatever tree happened to be checked out,
-and nothing asserted the images came from one commit. Every check in
-`deploy/smoke.sh` would have passed anyway.
+Code quality was never the gap: the tree lints, tests and builds on every push.
+What was missing was knowing *which* tree a running process came from. Each
+service carried its own hand-written `const Version = "1.0.0"`, so four services
+built from four different commits all reported the same version, and a mixed
+deployment could not be diagnosed from its own logs.
 
 - [x] One version for the repository, injected rather than hand-written:
       `VERSION ?= $(shell git describe --tags --always --dirty)` in the Makefile,
@@ -1475,30 +1468,17 @@ and nothing asserted the images came from one commit. Every check in
       comparable.
 - [x] `ProtocolRevision` in the `introduce` payload, mirrored in
       `nodes/lib/core/siblings.py`, warned about rather than refused.
-- [x] `deploy/smoke.sh` asserts against the *running* system what
-      `docker compose ps` cannot show: the images are the build you think they
-      are, the data plane works, `tx` exits 0 on SIGTERM, and an absent node does
-      not make rx spin.
 - [x] `.github/workflows/ci.yml`: `make lint`, `make test-go` and `make build` in
       `golang:1.27.1-trixie` (both halves of that tag are load-bearing — the
       distro because tx needs GStreamer 1.26 for `C.GstIdStr`, the patch version
       because golangci-lint v2.13.2 cannot read Go 1.27.2 export data), and the
       Python half on the runner where PyGObject builds from source.
-- [x] `.github/workflows/release.yml`: a `v*` tag builds and publishes all seven
-      images to GHCR, one runner each, stamped with the tag as their version.
-      A `verify` job then pulls the published hub image and fails unless
-      `--version` reports the tag — the assertion the first deployment was
-      missing.
-- [x] `v0.1.0` tagged. GHCR packages start private even for a public repository,
-      so making them pullable is a one-time setting in the package's own
-      settings page; `deploy/README.md` says so.
 - [ ] **`go install github.com/booleanism/surr/hub/cmd/hub@latest` does not
       work, and this is a decision rather than an oversight.** The five service
       modules carry `replace github.com/booleanism/surr => ../`, which a
       published module cannot resolve. Dropping them was tried and reverted:
       with them gone, a local edit to `internal/models` became invisible to a
       service build that still exited 0, which is a worse failure than an
-      unsupported install path. The supported path is the published image or a
-      checkout, and both are documented; publishing the submodules would need
-      `hub/vX.Y.Z`-style tags and a release process of its own, for an install
-      route nothing in `deploy/` uses.
+      unsupported install path. The supported path is a checkout — `make build`
+      — and publishing the submodules would need `hub/vX.Y.Z`-style tags and a
+      release process of its own, for an install route nothing here uses.

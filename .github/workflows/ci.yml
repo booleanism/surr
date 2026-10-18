@@ -32,10 +32,8 @@ jobs:
     # 1.24 -- so on the bare runner the tx module does not type-check ("could
     # not determine what C.GstIdStr refers to") and `make lint` fails before it
     # ever reaches the other four modules. Rather than chase a newer runner
-    # distro, run in the same Debian release the deploy images are built on, so
-    # CI lints and builds against the same GStreamer those images ship. That
-    # closes the "passes in CI, fails in the image" gap instead of papering over
-    # it. debian:trixie is GStreamer 1.26.2, libsrt 1.5.4, GLib 2.84.
+    # distro, run in trixie, which carries a GStreamer new enough for go-gst:
+    # GStreamer 1.26.2, libsrt 1.5.4, GLib 2.84.
     #
     # The toolchain is pinned to 1.27.1 rather than the image's newest patch
     # (1.27.2) for a second, unrelated reason: golangci-lint v2.13.2 is built

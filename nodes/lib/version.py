@@ -14,12 +14,11 @@ missing or the code is running from an archive with no ``.git`` directory,
 which is the honest answer there -- a source tarball has no build id.
 
 ``SURR_VERSION`` takes precedence over git when it is set to something
-non-empty. That is what a container image needs: the image build excludes
-``.git`` (see .dockerignore), so asking git inside the container could only
-ever answer "unknown", while the same build id the Go binaries were compiled
-with is known to the Dockerfile and is handed over in the environment. Git
-remains the fallback so a checkout run directly from a working tree -- the
-development case -- needs no environment at all.
+non-empty. That is what a packaged copy needs: an archive or an extracted tree
+has no ``.git``, so asking git there could only ever answer "unknown", while
+whatever assembled the package knows the build id and can hand it over in the
+environment. Git remains the fallback so a checkout run directly from a working
+tree -- the development case -- needs no environment at all.
 """
 
 from __future__ import annotations

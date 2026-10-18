@@ -531,10 +531,10 @@ now.
   node type; mitigated by versioned query names if it ever bites.
 - **A declaration outlives the node that made it, so liveness is a separate
   question from existence.** The registry is keyed by node id and nothing
-  deletes a row, which is deliberate: every deployment that mints a fresh node
-  id (as `deploy/smoke.sh` does, because `subscribed_nodes.node_id` is UNIQUE
-  and no endpoint moves a node between subscriptions) would otherwise need a
-  sweep, and a sweep needs a timestamp the `nodes.add` payload does not carry.
+  deletes a row, which is deliberate: a node id is minted per install and
+  `subscribed_nodes.node_id` is UNIQUE with no endpoint to move a node between
+  subscriptions, so every reinstall leaves a row behind. Sweeping them would
+  need a timestamp the `nodes.add` payload does not carry.
   The read path therefore asks the sibling registry whether the node is
   advertising itself, and refuses with 409 rather than running the queries: an
   empty window and a dead node both produce empty arrays, and a report full of
@@ -825,10 +825,9 @@ is the tracker for these findings and their status.
 
 #### Fixed in the deployment sweep (F1–F4) — do not reintroduce
 
-These four were found by *running* the stack, not by reading it, and each needs
-a live process to be reachable — which is why a review pass missed them and a
-compose stack plus `deploy/smoke.sh` did not. TODO.md section F has the
-evidence.
+These four were found by *running* the system, not by reading it, and each needs
+a live process to be reachable — which is why a review pass missed them and an
+end-to-end run did not. TODO.md section F has the evidence.
 
 13. **rx sink dispatch reported success for a node that never answered (F1,
     HIGH)**. `rx/internal/adapter/rabbitmq/nodes.go` ran the broker round trip
@@ -912,9 +911,9 @@ evidence.
    cannot regress silently. The Python side is also type checked by
    `make typecheck` (pyright, `standard`, over `bustle.py`, `lib/` and
    `tests/`). What no test covers is the wiring rather than the logic: nothing
-   drives a real SRT socket or a real GStreamer pipeline, and those — plus the
-   whole deployment — are exercised through the compose stack. `make lint` and
-   `make test` remain the only automated gates.
+   drives a real SRT socket or a real GStreamer pipeline, because that needs a
+   source, a codec and a peer. `make lint` and `make test` remain the only
+   automated gates.
 2. **Restart loops could not recover and spun hot** (fixed, E4): no backoff, a
    one-shot `amqp091.Dial` with no `NotifyClose`, and the always-true
    `restart = restart || !restart` idiom. Routines now run inside

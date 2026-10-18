@@ -18,8 +18,8 @@ central orchestrator.
 > its nodes the caller owns.
 > Tests cover the RPC reply layer, the restart backoff, the rx data plane and the
 > `nodes/lib/core` runtime, and `make typecheck` gates the Python side with
-> pyright; what is exercised by hand is the wiring — a real SRT socket and a real
-> GStreamer pipeline — through the compose stack in [deploy/](deploy/README.md).
+> pyright; what no test covers is the wiring — a real SRT socket and a real
+> GStreamer pipeline — so that is exercised by running the system.
 
 ## How it fits together
 
@@ -128,7 +128,7 @@ GStreamer frame path — and the classes that need the GStreamer bindings skip
 themselves where those are missing. `make typecheck` adds pyright in `standard`
 mode over `nodes/bustle.py`, `nodes/lib/` and `nodes/tests/`. What is exercised
 by hand is the wiring rather than the logic: a real SRT socket and a real
-GStreamer pipeline, through the compose stack in [deploy/](deploy/README.md).
+GStreamer pipeline, which need a source and a peer rather than a fixture.
 The two handler tests enumerate
 the commands their service advertises and fail when one has no case, so
 registering a handler without a test breaks `make test`.
@@ -144,16 +144,12 @@ and neither should wait on the other.
 
 ## Quick start
 
-There are two ways to run this: the compose stack in `deploy/`, which brings up
-RabbitMQ, MongoDB, both migrators and every service on the right networks, or by
-hand, which is what the rest of this section describes. **Start with
-[`deploy/README.md`](deploy/README.md)** unless you are working on a single
-service — it is the shorter path, and it documents the one component the
-repository does not contain (an RTSP source). The stack has a `demo` profile
-that supplies a synthetic one, so `docker compose --profile demo --profile tx
---profile nodes up -d` runs the whole system with no camera and no external
-containers. `deploy/smoke.sh` then asserts the behaviour that is invisible from
-`docker compose ps`.
+Every service is a standalone binary with its own flags. Start them in the order
+below: not because they check for each other at boot, but because each discovers
+the others over the broker, so a service started first simply waits.
+
+The repository does not contain an RTSP source. `tx` pulls one, so point `--src`
+at a camera or at anything else that publishes RTSP.
 
 ### 1. Start the infrastructure
 
@@ -172,18 +168,15 @@ migrate -path hub/internal/migrations/sqlite \
         -database "sqlite3://$PWD/hub.db" up
 migrate -path subscriptions/internal/migrations/sqlite \
         -database "sqlite3://$PWD/subscriptions.db" up
+migrate -path analytics/internal/migrations/sqlite \
+        -database "sqlite3://$PWD/analytics.db" up
 ```
 
-> In the compose stack this is the `migrate-hub` / `migrate-subscriptions`
-jobs, which run to completion before the services start. They exist because
-that `migrate` CLI cannot be pulled as a stock image at all — see
-`deploy/migrate.Dockerfile`.
-
 This creates the tables and a `schema_migrations` bookkeeping table. Use `down`
-to roll back one version. Run this before starting `hub` and `subscriptions`:
-both check for their tables at startup (`internal/db/schema.go`) and exit with
-one error naming the missing tables and the `migrate ... up` command, rather
-than opening an empty database and failing one query at a time.
+to roll back one version. Run this before starting `hub`, `subscriptions` and
+`analytics`: each checks for its tables at startup (`internal/db/schema.go`) and
+exits with one error naming the missing tables and the `migrate ... up` command,
+rather than opening an empty database and failing one query at a time.
 
 > **The `migrate` CLI must be built with the `sqlite3` driver.** Stock
 > `golang-migrate` release binaries do not include it, so `sqlite3://` fails
@@ -300,7 +293,6 @@ the same address is a **409** too, not a 500.
 
 ## Documentation
 
-- [deploy/README.md](deploy/README.md) — run the whole system with Docker Compose, including the RTSP source it needs (`deploy/smoke.sh` verifies a running stack).
 - [ARCHITECTURE.md](ARCHITECTURE.md) — services, data flow, protocol, storage, service internals.
 - [DESIGN.md](DESIGN.md) — design rationale, trade-offs, known limitations, invariants.
 - [TODO.md](TODO.md) — staged work (nodes refactor, analytics service, logging) and verified defects.

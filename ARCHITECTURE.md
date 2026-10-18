@@ -38,8 +38,8 @@ share one build list and `go build all` / `go vet all` span the whole
 repository (`go build ./...` still stops at each module boundary). The five
 service modules (`hub`, `rx`, `subscriptions`, `analytics`, `tx`) additionally reach the
 shared root packages via `replace github.com/booleanism/surr => ../`, which is
-what keeps a build made outside the workspace (`GOWORK=off`, and every deploy
-Dockerfile) resolvable while the shared module is unpublished. `tx` never joins
+what keeps a build made outside the workspace (`GOWORK=off`) resolvable while
+the shared module is unpublished. `tx` never joins
 the broker — it remains broker-free at runtime, but does import shared root
 packages (`internal/logging`) at build time.
 
@@ -599,8 +599,7 @@ A new Go service `analytics/` becomes the sole reader of MongoDB; nodes become
 write-only.
 
 **Status.** Steps 1–3 are implemented and tested (`analytics/cmd/analytics`,
-`analytics/internal/{db/sqlite,db/mongo,usecases,protocols/rabbitmq/handlers}`,
-deployed by `deploy/analytics.Dockerfile` and the `analytics` compose service).
+`analytics/internal/{db/sqlite,db/mongo,usecases,protocols/rabbitmq/handlers}`).
 Step 1's *sender* is not implemented — nothing issues `analytics.declare` yet,
 because the node runtime that would carry the post-registration hook is
 workstream 2. Steps 4 and 5 are the cutover, TODO.md B5. The core principle: **whoever writes the data also writes the
