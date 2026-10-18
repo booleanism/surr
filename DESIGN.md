@@ -589,15 +589,6 @@ is the tracker for these findings and their status.
    `nodes/lib/bustle/analytics.py` end in a `$project` emitting ECharts option
    objects (`xAxis`/`yAxis`/`legend`/`series.type`/`showSymbol`), violating
    invariant 8. Corrected with the analytics service (§8, §11, TODO.md B4).
-10. **The sibling registry never forgets a dead node (F5, MEDIUM)**. `introduce`
-    adds a sibling to every peer's registry and nothing ever removes one, so a
-    node killed without a graceful `nodes.remove` stays resolvable for the life
-    of the hub process. The fixes below make that survivable rather than fatal,
-    but the cost is a full 5s `sinkCommandTimeout` per dispatch before the node
-    is treated as absent, where the registry could answer immediately. A TTL or
-    a liveness sweep is the fix; the node side already sends `nodes.remove` on
-    the graceful path (`nodes/lib/core/rpc.py`), so the missing half is hub-side
-    expiry.
 
 #### Fixed in the E7/E11 pass — do not reintroduce
 
@@ -619,10 +610,13 @@ is the tracker for these findings and their status.
     error after still trying every node, so a publisher whose node is not up is
     dropped rather than served nothing — and the reconnect that follows is
     bounded instead of the measured ~34/second: one handshake per two seconds
-    (`sinkUnavailableDelay`) when the node was never registered, and about one
-    per seven seconds when the registry still lists a dead one, because each
-    attempt then also spends the 5s `sinkCommandTimeout` below waiting for an
-    answer that will not come. The retry itself still belongs to `tx`.
+    (`sinkUnavailableDelay`) when the node was never registered, and a handful
+    more than that while the registry still lists a dead one, because each
+    attempt then also spends up to the 5s `sinkCommandTimeout` below waiting for
+    an answer that will not come. `SiblingTTL` (F5, §A17) closes that last gap:
+    fifteen seconds after the node stopped introducing itself the lookup fails
+    at once and both cases cycle identically. The retry itself still belongs to
+    `tx`.
 11. **Minor items (E11, LOW)** — fixed. `GetBytes` is deleted (a payload is read
     by unmarshalling `Result` into the type the caller asked for; its "try
     base64, fall back to text" guess could not be made correct); an empty
@@ -691,7 +685,9 @@ evidence.
     the SRT handshake lookup already used. Measured live, this is also what
     spaces the reconnect out for a node the registry still lists: 4 cycles in
     30s, against 15 for a node that was never registered and 1058 in 31s before
-    the delay existed.
+    the delay existed. `SiblingTTL` (F5, §A17) then removes the difference
+    altogether — after fifteen seconds the stale entry is gone and both cases
+    settle at 15.
 15. **Adding an already-subscribed node answered 500 (F3, MEDIUM)**.
     `subscribed_nodes.node_id` is `UNIQUE` — a node belongs to exactly one
     subscription — so the second add fails at the storage layer, and that
@@ -707,6 +703,26 @@ evidence.
     `POST /subscriptions/add` with `{"nodes":[]}` answered 200 with a fresh
     `subscription_id` — a row with no members that the API cannot remove. The
     handler now rejects an empty list and any `node.ID == uuid.Nil` with 400.
+
+#### Fixed in the F5 pass — do not reintroduce
+
+17. **The sibling registry forgot nothing (F5, MEDIUM)**. `introduce` added a
+    sibling to every peer's registry and nothing ever removed one, so a node
+    killed without a graceful `nodes.remove` stayed resolvable for the life of
+    the hub process: `GetName` named it, the dispatch proceeded, and every
+    attempt spent a full 5s `sinkCommandTimeout` before the sink was treated as
+    absent — four cycles in 30s where an unregistered node managed fifteen.
+    Both registries now expire an entry `SiblingTTL` (15s, `SIBLING_TTL_SECONDS`
+    in `nodes/lib/core/siblings.py`) after the last introduce that carried it.
+    Fifteen is the number because introduce is a one-second ticker: fifteen
+    consecutive misses is not a slow peer, it is a gone one. Expiry is **lazy**
+    — checked and applied on `Get`/`GetName`, not by a sweep goroutine — because
+    the question it answers is only ever asked at dispatch, and because five
+    processes each owning a ticker plus a shutdown path is a lot of machinery
+    for a map of a handful of keys. The cost is that an entry nobody asks about
+    lingers, which is one dead key per dead peer. `nodes/lib/core/rpc.py`
+    already tried every candidate, so on the node side the gain is not fewer
+    failures but not sending the first attempt to an address that is gone.
 
 ### B. Operational / robustness gaps
 

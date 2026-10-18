@@ -96,10 +96,15 @@ over a shared topic exchange (the "family", default `surr0`):
    `rpc.broadcast`.
 2. **Introduce** — every second (ticker in each `main`), each service
    broadcasts an `introduce` message (Type=`introduce`, ReplyTo=its direct
-   routing key) whose body is the JSON `{"commands": [...]}` list of commands
-   it serves. Peers store these in an in-memory siblings registry
-   (`internal/protocols/siblings.go`, `nodes/lib/core/siblings.py`) keyed by
-   routing key.
+   routing key) whose body is the JSON `{"commands": [...],
+   "protocol_revision": n, "version": "<build>"}` — what it serves, which wire
+   revision it speaks, and which build it is. Peers store these in an in-memory
+   siblings registry (`internal/protocols/siblings.go`,
+   `nodes/lib/core/siblings.py`) keyed by routing key. An entry expires
+   `SiblingTTL` (15s) after the last introduce that carried it, checked lazily
+   when the entry is looked up: a peer that has missed fifteen one-second
+   broadcasts is gone, not slow, and treating it as present would cost a full
+   command timeout on every dispatch to it (TODO.md F5).
 3. **Request** — a caller resolves which sibling serves a command
    (`GetName(command)`), then `Send`s a request: new UUID `CorrelationId`
    ("trackID"), `ReplyTo` = caller's direct routing key, Type = command,
@@ -167,8 +172,9 @@ data-plane identity that survives a rename or restart.
 - The hub upserts idempotently (`ON CONFLICT(id) DO UPDATE`), so
   re-registration after restart is safe.
 - On SIGTERM/SIGINT the node stops workers, sends `nodes.remove`, then closes
-  the broker connection. A SIGKILL'd node leaves a stale row in the hub; there
-  is no TTL/stale sweep yet.
+  the broker connection. A SIGKILL'd node leaves a stale row in the hub's
+  `nodes` table, but its sibling entry expires `SiblingTTL` (15s) later, so a
+  dispatch to it fails at once instead of spending a full command timeout.
 
 ## Data plane: SRT topology
 
@@ -398,7 +404,7 @@ them from the source; the later deployment sweep found four more by *running*
 the stack, which is the only way to reach them. The two sections are the tracker
 for their status.
 
-### Fixed (E0–E11, F1–F4) — do not reintroduce
+### Fixed (E0–E11, F1–F5) — do not reintroduce
 
 | Defect | Effect | Fix |
 |---|---|---|
@@ -433,15 +439,14 @@ for their status.
 | minor: `GetBytes` guessed at base64, an empty `ReplyTo` was refused silently, `models.User.Passwd` was JSON-serializable, a duplicate signup email was a 500, `rx` could not bind IPv6, two tx locals shadowed package names | the argon2id hash crossed the broker; a `password` signup created an empty-password account; failures were confusing | `GetBytes` deleted; the refusal is warned about; `Passwd` is `json:"-"`; `credentials` + `DisallowUnknownFields` + `models.ErrUserExists` → 409; `net.SplitHostPort`; renames |
 | rx sink dispatch declared `err :=` *inside* the pool closure, so `do()` returned `Run`'s nil for every failure, and its `Recv` had no deadline | `StartSink` reported success for a node that had died, so the publisher was accepted and the bounded retry never engaged; each stale dispatch parked a pool worker in `Recv` until the process context ended (`--worker 28` of them) | `do()` runs `roundTrip` on the pool and receives the outcome over a `make(chan error, 1)`; `sinkCommandTimeout` (5s) bounds the round trip; a non-zero reply code is now an error |
 | adding a node that was already in a subscription returned a bare domain error, and `{"nodes":[]}` created an empty subscription | `POST /subscriptions/add` answered 500 for a conflict and 200 for a request that creates an unremovable row | `CodeConflict` (`-5`) + `models.ErrNodeAlreadySubscribed` + `isUniqueViolation` translation → 409; empty and nil-id node lists → 400 |
+| the sibling registry never forgot a dead node: `introduce` added an entry and nothing removed it | a node killed without a graceful `nodes.remove` stayed resolvable for the life of the process, so every dispatch to it spent a full 5s `sinkCommandTimeout` before the sink was treated as absent (4 cycles in 30s where an unregistered node managed 15) | both registries expire an entry `SiblingTTL` (15s, `SIBLING_TTL_SECONDS` in the Python mirror) after its last introduce, checked lazily on `Get`/`GetName` |
 
 ### Open
 
-Every defect in TODO.md sections E and F1–F4 is fixed. What remains is TODO.md
-F5 (the sibling registry never forgets a dead node, which is what makes a
-dispatch to one cost a full 5s timeout), plus everything tracked in TODO.md
-sections A (nodes refactor, packaging) and B (analytics service) — including the
-ECharts-shaped analytics output that the analytics service is meant to replace.
-None of it is a correctness defect in the shipped path.
+Every defect in TODO.md sections E and F is fixed. What remains is tracked in
+TODO.md sections A (nodes refactor, packaging) and B (analytics service) —
+including the ECharts-shaped analytics output that the analytics service is
+meant to replace. None of it is a correctness defect in the shipped path.
 
 ## Build & tooling
 

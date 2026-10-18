@@ -341,7 +341,10 @@ cycles=$("${COMPOSE[@]}" logs --since "$since" rx 2>/dev/null | grep -c 'publish
 printf '\n'
 
 # ~15 is one cycle every two seconds. The bounds are generous on purpose: the
-# point is to catch "as fast as it can", not to pin the exact rate.
+# point is to catch "as fast as it can", not to pin the exact rate. The window
+# straddles the 15s SiblingTTL, so the first few cycles still pay the 5s
+# sinkCommandTimeout for a node the registry has not yet forgotten and the rest
+# do not: expect 4 at the low end and ~15 once the entry has expired.
 if [ "${cycles:-0}" -ge 4 ] && [ "${cycles:-0}" -le 40 ]; then
     ok "rx reconnects at a bounded rate (${cycles} cycles in 30s)"
 else

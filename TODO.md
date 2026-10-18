@@ -1082,18 +1082,41 @@ retried once every two seconds rather than ~34 times a second.
       `TestAddSubscriptionRejectsAnEmptyNodeList`,
       `TestAddSubscriptionRejectsANodeWithoutAnID`.
 
-### F5. The sibling registry never forgets a dead node (MEDIUM) — OPEN
+### F5. The sibling registry never forgets a dead node (MEDIUM) — fixed
 
-- [ ] This is the enabler for F1 and F2, and it is the reason they were
+- [x] This is the enabler for F1 and F2, and it is the reason they were
       reachable at all: `introduce` adds a sibling and nothing ever removes it,
       so a node that is killed without a graceful `nodes.remove` stays
       resolvable for the life of the hub process. `GetName` then finds exactly
       one candidate, which is why the dispatch proceeds instead of failing with
       `expected one sibling with <id>.sink.start command`.
-- [ ] F1 and F2 mean a stale entry is now *survivable* — the dispatch fails
+- [x] F1 and F2 mean a stale entry is now *survivable* — the dispatch fails
       after 5s and the bounded retry takes over — but it is still wrong: every
       attempt costs a full 5s timeout before the node is treated as absent, so
       a stale-registered node cycles four times in 30s where an unregistered
       one cycles fifteen. A registry TTL or a liveness sweep would turn that
       into an immediate answer and make the two cases identical. AGENTS.md has
       described this as unimplemented since the node registration work landed.
+- [x] Fixed by expiry, not by a sweep. `SiblingTTL` (`internal/protocols/siblings.go`)
+      and `SIBLING_TTL_SECONDS` (`nodes/lib/core/siblings.py`) are both 15s, and
+      both registries drop an entry that has not been re-introduced within that
+      window. Fifteen because `introduce` is a one-second ticker in every
+      service: fifteen consecutive misses is not a slow peer, it is a gone one.
+      The check is **lazy** — applied in `Get` and `GetName`, deleting the entry
+      as it goes — because that is where the question is asked, and because a
+      sweep goroutine would have to be started and stopped in five processes to
+      maintain a map with a handful of keys. An entry nobody looks up lingers,
+      which is one dead key per dead peer.
+- [x] The observable change is the point of the item: a dispatch to a
+      stale-registered node now fails the lookup immediately, so `rx` logs
+      `expected one sibling with <id>.sink.start command` at once and cycles at
+      the same two-second rate as one that was never registered. The 5s
+      `sinkCommandTimeout` remains, and still matters — it is what bounds a
+      dispatch to a node that is *registered and alive but not answering*.
+- [x] Tests: `TestASiblingThatStoppedIntroducingExpires`,
+      `TestAFreshSiblingIsStillResolvable`,
+      `TestReIntroducingRefreshesTheDeadline`, `TestExpiryIsPerSibling` (Go,
+      entries aged directly rather than by sleeping) and the Python mirror
+      against an injected clock, plus `test_the_ttl_mirrors_the_go_side` — a Go
+      service and a node disagreeing about when a peer is dead is a difference
+      in behaviour that nothing on the wire reveals.
