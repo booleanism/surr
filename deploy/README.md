@@ -263,13 +263,12 @@ stack down afterwards unless you pass `KEEP=1`. It checks, in order:
    what is usually a typo.
 5. **an absent node does not make `rx` reconnect in a tight loop** — the node
    is stopped and the reconnect cycles are counted for 30s. Before the
-   `sinkUnavailableDelay` this was measured at 1058 in 31 seconds; it is now
-   four to fifteen in 30. The first cycles are the slower ones: the node was
-   registered before it was stopped, so until `SiblingTTL` (15s) expires the
-   registry still lists it and each attempt spends up to the 5s
-   `sinkCommandTimeout` waiting for an answer that will not come. After expiry
-   the lookup fails immediately and the cycle settles at one every two seconds,
-   which is also what a node that was never registered does.
+   `sinkUnavailableDelay` this was measured at 1058 in 31 seconds; before the
+   sibling expiry it was 4, because the registry still listed the stopped node
+   and each attempt spent up to the 5s `sinkCommandTimeout` waiting for an
+   answer that was not coming. Measured at 13 in 30s on the first run after
+   `SiblingTTL` landed, against 15 for a node that was never registered — the
+   two cases have converged, which is the point.
 
 It asserts against the running system rather than mocking it, because every
 one of these defects lived in the wiring — which is precisely what unit tests

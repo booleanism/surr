@@ -1107,12 +1107,13 @@ retried once every two seconds rather than ~34 times a second.
       sweep goroutine would have to be started and stopped in five processes to
       maintain a map with a handful of keys. An entry nobody looks up lingers,
       which is one dead key per dead peer.
-- [x] The observable change is the point of the item: a dispatch to a
-      stale-registered node now fails the lookup immediately, so `rx` logs
-      `expected one sibling with <id>.sink.start command` at once and cycles at
-      the same two-second rate as one that was never registered. The 5s
-      `sinkCommandTimeout` remains, and still matters — it is what bounds a
-      dispatch to a node that is *registered and alive but not answering*.
+- [x] The observable change is the point of the item, and it was measured on
+      the live stack: the same smoke check that counted 4 reconnect cycles in
+      30s before the expiry (against 15 for a never-registered node) counted
+      **13** after it. The two cases have converged, which is what the item
+      asked for. The 5s `sinkCommandTimeout` remains, and still matters — it is
+      what bounds a dispatch to a node that is *registered and alive but not
+      answering*.
 - [x] Tests: `TestASiblingThatStoppedIntroducingExpires`,
       `TestAFreshSiblingIsStillResolvable`,
       `TestReIntroducingRefreshesTheDeadline`, `TestExpiryIsPerSibling` (Go,
