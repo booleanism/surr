@@ -92,6 +92,12 @@ services:
   # reads, and neither runs as root -- see mongo-init.js for why this is a job
   # rather than mongo's own initdb hook (those only fire on an empty data
   # directory, so an existing volume would never get the users).
+  #
+  # Those two users live in the MONGO_DB database, which is why both MONGO_URLs
+  # carry authSource=<MONGO_DB>. Without it the driver authenticates against
+  # `admin` -- the default when a URL names no database -- and the whole stack
+  # fails with `Authentication failed` while `mongosh -u surr-reader` succeeds by
+  # hand, because the hand-run shell was told the database and the URL was not.
   mongo-init:
     image: mongo:8
     restart: "no"
@@ -235,7 +241,7 @@ services:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
       # Read-only. This service reads the nodes' collections and never writes
       # them; the account is created by mongo-init.js.
-      MONGO_URL: mongodb://${MONGO_ANALYTICS_USER:-surr-reader}:${MONGO_ANALYTICS_PASSWORD:-surr}@mongo:27017/
+      MONGO_URL: mongodb://${MONGO_ANALYTICS_USER:-surr-reader}:${MONGO_ANALYTICS_PASSWORD:-surr}@mongo:27017/?authSource=${MONGO_DB:-nodes}
       MONGO_DB: ${MONGO_DB:-nodes}
     volumes:
       - analytics-db:/data
@@ -396,7 +402,7 @@ services:
       # Write-only on the nodes database. The node creates its own timeseries
       # collection and inserts into it; it no longer reads anything back, since
       # the analytics service answers the queries it declares.
-      MONGO_URL: mongodb://${MONGO_NODES_USER:-surr-writer}:${MONGO_NODES_PASSWORD:-surr}@mongo:27017/
+      MONGO_URL: mongodb://${MONGO_NODES_USER:-surr-writer}:${MONGO_NODES_PASSWORD:-surr}@mongo:27017/?authSource=${MONGO_DB:-nodes}
       MONGO_DB: ${MONGO_DB:-nodes}
     volumes:
       # The detector weights are downloaded on first run and are far too large
