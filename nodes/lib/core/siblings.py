@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import json
+import time
 import typing
 from . import handlers
 
@@ -16,6 +17,12 @@ SiblingName = str
 # about. The Go services mirror this number in internal/protocols/siblings.go,
 # and the two must be changed together.
 PROTOCOL_REVISION = 1
+
+# How long a sibling stays resolvable after its last introduce. Mirrors
+# SiblingTTL in internal/protocols/siblings.go: every service broadcasts one per
+# second, so a peer silent this long has missed fifteen in a row and is gone.
+# Keep the two numbers equal -- they are the same behaviour on both sides.
+SIBLING_TTL_SECONDS = 15.0
 
 @dataclass
 class Sibling:
@@ -50,18 +57,58 @@ class Sibling:
         )
 
 class Siblings:
-    def __init__(self) -> None:
+    """Resolves a command to the peer(s) that advertise it.
+
+    An entry expires SIBLING_TTL_SECONDS after the last introduce that carried
+    it. Every service broadcasts one per second, so a peer silent for this long
+    has missed fifteen in a row -- it is not slow, it is gone. Without expiry a
+    node killed without a graceful ``nodes.remove`` stays resolvable for the
+    life of the process, which makes ``rpc._call_once`` try a dead address
+    first, and makes a Go service spend a whole command timeout on it before
+    treating the sink as unavailable. See TODO.md F5.
+
+    Expiry is lazy: an entry is checked, and dropped, when it is looked up. That
+    is where it matters -- the question is always "is this peer still there?" at
+    the moment of dispatch -- and it needs no background task or shutdown path.
+    The cost is that an entry nobody asks about lingers in the map, which is one
+    dead key per peer.
+    """
+
+    def __init__(self, clock: typing.Callable[[], float] = time.monotonic) -> None:
         self._d: dict[SiblingName, Sibling] = {}
- 
+        self._seen: dict[SiblingName, float] = {}
+        # Injected so a test can age an entry instead of sleeping for the TTL.
+        self._clock = clock
+
+    def _fresh(self, name: SiblingName) -> bool:
+        """Whether ``name`` may still be used, forgetting it when it may not."""
+        seen = self._seen.get(name)
+        if seen is not None and self._clock() - seen <= SIBLING_TTL_SECONDS:
+            return True
+
+        self._d.pop(name, None)
+        self._seen.pop(name, None)
+
+        return False
+
     def get(self, name: SiblingName) -> typing.Optional[Sibling]:
+        if not self._fresh(name):
+            return None
+
         return self._d.get(name)
 
     def set(self, name: SiblingName, sibling: Sibling) -> None:
+        # Every introduce lands here, so this is also the refresh point: a peer
+        # that keeps introducing itself never expires.
         self._d[name] = sibling
+        self._seen[name] = self._clock()
 
     def get_name(self, command: handlers.Command) -> typing.Optional[list[SiblingName]]:
         names: list[SiblingName] = []
-        for k, v in self._d.items():
+        for k, v in list(self._d.items()):
+            if not self._fresh(k):
+                continue
+
             for c in v.commands:
                 if c != command:
                     continue

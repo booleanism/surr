@@ -70,7 +70,12 @@ class SiblingTests(unittest.TestCase):
 
 class SiblingsTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.sibs = siblings.Siblings()
+        self.now = 0.0
+        self.sibs = siblings.Siblings(clock=self.clock)
+
+    def clock(self) -> float:
+        """A hand-wound monotonic clock, so expiry costs no wall time."""
+        return self.now
 
     def test_get_name_returns_none_when_nobody_serves_the_command(self):
         self.sibs.set("hub0", siblings.Sibling(commands=["nodes.add"]))
@@ -93,6 +98,52 @@ class SiblingsTests(unittest.TestCase):
         self.sibs.set("hub0", siblings.Sibling(commands=["nodes.add", "nodes.remove"]))
         self.assertEqual(registered(self.sibs, "hub0").commands, ["nodes.add", "nodes.remove"])
         self.assertEqual(len(self.sibs._d), 1)
+
+    def test_a_sibling_that_stopped_introducing_expires(self):
+        # TODO.md F5: a node killed without a graceful nodes.remove used to stay
+        # resolvable for the life of the process, so rpc._call_once kept trying
+        # a dead address first.
+        self.sibs.set("node0", siblings.Sibling(commands=["n0.sink.start"]))
+        self.now = siblings.SIBLING_TTL_SECONDS + 1
+        self.assertIsNone(self.sibs.get_name("n0.sink.start"))
+        self.assertIsNone(self.sibs.get("node0"))
+
+    def test_expiry_drops_the_entry_rather_than_hiding_it(self):
+        self.sibs.set("node0", siblings.Sibling(commands=["n0.sink.start"]))
+        self.now = siblings.SIBLING_TTL_SECONDS + 1
+        self.assertIsNone(self.sibs.get("node0"))
+        # A registry that kept the entry would grow one dead key per node for
+        # the life of the process.
+        self.assertEqual(self.sibs._d, {})
+        self.assertEqual(self.sibs._seen, {})
+
+    def test_a_fresh_sibling_is_still_resolvable(self):
+        # The other half: the TTL must not make a live peer unreachable.
+        self.sibs.set("node0", siblings.Sibling(commands=["n0.sink.start"]))
+        self.now = siblings.SIBLING_TTL_SECONDS - 0.001
+        self.assertEqual(self.sibs.get_name("n0.sink.start"), ["node0"])
+        self.assertIsNotNone(self.sibs.get("node0"))
+
+    def test_re_introducing_refreshes_the_deadline(self):
+        # The TTL is measured from the last introduce, not the first: a
+        # long-running node re-introduces every second and must never expire.
+        self.sibs.set("node0", siblings.Sibling(commands=["n0.sink.start"]))
+        self.now = siblings.SIBLING_TTL_SECONDS - 1
+        self.sibs.set("node0", siblings.Sibling(commands=["n0.sink.start"]))
+        self.now = siblings.SIBLING_TTL_SECONDS * 2 - 1
+        self.assertEqual(self.sibs.get_name("n0.sink.start"), ["node0"])
+
+    def test_expiry_is_per_sibling(self):
+        self.sibs.set("dead", siblings.Sibling(commands=["sink.start"]))
+        self.now = siblings.SIBLING_TTL_SECONDS + 1
+        self.sibs.set("alive", siblings.Sibling(commands=["sink.start"]))
+        self.assertEqual(self.sibs.get_name("sink.start"), ["alive"])
+
+    def test_the_ttl_mirrors_the_go_side(self):
+        # internal/protocols/siblings.go SiblingTTL. A Go service and a node
+        # disagreeing about when a peer is dead is a behaviour difference, not
+        # a wire one, so nothing else would catch it.
+        self.assertEqual(siblings.SIBLING_TTL_SECONDS, 15.0)
 
 if __name__ == "__main__":
     unittest.main()
