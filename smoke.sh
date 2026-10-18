@@ -2,8 +2,8 @@
 #
 # smoke.sh -- assert that a surr deployment is wired together, end to end.
 #
-# Every check here is something `ps` cannot tell you: that the images are the
-# build you think they are, that a client error is a client error, that a node
+# Every check here is something `ps` cannot tell you: that the six binaries are
+# the build you think they are, that a client error is a client error, that a node
 # actually registers and declares its queries, that tx publishing into rx
 # reaches a node that pulls frames and writes documents, that the analytics
 # report carries the queries the node declared, that a stopped node is refused
@@ -15,8 +15,12 @@
 # even that.
 #
 #   ./smoke.sh                 # the whole thing
-#   KEEP=1 ./smoke.sh          # keep the databases and logs for inspection
+#   ./smoke.sh --keep          # keep the databases and logs for inspection
 #   SRC=rtsp://... ./smoke.sh  # use a real camera instead of the test pattern
+#
+# Every knob below can also be given as a flag, because a shell variable is the
+# one thing an operator will not guess: --keep, --skip-build, --no-infra,
+# --src URL, --run-dir DIR. `--help` lists them.
 #
 # Knobs (all optional):
 #   SRC             RTSP source. Unset: a synthetic one is served on RTSP_PORT.
@@ -27,6 +31,41 @@
 #   RUN_DIR         where to put the databases and logs (default: a mktemp -d).
 
 set -uo pipefail
+
+usage() {
+    sed -n '3,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# Flags are thin aliases for the environment variables the rest of the file
+# reads, so there is exactly one place a setting can come from and one place it
+# is documented.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep) KEEP=1 ;;
+        --no-keep) KEEP=0 ;;
+        --skip-build) SKIP_BUILD=1 ;;
+        --no-infra) START_INFRA=0 ;;
+        --src)
+            shift
+            [ $# -gt 0 ] || { printf 'smoke.sh: --src needs a URL\n' >&2; exit 2; }
+            SRC=$1
+            ;;
+        --run-dir)
+            shift
+            [ $# -gt 0 ] || { printf 'smoke.sh: --run-dir needs a path\n' >&2; exit 2; }
+            RUN_DIR_FLAG=$1
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'smoke.sh: unknown argument %s (try --help)\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$REPO_ROOT" || exit 1
@@ -39,6 +78,8 @@ RTSP_PORT=${RTSP_PORT:-18554}
 START_INFRA=${START_INFRA:-1}
 SKIP_BUILD=${SKIP_BUILD:-0}
 KEEP=${KEEP:-0}
+
+[ -n "${RUN_DIR_FLAG:-}" ] && RUN_DIR=$RUN_DIR_FLAG
 
 HUB_URL="http://127.0.0.1:${HUB_PORT}"
 SRC_WAS_SET=0
@@ -632,16 +673,24 @@ available=$(curl -sS "$HUB_URL/nodes/availability" -H "Authorization: Bearer $TO
     jq -s -r 'if length == 0 then 0 else (.[0] | if type == "array" then length else 0 end) end')
 check "a stopped node is not offered" "0" "$available"
 
-# rx must cycle at a bounded rate. Before the sibling TTL existed it dispatched
-# to the dead peer at full speed and spent a 5s timeout on each attempt.
-before=$(grep -c "publisher started" "$RUN/logs/rx.log" || true)
+# rx must stay quiet while the node is gone. This is the F5 regression: before the
+# sibling TTL existed, rx kept naming the dead peer, dispatched to it on every
+# cycle and spent a 5s timeout on each attempt, so the log grew without bound.
+#
+# The bound is on log LINES, not on one message. A healthy rx has nothing to do
+# here -- its publisher is still connected and the subscriber it lost is already
+# gone -- so the correct count is near zero, and a spin shows up as hundreds of
+# "recv message" / "non-zero reply code" lines. Counting a single message instead
+# would pass whether rx cycled, idled or spun.
+before=$(wc -l <"$RUN/logs/rx.log")
 sleep 20
-after=$(grep -c "publisher started" "$RUN/logs/rx.log" || true)
-cycles=$((after - before))
-if [ "$cycles" -le 25 ]; then
-    ok "rx does not spin while the node is gone ($cycles cycles in 20s)"
+after=$(wc -l <"$RUN/logs/rx.log")
+quiet=$((after - before))
+if [ "$quiet" -le 20 ]; then
+    ok "rx stays quiet while the node is gone ($quiet log lines in 20s)"
 else
-    no "rx does not spin while the node is gone ($cycles cycles in 20s)"
+    no "rx stays quiet while the node is gone ($quiet log lines in 20s)" \
+        "want at most 20; a spinning rx retries the dead peer and logs each attempt"
 fi
 
 # ---------------------------------------------------------------------------
