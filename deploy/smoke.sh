@@ -233,10 +233,13 @@ check "an add with no nodes answers 400" "400" "${emptylist:-000}"
 
 step "the node registers itself with the hub"
 
-# `/nodes/availability` lists the registered nodes that are NOT yet subscribed
-# to anything, which is exactly the question here: has this node announced
-# itself, and is it free to be given work? It is also the only endpoint that
-# can answer "which node ids exist", since there is no plain node listing.
+# `/nodes/availability` lists the nodes that are running now and NOT yet
+# subscribed to anything, which is exactly the question here: has this node
+# announced itself, and is it free to be given work? It is also the only
+# endpoint that can answer "which node ids exist", since there is no plain node
+# listing. "Running now" is read from the sibling registry, not from the hub's
+# `nodes` table, so this check passing means the introduce loop is working and
+# not merely that a row was written.
 printf '  waiting for node %s' "$NODE_ID"
 available=""
 for _ in $(seq 1 45); do
