@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/booleanism/surr/internal/buildinfo"
 	"github.com/booleanism/surr/internal/db"
 	"github.com/booleanism/surr/internal/logging"
 	"github.com/booleanism/surr/internal/pools"
@@ -24,10 +25,14 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Version is the build id reported by --version and logged at startup. The
-// Makefile injects it with -ldflags -X main.Version=$(VERSION); see the
-// Makefile for how VERSION is derived.
-var Version = "dev"
+// Version is the build id reported by --version and logged at startup.
+//
+// The Makefile injects it with -ldflags -X main.Version=$(VERSION), where VERSION
+// is `git describe --tags --always --dirty`. `go install ...@vX.Y.Z` cannot inject
+// anything, so it keeps this default; buildinfo.Resolve then recovers the version
+// from the binary's own module metadata instead, which is why mainEntry calls it
+// before anything reads Version.
+var Version = buildinfo.Development
 
 const (
 	IntroInterval = 1 * time.Second
@@ -43,6 +48,11 @@ func main() {
 // is what lets the cleanup hooks run at all -- which is the shape tx already uses,
 // for the same reason.
 func mainEntry() int {
+	// Before anything reads it: --version prints Version and logging.Setup stamps
+	// it on every line, and a binary installed from a version suffix has to name
+	// that version rather than "dev".
+	Version = buildinfo.Resolve(Version)
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
