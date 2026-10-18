@@ -14,6 +14,7 @@ import (
 
 	rabbitmqAdapter "github.com/booleanism/surr/hub/internal/adapter/rabbitmq"
 	"github.com/booleanism/surr/hub/internal/db/sqlite"
+	"github.com/booleanism/surr/hub/internal/migrations"
 	httpHandlers "github.com/booleanism/surr/hub/internal/protocols/http/handlers"
 	"github.com/booleanism/surr/hub/internal/protocols/http/middlewares"
 	rabbitmqHandlers "github.com/booleanism/surr/hub/internal/protocols/rabbitmq/handlers"
@@ -53,10 +54,6 @@ const (
 	HTTPReadTimeout  = 15 * time.Second
 	HTTPWriteTimeout = 30 * time.Second
 	HTTPIdleTimeout  = 60 * time.Second
-
-	// MigrationsPath is where this service's SQL migrations live. It is only
-	// used to tell an operator what to run when the database is unmigrated.
-	MigrationsPath = "hub/internal/migrations/sqlite"
 )
 
 // resolveJWTSecret returns the configured signing secret, or a random
@@ -86,15 +83,23 @@ func resolveJWTSecret(ctx context.Context, configured string) ([]byte, error) {
 }
 
 func main() {
+	os.Exit(mainEntry())
+}
+
+// mainEntry is main's body, returning the process exit code rather than calling
+// os.Exit itself. os.Exit skips deferred calls, and the deferred cancellation here
+// is what lets the cleanup hooks run at all -- which is the shape tx already uses,
+// for the same reason.
+func mainEntry() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	cmdLine := &CommandLine{
 		Version: Version,
 	}
-	err := cmdLine.parseCLI(ctx, os.Args)
-	if err != nil {
-		return
+
+	if err := cmdLine.parseCLI(ctx, os.Args); err != nil {
+		return 1
 	}
 
 	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, Version, cmdLine.LogLevel, cmdLine.LogFormat)
@@ -111,17 +116,37 @@ func main() {
 	}()
 
 	switch cmdLine.SelectedCommand {
+	case "migrate":
+		// Exits non-zero, unlike the run path: a deploy script that carries on
+		// after a failed migration starts a service against the wrong schema, and
+		// the service's own error says only which table is missing.
+		if migrateErr := db.RunMigrate(ctx, cmdLine.DSN, cmdLine.MigrateMode, migrations.FS, migrations.Dir, os.Stdout); migrateErr != nil {
+			log.Error().Err(migrateErr).Msg("migrate command")
+			logging.DrainCleanups(cancel, cleanupDone)
+
+			return 1
+		}
+
+		logging.DrainCleanups(cancel, cleanupDone)
+
+		return 0
 	case "run":
-		err = run(ctx, cmdLine, cleanups)
-		if err != nil {
-			log.Error().Err(err).Msg("run command")
+		runErr := run(ctx, cmdLine, cleanups)
+		if runErr != nil {
+			log.Error().Err(runErr).Msg("run command")
 			cancel()
 		}
 
 		<-ctx.Done()
-		<-cleanupDone
+		logging.DrainCleanups(cancel, cleanupDone)
 
+		if runErr != nil {
+			return 1
+		}
+
+		return 0
 	default:
+		return 0
 	}
 }
 
@@ -141,7 +166,8 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 		return err
 	}
 
-	err = db.VerifySchema(ctx, sqliteDB, MigrationsPath, "schema_migrations", "nodes", "users")
+	err = db.VerifySchema(ctx, sqliteDB,
+		"surr-hub migrate -d "+cmdLine.DSN, "schema_migrations", "nodes", "users")
 	if err != nil {
 		return err
 	}

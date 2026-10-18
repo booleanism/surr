@@ -11,6 +11,7 @@ import (
 
 	"github.com/booleanism/surr/analytics/internal/db/mongo"
 	"github.com/booleanism/surr/analytics/internal/db/sqlite"
+	"github.com/booleanism/surr/analytics/internal/migrations"
 	rabbitmqHandlers "github.com/booleanism/surr/analytics/internal/protocols/rabbitmq/handlers"
 	"github.com/booleanism/surr/analytics/internal/usecases"
 	"github.com/booleanism/surr/internal/db"
@@ -31,14 +32,18 @@ var Version = "dev"
 
 const (
 	IntroInterval = 1 * time.Second
-
-	// MigrationsPath is where this service's SQL migrations live. It is only
-	// used to tell an operator what to run when the database is unmigrated.
-	MigrationsPath = "analytics/internal/migrations/sqlite"
 )
 
 //nolint:cyclop
 func main() {
+	os.Exit(mainEntry())
+}
+
+// mainEntry is main's body, returning the process exit code rather than calling
+// os.Exit itself. os.Exit skips deferred calls, and the deferred cancellation here
+// is what lets the cleanup hooks run at all -- which is the shape tx already uses,
+// for the same reason.
+func mainEntry() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -46,9 +51,8 @@ func main() {
 		Version: Version,
 	}
 
-	err := cmdLine.parseCLI(ctx, os.Args)
-	if err != nil {
-		return
+	if err := cmdLine.parseCLI(ctx, os.Args); err != nil {
+		return 1
 	}
 
 	ctx, log := logging.Setup(ctx, cmdLine.SiblingName, cmdLine.FamilyName, Version, cmdLine.LogLevel, cmdLine.LogFormat)
@@ -66,17 +70,37 @@ func main() {
 	}()
 
 	switch cmdLine.SelectedCommand {
+	case "migrate":
+		// Exits non-zero, unlike the run path: a deploy script that carries on
+		// after a failed migration starts a service against the wrong schema, and
+		// the service's own error says only which table is missing.
+		if migrateErr := db.RunMigrate(ctx, cmdLine.DSN, cmdLine.MigrateMode, migrations.FS, migrations.Dir, os.Stdout); migrateErr != nil {
+			log.Error().Err(migrateErr).Msg("migrate command")
+			logging.DrainCleanups(cancel, cleanupDone)
+
+			return 1
+		}
+
+		logging.DrainCleanups(cancel, cleanupDone)
+
+		return 0
 	case "run":
-		err = run(ctx, cmdLine, cleanups)
-		if err != nil {
-			log.Error().Err(err).Msg("run command")
+		runErr := run(ctx, cmdLine, cleanups)
+		if runErr != nil {
+			log.Error().Err(runErr).Msg("run command")
 			cancel()
 		}
 
 		<-ctx.Done()
-		<-cleanupDone
+		logging.DrainCleanups(cancel, cleanupDone)
 
+		if runErr != nil {
+			return 1
+		}
+
+		return 0
 	default:
+		return 0
 	}
 }
 
@@ -124,7 +148,8 @@ func run(ctx context.Context, cmdLine *CommandLine, cleanups *logging.Cleanups) 
 	// command after that would fail with "sql: database is closed".
 	cleanups.Register(sqliteDB.Close)
 
-	err = db.VerifySchema(ctx, sqliteDB, MigrationsPath, "declarations")
+	err = db.VerifySchema(ctx, sqliteDB,
+		"surr-analytics migrate -d "+cmdLine.DSN, "declarations")
 	if err != nil {
 		return err
 	}

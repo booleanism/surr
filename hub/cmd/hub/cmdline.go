@@ -15,6 +15,7 @@ type CommandLine struct {
 	JWTSecret       string
 	RabbitMQAddr    string
 	SelectedCommand string
+	MigrateMode     string
 	LogLevel        string
 	LogFormat       string
 	NGoroutinesPool uint32
@@ -42,14 +43,7 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 						Value:       18,
 						Destination: &c.NGoroutinesPool,
 					},
-					&cli.StringFlag{
-						Name:        "database",
-						Aliases:     []string{"d"},
-						Value:       "./hub.db",
-						Usage:       "hub's sqlite3 dsn",
-						Destination: &c.DSN,
-						Sources:     cli.EnvVars("DSN"),
-					},
+					databaseFlag(&c.DSN),
 					&cli.StringFlag{
 						Name:        "secret",
 						Aliases:     []string{"s"},
@@ -110,6 +104,34 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 					return nil
 				},
 			},
+			{
+				Name:  "migrate",
+				Usage: "apply the SQL migrations embedded in this binary",
+				Flags: []cli.Flag{databaseFlag(&c.DSN)},
+				Commands: []*cli.Command{
+					{
+						Name:   "up",
+						Usage:  "apply every pending migration",
+						Flags:  []cli.Flag{migrateFlag()},
+						Action: c.migrateAction("up"),
+					},
+					{
+						Name:   "down",
+						Usage:  "revert the most recent migration, one at a time",
+						Flags:  []cli.Flag{migrateFlag()},
+						Action: c.migrateAction("down"),
+					},
+					{
+						Name:   "status",
+						Usage:  "report the applied version and what is still pending",
+						Flags:  []cli.Flag{migrateFlag()},
+						Action: c.migrateAction("status"),
+					},
+				},
+				// `surr-x migrate` with no subcommand is `up`, because that is what
+				// an operator types at a fresh database.
+				Action: c.migrateAction("up"),
+			},
 		},
 	}
 
@@ -118,4 +140,51 @@ func (c *CommandLine) parseCLI(ctx context.Context, args []string) error {
 	}
 
 	return nil
+}
+
+// databaseFlag is declared once and used by both `run` and `migrate`: two copies
+// would drift, and a migration that opened a different file than the service
+// reads is a failure nobody sees until the first query.
+func databaseFlag(dsn *string) cli.Flag {
+	return &cli.StringFlag{
+		Name:        "database",
+		Aliases:     []string{"d"},
+		Value:       "./hub.db",
+		Usage:       "hub's sqlite3 dsn",
+		Destination: dsn,
+		Sources:     cli.EnvVars("DSN"),
+	}
+}
+
+// migrateFlag lets `--database` be written after the mode as well as before it.
+//
+// It has no Destination on purpose: see migrateAction. The parent `migrate` command
+// owns the default and the environment source, so there is exactly one place a
+// missing value is resolved.
+func migrateFlag() cli.Flag {
+	return &cli.StringFlag{
+		Name:    "database",
+		Aliases: []string{"d"},
+		Usage:   "sqlite3 dsn (also accepted before the mode)",
+	}
+}
+
+// migrateAction only records which migration was asked for; main runs it, so a
+// failed migration can exit non-zero and a deploy script can tell.
+func (c *CommandLine) migrateAction(mode string) cli.ActionFunc {
+	return func(_ context.Context, cc *cli.Command) error {
+		c.SelectedCommand = "migrate"
+		c.MigrateMode = mode
+
+		// Only when the subcommand was actually given the flag. Reading it
+		// unconditionally would not help and is not what fixes this: the defect was
+		// a Destination on the subcommand, which applied the flag's DEFAULT over the
+		// value the parent had already parsed, so `migrate -d /data/hub.db up`
+		// silently migrated ./hub.db instead.
+		if cc.IsSet("database") {
+			c.DSN = cc.String("database")
+		}
+
+		return nil
+	}
 }
