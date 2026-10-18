@@ -2,9 +2,9 @@
 
 The node owns its collection, so it owns the pipelines that read it: the
 analytics service executes a declared query but cannot invent one. This module
-is the single source of that declaration -- the manifest published on
-``analytics.declare`` and, until the cutover, the pipelines the legacy
-``<node-id>.sink.analytics`` handler still runs.
+is the single source of that declaration: the manifest published on
+``analytics.declare``, and the pipelines it points at. Nothing here runs a
+query -- the service does, on request.
 
 Two rules the pipelines follow, both of which the service enforces on declare:
 
@@ -55,6 +55,7 @@ UNIT_TIME_PARAM = "${unit_time}"
 # service's driver uses.
 PARAMS_SCHEMA_DETAIL: dict[str, str] = {"start_time": "string", "unit_time": "string"}
 PARAMS_SCHEMA_SUMMARY: dict[str, str] = {"start_time": "string"}
+PARAMS_SCHEMA_TOTALS: dict[str, str] = {"start_time": "string"}
 
 # The window and the granularity are the caller's; the node id is not. Baking
 # it into the pipeline is what keeps a declaration from reading another node's
@@ -147,6 +148,44 @@ def summary_pipeline(
         },
     ]
 
+def totals_pipeline(
+    node_id: uuid.UUID,
+    start_time: str = START_TIME_PARAM,
+) -> list[dict[str, typing.Any]]:
+    """How much activity each class accounts for over the window.
+
+    One document, ``{"categories": [class, ...], "values": [total, ...]}``: the
+    numbers a share-of-activity chart is drawn from. Totals rather than averages
+    because the two answer different questions -- the summary says how busy a
+    class usually is, this says how much of the work it did.
+
+    It takes no granularity: a total is over the whole window by definition, so
+    declaring ``unit_time`` here would be asking the caller for a parameter this
+    query would ignore.
+    """
+    return [
+        _window(node_id, start_time),
+        {"$project": {"countsArray": {"$objectToArray": "$counts"}}},
+        {"$unwind": "$countsArray"},
+        {
+            "$group": {
+                "_id": "$countsArray.k",
+                "total": {"$sum": "$countsArray.v"},
+            }
+        },
+        # Sorted before the group so the axis and the values share one class
+        # order; the caller pairs them positionally.
+        {"$sort": {"_id": 1}},
+        {
+            "$group": {
+                "_id": None,
+                "categories": {"$push": "$_id"},
+                "values": {"$push": "$total"},
+            }
+        },
+        {"$project": {"_id": 0, "categories": 1, "values": 1}},
+    ]
+
 def manifest(node_id: uuid.UUID, collection: str) -> dict[str, typing.Any]:
     """The declaration published on ``analytics.declare``."""
     return {
@@ -170,6 +209,15 @@ def manifest(node_id: uuid.UUID, collection: str) -> dict[str, typing.Any]:
                 ),
                 "params_schema": PARAMS_SCHEMA_SUMMARY,
                 "pipeline": summary_pipeline(node_id),
+            },
+            {
+                "name": "counts_totals",
+                "description": (
+                    "total count per class over the window; one document as "
+                    "{categories: [class], values: [total]}"
+                ),
+                "params_schema": PARAMS_SCHEMA_TOTALS,
+                "pipeline": totals_pipeline(node_id),
             },
         ],
     }
@@ -217,34 +265,3 @@ async def declare(
         collection,
         len(decl["queries"]),
     )
-
-def to_echarts(
-    summary_rows: list[typing.Any],
-    detail_rows: list[typing.Any],
-) -> list[typing.Any]:
-    """Map the generic results onto the ECharts options the legacy handler sent.
-
-    Transitional: this is what keeps ``<node-id>.sink.analytics`` answering in
-    the shape its caller already expects while the manifest takes over. It is
-    also the reference for the Go adapter that replaces it -- everything here
-    is presentation and belongs on the reading side, which is the whole point
-    of moving it out of the pipeline.
-    """
-    summary = summary_rows[0] if summary_rows else {"categories": [], "series": []}
-
-    summary_option = {
-        "xAxis": {"type": "category", "data": summary.get("categories", [])},
-        "yAxis": {"type": "value"},
-        "legend": {"data": [s["name"] for s in summary.get("series", [])]},
-        "series": [
-            {"name": s["name"], "type": "bar", "data": s["values"]}
-            for s in summary.get("series", [])
-        ],
-    }
-
-    detail_option = [
-        {"name": row["name"], "type": "line", "showSymbol": False, "data": row["points"]}
-        for row in detail_rows
-    ]
-
-    return [summary_option, detail_option]

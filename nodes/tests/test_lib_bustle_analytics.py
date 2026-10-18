@@ -46,6 +46,7 @@ def pipelines() -> list[list[dict[str, typing.Any]]]:
     return [
         analytics.detail_pipeline(NODE_ID),
         analytics.summary_pipeline(NODE_ID),
+        analytics.totals_pipeline(NODE_ID),
     ]
 
 class StageTests(unittest.TestCase):
@@ -110,12 +111,27 @@ class ShapeTests(unittest.TestCase):
             ["$minList", "$avgList", "$maxList"],
         )
 
+    def test_the_totals_pipeline_emits_one_document_with_an_axis(self):
+        final = analytics.totals_pipeline(NODE_ID)[-1]["$project"]
+        self.assertEqual(final["_id"], 0)
+        self.assertEqual(final["categories"], 1)
+        self.assertEqual(final["values"], 1)
+
+    def test_the_totals_pipeline_takes_no_granularity(self):
+        # A total is over the whole window, so a unit_time here would be a
+        # parameter the query asks for and then ignores -- and the endpoint
+        # would have to supply it for nothing.
+        text = json.dumps(analytics.totals_pipeline(NODE_ID))
+        self.assertNotIn(analytics.UNIT_TIME_PARAM, text)
+        self.assertEqual(set(analytics.PARAMS_SCHEMA_TOTALS), {"start_time"})
+
     def test_the_axes_are_ascending(self):
         # A descending sort would still line up with its own category list, so
         # nothing downstream would look broken -- it would just be backwards.
         # Ascending time is the contract the reader assumes.
         self.assertEqual(analytics.detail_pipeline(NODE_ID)[4], {"$sort": {"_id.bucketTime": 1}})
         self.assertEqual(analytics.summary_pipeline(NODE_ID)[4], {"$sort": {"_id": 1}})
+        self.assertEqual(analytics.totals_pipeline(NODE_ID)[4], {"$sort": {"_id": 1}})
 
 class ParameterTests(unittest.TestCase):
     def test_the_window_is_a_placeholder(self):
@@ -133,8 +149,9 @@ class ParameterTests(unittest.TestCase):
         )
 
     def test_a_concrete_start_time_replaces_the_placeholder(self):
-        # The legacy handler passes a real timestamp through the same builders,
-        # so the argument has to work as both a placeholder and a date.
+        # The builders take a concrete timestamp as well as the placeholder, so
+        # the argument has to work as both -- a pipeline that only builds with a
+        # placeholder could not be inspected against real data.
         pipeline = analytics.detail_pipeline(NODE_ID, "2026-10-12T00:00:00+00:00", "hour")
         self.assertEqual(pipeline[0]["$match"]["$expr"]["$gte"][1], {"$toDate": "2026-10-12T00:00:00+00:00"})
         self.assertEqual(pipeline[1]["$project"]["bucketTime"]["$dateTrunc"]["unit"], "hour")
@@ -157,9 +174,12 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(decl["node_id"], str(NODE_ID))
         self.assertEqual(decl["collection"], COLLECTION)
 
-    def test_the_manifest_declares_both_queries(self):
+    def test_the_manifest_declares_every_query(self):
+        # The endpoint runs whatever is declared, so this list is the whole of
+        # what a caller can be shown. A query added here appears in the report
+        # without a change anywhere else.
         names = [q["name"] for q in analytics.manifest(NODE_ID, COLLECTION)["queries"]]
-        self.assertEqual(names, ["counts_detail", "counts_summary"])
+        self.assertEqual(names, ["counts_detail", "counts_summary", "counts_totals"])
 
     def test_every_query_describes_itself(self):
         for query in analytics.manifest(NODE_ID, COLLECTION)["queries"]:
@@ -170,40 +190,6 @@ class ManifestTests(unittest.TestCase):
         # It crosses the broker as JSON, and a uuid or a datetime in a pipeline
         # would only fail at declare time on the far side.
         json.dumps(analytics.manifest(NODE_ID, COLLECTION))
-
-class EchatsShimTests(unittest.TestCase):
-    """The legacy handler still answers in ECharts shape until the cutover."""
-
-    def test_a_summary_becomes_an_axis_and_three_bars(self):
-        rows = [{
-            "categories": ["car", "person"],
-            "series": [
-                {"name": "min", "values": [1, 2]},
-                {"name": "average", "values": [3, 4]},
-                {"name": "max", "values": [5, 6]},
-            ],
-        }]
-        summary, _ = analytics.to_echarts(rows, [])
-        self.assertEqual(summary["xAxis"]["data"], ["car", "person"])
-        self.assertEqual(summary["legend"]["data"], ["min", "average", "max"])
-        self.assertEqual([s["type"] for s in summary["series"]], ["bar", "bar", "bar"])
-        self.assertEqual(summary["series"][1]["data"], [3, 4])
-
-    def test_detail_points_become_line_series(self):
-        rows = [{"name": "person", "points": [["2026-10-12T00:00:00Z", 2.5]]}]
-        _, detail = analytics.to_echarts([], rows)
-        self.assertEqual(detail, [{
-            "name": "person",
-            "type": "line",
-            "showSymbol": False,
-            "data": [["2026-10-12T00:00:00Z", 2.5]],
-        }])
-
-    def test_an_empty_window_still_produces_a_usable_option(self):
-        summary, detail = analytics.to_echarts([], [])
-        self.assertEqual(summary["xAxis"]["data"], [])
-        self.assertEqual(summary["series"], [])
-        self.assertEqual(detail, [])
 
 class FakeRouter:
     """Records what was sent and answers every request the same way."""

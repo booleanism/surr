@@ -218,7 +218,6 @@ class BustleWorker(core_node.Worker):
             self._detector,
             self._chosen_classes,
             self._async_q,
-            self._coll,
         )
 
     def start(self) -> list[asyncio.Task[typing.Any]]:

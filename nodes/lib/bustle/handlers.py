@@ -1,20 +1,13 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import typing
 import uuid
 
-from pymongo import collection
 from lib.core import handlers
 from lib.core import pipeline
 from lib.detector import Detector
-from . import analytics as bustle_analytics
 from . import processing
-
-@dataclass
-class AnalyticsParams:
-    time_cluster: str
 
 @dataclass
 class NodeSource:
@@ -25,7 +18,6 @@ class BustleHandlers:
     _detector: Detector
     _chosen_classes: list[int]
     _async_q: asyncio.Queue[dict[str, int]]
-    _coll: collection.Collection[dict[str, typing.Any]]
     _node_id: uuid.UUID
     _worker_task: typing.Optional[asyncio.Task[None]] = None
 
@@ -38,66 +30,19 @@ class BustleHandlers:
         detector: Detector,
         chosen_classes: list[int],
         async_q: asyncio.Queue[dict[str, int]],
-        coll: collection.Collection[dict[str, typing.Any]]
     ) -> None:
         cls._pipeline = pipeline
         cls._detector = detector
         cls._chosen_classes = chosen_classes
         cls._async_q = async_q
-        cls._coll = coll
         cls._node_id = node_id
 
+        # No analytics command is registered any more. Reading the timeseries is
+        # the analytics service's job now: the node publishes its queries as a
+        # manifest at boot and never serves a chart, so it needs no read handle
+        # on its own collection -- only the write one the normalizer holds.
         handlers_mgr.set(f"{node_id}.sink.start", cls._start_sink)
         handlers_mgr.set(f"{node_id}.sink.stop", cls._stop_sink)
-        handlers_mgr.set(f"{node_id}.sink.analytics", cls._analytics)
-
-    @classmethod
-    async def _analytics(
-            cls, _trackID: uuid.UUID, req: handlers.RouterRequest, rep: handlers.ReplyFunc
-    ) -> None:
-        try:
-            p = AnalyticsParams(**json.loads(req.payload))
-            match p.time_cluster:
-                case "minutes":
-                    start_time = datetime.now(timezone.utc) - timedelta(minutes=5)
-                    unit_time = "second"
-                case "hours":
-                    start_time = datetime.now(timezone.utc) - timedelta(hours=5)
-                    unit_time = "minute"
-                case "dailies":
-                    start_time = datetime.now(timezone.utc) - timedelta(days=5)
-                    unit_time = "hour"
-                case _:
-                    start_time = datetime.now(timezone.utc) - timedelta(weeks=5)
-                    unit_time = "day"
-
-            # A five-week timeseries aggregation can block for a long time; on
-            # the event loop it would stall every introduce and every reply.
-            summary_rows, detail_rows = await asyncio.to_thread(
-                cls._aggregate, start_time, unit_time
-            )
-
-            # The pipelines return generic chart data now; mapping it onto
-            # ECharts options is this handler's job, and it disappears with the
-            # handler at the cutover.
-            option = bustle_analytics.to_echarts(summary_rows, detail_rows)
-
-            await rep(handlers.RouterResponse(0, json.dumps(option, default=str).encode()))
-        except Exception as e:
-            await rep(handlers.RouterResponse(-2, str(e)))
-            raise
-        return None
-
-    @classmethod
-    def _aggregate(
-        cls, start_time: datetime, unit_time: str
-    ) -> tuple[list[typing.Any], list[typing.Any]]:
-        # A concrete ISO-8601 string in place of the manifest's ${start_time}
-        # placeholder: the builders take the same argument either way.
-        start = start_time.isoformat()
-        summary_rows = list(cls._coll.aggregate(bustle_analytics.summary_pipeline(cls._node_id, start)))
-        detail_rows = list(cls._coll.aggregate(bustle_analytics.detail_pipeline(cls._node_id, start, unit_time)))
-        return summary_rows, detail_rows
 
     @classmethod
     async def _stop_worker_task(cls) -> None:
