@@ -46,7 +46,7 @@ func NewNodes(r protocols.Router, s Siblings, t RunTask) nodes {
 // is sent only the parameters its own schema declares, and a query asking for
 // something the endpoint cannot supply is reported as such instead of failing
 // the whole report.
-func (n nodes) GetAnalytics(ctx context.Context, nodeID uuid.UUID, f AnalyticsFilters, buf *[]byte) (int, error) {
+func (n nodes) GetAnalytics(ctx context.Context, nodeID uuid.UUID, fleet []uuid.UUID, f AnalyticsFilters, buf *[]byte) (int, error) {
 	// Checked before the round trip, and after the caller has established that
 	// this user owns the node: a manifest outlives the node that declared it, so
 	// without this the endpoint answers every query with its empty shape and the
@@ -86,7 +86,7 @@ func (n nodes) GetAnalytics(ctx context.Context, nodeID uuid.UUID, f AnalyticsFi
 			continue
 		}
 
-		data, queryErr := n.query(ctx, nodeID, info.Name, params)
+		data, queryErr := n.query(ctx, nodeID, fleet, info.Name, params)
 		if queryErr != nil {
 			zerolog.Ctx(ctx).Warn().Str("query_name", info.Name).Err(queryErr).Msg("analytics query failed")
 
@@ -193,11 +193,17 @@ func analyticsParams(schema json.RawMessage, win models.AnalyticsWindow) (map[st
 }
 
 // query runs one declared query and returns its rows untouched.
-func (n nodes) query(ctx context.Context, nodeID uuid.UUID, name string, params map[string]any) (json.RawMessage, error) {
+//
+// The fleet list goes with every query, not only the ones that need it, because
+// the scope belongs to the node type's manifest: a fleet-scoped query is one the
+// hub did not write and cannot recognise, so the service decides whether the list
+// means anything. It ignores it for a node-scoped query.
+func (n nodes) query(ctx context.Context, nodeID uuid.UUID, fleet []uuid.UUID, name string, params map[string]any) (json.RawMessage, error) {
 	payload, err := json.Marshal(&models.AnalyticsQueryRequest{
 		NodeID:    nodeID,
 		QueryName: name,
 		Params:    params,
+		Fleet:     fleet,
 	})
 	if err != nil {
 		return nil, err

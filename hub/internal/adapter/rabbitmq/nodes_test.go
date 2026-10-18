@@ -116,7 +116,7 @@ func getReport(t *testing.T, r *analyticsRouter, cluster string) (models.Analyti
 
 	buf := make([]byte, 0, 4096)
 
-	n, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: cluster}, &buf)
+	n, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), nil, AnalyticsFilters{TimeCluster: cluster}, &buf)
 	if err != nil {
 		return models.AnalyticsReport{}, err
 	}
@@ -399,7 +399,7 @@ func TestGetAnalyticsFailsWhenNoQueryCouldBeAnswered(t *testing.T) {
 
 	buf := make([]byte, 0, 4096)
 
-	_, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: "hours"}, &buf)
+	_, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), nil, AnalyticsFilters{TimeCluster: "hours"}, &buf)
 	if err == nil {
 		t.Fatal("GetAnalytics returned nil when every query failed")
 	}
@@ -434,7 +434,7 @@ func TestGetAnalyticsOverwritesAPooledBuffer(t *testing.T) {
 	r := &analyticsRouter{infos: declared(), rows: rowsByQuery()}
 	buf := []byte("stale bytes from the last request")
 
-	n, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: "minutes"}, &buf)
+	n, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), nil, AnalyticsFilters{TimeCluster: "minutes"}, &buf)
 	if err != nil {
 		t.Fatalf("GetAnalytics returned %v", err)
 	}
@@ -451,7 +451,7 @@ func TestGetAnalyticsFailsWhenTheDeclarationsCannotBeRead(t *testing.T) {
 
 	buf := make([]byte, 0, 4096)
 
-	_, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: "hours"}, &buf)
+	_, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), nil, AnalyticsFilters{TimeCluster: "hours"}, &buf)
 	if err == nil {
 		t.Fatal("GetAnalytics returned nil when the declaration list failed")
 	}
@@ -467,7 +467,7 @@ func TestGetAnalyticsFailsWhenNoAnalyticsServiceIsUp(t *testing.T) {
 
 	n := NewNodes(r, fakeSiblings{}, inlineRunner{})
 
-	_, err := n.GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: "hours"}, &buf)
+	_, err := n.GetAnalytics(context.Background(), uuid.New(), nil, AnalyticsFilters{TimeCluster: "hours"}, &buf)
 	if err == nil {
 		t.Fatal("GetAnalytics returned nil with no analytics sibling")
 	}
@@ -488,7 +488,7 @@ func TestGetAnalyticsReportsATransportFailure(t *testing.T) {
 
 	n := NewNodes(r, fakeSiblings{names: []protocols.SiblingName{"rpc.direct.analytics0"}}, inlineRunner{})
 
-	if _, err := n.GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: "hours"}, &buf); err == nil {
+	if _, err := n.GetAnalytics(context.Background(), uuid.New(), nil, AnalyticsFilters{TimeCluster: "hours"}, &buf); err == nil {
 		t.Fatal("GetAnalytics returned nil for a closed channel")
 	}
 }
@@ -524,7 +524,7 @@ func TestGetAnalyticsRefusesANodeThatIsNotRunning(t *testing.T) {
 
 	buf := make([]byte, 0, 4096)
 
-	_, err := n.GetAnalytics(context.Background(), uuid.New(), AnalyticsFilters{TimeCluster: "hours"}, &buf)
+	_, err := n.GetAnalytics(context.Background(), uuid.New(), nil, AnalyticsFilters{TimeCluster: "hours"}, &buf)
 	if !errors.Is(err, models.ErrNodeUnavailable) {
 		t.Fatalf("GetAnalytics error is %v, want ErrNodeUnavailable", err)
 	}
@@ -533,5 +533,45 @@ func TestGetAnalyticsRefusesANodeThatIsNotRunning(t *testing.T) {
 	// a round trip.
 	if len(r.calls) != 0 {
 		t.Errorf("GetAnalytics sent %d commands to a node that is not running", len(r.calls))
+	}
+}
+
+// The fleet list travels with every query, not only the ones that need it,
+// because the scope belongs to the node type's manifest: a fleet-scoped query is
+// one the hub did not write and cannot recognise, so the service decides whether
+// the list means anything.
+func TestGetAnalyticsSendsTheFleetWithEveryQuery(t *testing.T) {
+	r := &analyticsRouter{infos: declared(), rows: rowsByQuery()}
+
+	member := uuid.New()
+	fleet := []uuid.UUID{uuid.New(), member}
+
+	buf := make([]byte, 0, 4096)
+
+	if _, err := analyticsNode(r).GetAnalytics(context.Background(), uuid.New(), fleet, AnalyticsFilters{}, &buf); err != nil {
+		t.Fatalf("get analytics: %v", err)
+	}
+
+	sent := 0
+
+	for _, call := range r.calls {
+		if call.command != "analytics.query" {
+			continue
+		}
+
+		var req models.AnalyticsQueryRequest
+		if err := json.Unmarshal(call.payload, &req); err != nil {
+			t.Fatalf("decode %s: %v", call.command, err)
+		}
+
+		if len(req.Fleet) != len(fleet) || req.Fleet[1] != member {
+			t.Fatalf("query %q carried fleet %v, want %v", req.QueryName, req.Fleet, fleet)
+		}
+
+		sent++
+	}
+
+	if sent == 0 {
+		t.Fatal("no query was sent")
 	}
 }
