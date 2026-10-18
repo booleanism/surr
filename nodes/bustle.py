@@ -12,12 +12,15 @@ from pymongo.errors import CollectionInvalid
 
 from lib import detector as lib_detector
 from lib import version as lib_version
+from lib.bustle import analytics as bustle_analytics
 from lib.bustle import handlers as bustle_handlers
 from lib.bustle import processing as bustle_processing
 from lib.core import handlers as core_handlers
 from lib.core import logging_setup
 from lib.core import node as core_node
 from lib.core import pipeline as core_pipeline
+from lib.core import rpc as core_rpc
+from lib.core import siblings as core_siblings
 
 logger = logging.getLogger("bustle")
 
@@ -234,6 +237,16 @@ class BustleWorker(core_node.Worker):
     async def stop(self) -> None:
         # set_state(NULL) blocks, so keep it off the event loop.
         await asyncio.to_thread(self._streamer.stop)
+
+    async def registered(
+        self, r: core_rpc.RouterLike, sibs: core_siblings.Siblings
+    ) -> None:
+        # Declared once the hub has the node, which is also the first moment the
+        # analytics service has any reason to know this collection exists. It
+        # retries while the analytics sibling is still booting; giving up only
+        # costs the queries until the node restarts, since nothing can ask a
+        # running node to declare again.
+        await bustle_analytics.declare(r, sibs, self._node_id, self._coll.name)
 
 def init_db(mongo_url: str, mongo_db: str, node_id: uuid.UUID) -> tuple[pymongo.MongoClient, collection.Collection]:
     # serverSelectionTimeoutMS keeps a dead or unreachable mongod from parking

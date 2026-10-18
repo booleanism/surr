@@ -6,10 +6,10 @@ import typing
 import uuid
 
 from pymongo import collection
-from lib.bustle.analytics import detail_line_chart_pipeline, summary_bar_chart_pipeline
 from lib.core import handlers
 from lib.core import pipeline
 from lib.detector import Detector
+from . import analytics as bustle_analytics
 from . import processing
 
 @dataclass
@@ -73,11 +73,16 @@ class BustleHandlers:
 
             # A five-week timeseries aggregation can block for a long time; on
             # the event loop it would stall every introduce and every reply.
-            summary_bar_chart, detail_line_chart = await asyncio.to_thread(
+            summary_rows, detail_rows = await asyncio.to_thread(
                 cls._aggregate, start_time, unit_time
             )
 
-            await rep(handlers.RouterResponse(0, json.dumps([summary_bar_chart, detail_line_chart], default=str).encode()))
+            # The pipelines return generic chart data now; mapping it onto
+            # ECharts options is this handler's job, and it disappears with the
+            # handler at the cutover.
+            option = bustle_analytics.to_echarts(summary_rows, detail_rows)
+
+            await rep(handlers.RouterResponse(0, json.dumps(option, default=str).encode()))
         except Exception as e:
             await rep(handlers.RouterResponse(-2, str(e)))
             raise
@@ -87,9 +92,12 @@ class BustleHandlers:
     def _aggregate(
         cls, start_time: datetime, unit_time: str
     ) -> tuple[list[typing.Any], list[typing.Any]]:
-        summary_bar_chart = list(cls._coll.aggregate(summary_bar_chart_pipeline(cls._node_id, start_time)))
-        detail_line_chart = list(cls._coll.aggregate(detail_line_chart_pipeline(cls._node_id, start_time, unit_time)))
-        return summary_bar_chart, detail_line_chart
+        # A concrete ISO-8601 string in place of the manifest's ${start_time}
+        # placeholder: the builders take the same argument either way.
+        start = start_time.isoformat()
+        summary_rows = list(cls._coll.aggregate(bustle_analytics.summary_pipeline(cls._node_id, start)))
+        detail_rows = list(cls._coll.aggregate(bustle_analytics.detail_pipeline(cls._node_id, start, unit_time)))
+        return summary_rows, detail_rows
 
     @classmethod
     async def _stop_worker_task(cls) -> None:
