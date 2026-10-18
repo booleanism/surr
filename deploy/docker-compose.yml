@@ -88,6 +88,33 @@ services:
     # No ports: nothing outside the compose network needs to read analytics
     # directly, and the hub is the only supported way in.
 
+  # Least privilege for the data plane. The nodes write, the analytics service
+  # reads, and neither runs as root -- see mongo-init.js for why this is a job
+  # rather than mongo's own initdb hook (those only fire on an empty data
+  # directory, so an existing volume would never get the users).
+  mongo-init:
+    image: mongo:8
+    restart: "no"
+    environment:
+      MONGO_DB: ${MONGO_DB:-nodes}
+      MONGO_NODES_USER: ${MONGO_NODES_USER:-surr-writer}
+      MONGO_NODES_PASSWORD: ${MONGO_NODES_PASSWORD:-surr}
+      MONGO_ANALYTICS_USER: ${MONGO_ANALYTICS_USER:-surr-reader}
+      MONGO_ANALYTICS_PASSWORD: ${MONGO_ANALYTICS_PASSWORD:-surr}
+    volumes:
+      - ./mongo-init.js:/init/mongo-init.js:ro
+    entrypoint:
+      - mongosh
+      - --quiet
+      - --host=mongo
+      - --username=${MONGO_USER:-root}
+      - --password=${MONGO_PASSWORD:-root}
+      - --authenticationDatabase=admin
+      - --file=/init/mongo-init.js
+    depends_on:
+      mongo:
+        condition: service_healthy
+
   # ----------------------------------------------------------------- control plane
 
   # The databases are created by the migrator, not by the services. The services
@@ -206,11 +233,9 @@ services:
     environment:
       DSN: /data/analytics.db
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
-      # This service reads the nodes' collections directly, so it needs Mongo
-      # access of its own -- and its own credentials are the point: the node
-      # currently holds root, and giving the read path a separate user is what
-      # lets B5 take that away. See deploy/README.md.
-      MONGO_URL: mongodb://${MONGO_ANALYTICS_USER:-root}:${MONGO_ANALYTICS_PASSWORD:-${MONGO_PASSWORD:-root}}@mongo:27017/
+      # Read-only. This service reads the nodes' collections and never writes
+      # them; the account is created by mongo-init.js.
+      MONGO_URL: mongodb://${MONGO_ANALYTICS_USER:-surr-reader}:${MONGO_ANALYTICS_PASSWORD:-surr}@mongo:27017/
       MONGO_DB: ${MONGO_DB:-nodes}
     volumes:
       - analytics-db:/data
@@ -219,6 +244,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
       migrate-analytics:
         condition: service_completed_successfully
     restart: unless-stopped
@@ -366,7 +393,10 @@ services:
       - --chosen-classes=${BUSTLE_CLASSES:-0,1,2,3}
     environment:
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
-      MONGO_URL: mongodb://${MONGO_USER:-root}:${MONGO_PASSWORD:-root}@mongo:27017/
+      # Write-only on the nodes database. The node creates its own timeseries
+      # collection and inserts into it; it no longer reads anything back, since
+      # the analytics service answers the queries it declares.
+      MONGO_URL: mongodb://${MONGO_NODES_USER:-surr-writer}:${MONGO_NODES_PASSWORD:-surr}@mongo:27017/
       MONGO_DB: ${MONGO_DB:-nodes}
     volumes:
       # The detector weights are downloaded on first run and are far too large
@@ -377,6 +407,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
       rx:
         condition: service_started
     restart: unless-stopped
