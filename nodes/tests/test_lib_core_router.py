@@ -391,7 +391,15 @@ class AbandonedTrackIDTests(RouterTestCase):
 
     async def test_stale_entries_are_pruned_by_ttl(self):
         with unittest.mock.patch.object(router, "ABANDONED_MAX", 4):
-            self.router._abandoned = {uuid.uuid4(): 0.0 for _ in range(4)}
+            # The ages have to be relative to the loop's own clock, not absolute
+            # zeros: asyncio's time() is time.monotonic(), i.e. machine uptime,
+            # so 0.0 is only "long ago" on a host that has been up for longer
+            # than ABANDONED_TTL. On a freshly booted CI runner it is a few
+            # seconds ago, the entries are not stale, and this test failed
+            # there while passing on every long-uptime developer machine.
+            now = asyncio.get_running_loop().time()
+            stale = now - router.ABANDONED_TTL - 1.0
+            self.router._abandoned = {uuid.uuid4(): stale for _ in range(4)}
             fresh = uuid.uuid4()
             self.router._abandon(fresh)
 
