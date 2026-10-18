@@ -865,10 +865,12 @@ end-to-end run did not. TODO.md section F has the evidence.
     failure travelled back as a bare domain error. The reply-code vocabulary
     had no way to say "conflict": it stopped at `CodeNotFound = -4`. It now has
     `protocols.CodeConflict = -5`, a `models.ErrNodeAlreadySubscribed`
-    sentinel, an `isUniqueViolation` translation in the subscriptions store (a
-    deliberate ten-line duplicate of the hub's, because the root module must not
-    depend on the cgo driver), and a matching branch in the hub's adapter — so
-    the endpoint answers 409. The reply codes are part of the wire protocol, so
+    sentinel, a `db.IsUniqueViolation` translation (one implementation, on the
+    dialect, because "unique violation" is not one error value: SQLite reports a
+    typed error with an extended code, Postgres reports SQLSTATE 23505 through a
+    different type — it was a deliberate duplicate in each store until the
+    repository became a single module and the root could link the driver), and a
+    matching branch in the hub's adapter — so the endpoint answers 409. The reply codes are part of the wire protocol, so
     the Python mirror in `nodes/lib/core/handlers.py` has to be kept in step.
 16. **An empty node list created an empty subscription (F4, LOW)**.
     `POST /subscriptions/add` with `{"nodes":[]}` answered 200 with a fresh

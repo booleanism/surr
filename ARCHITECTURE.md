@@ -29,7 +29,7 @@ about them.
 
 ## Services
 
-| Service  | Language | Module path       | Role |
+| Service  | Language | Directory         | Role |
 |----------|----------|-------------------|------|
 | tx       | Go       | `tx/`             | Standalone GStreamer transmitter: RTSP ingest, transcode, SRT publish and/or DASH recording |
 | rx       | Go       | `rx/`             | SRT ingress/egress relay and fan-out broker between publishers and AI nodes |
@@ -38,15 +38,23 @@ about them.
 | analytics | Go | `analytics/` | Read path over MongoDB: a SQLite registry of node-declared aggregation queries, and the executor that runs one by name |
 | nodes    | Python   | `nodes/`          | AI workers; `bustle.py` is the object counter (LibreDEIMm) |
 
-A committed `go.work` at the repository root lists all six modules, so they
-share one build list and `go build all` / `go vet all` span the whole
-repository (`go build ./...` still stops at each module boundary). The five
-service modules (`hub`, `rx`, `subscriptions`, `analytics`, `tx`) additionally reach the
-shared root packages via `replace github.com/booleanism/surr => ../`, which is
-what keeps a build made outside the workspace (`GOWORK=off`) resolvable while
-the shared module is unpublished. `tx` never joins
-the broker — it remains broker-free at runtime, but does import shared root
-packages (`internal/logging`) at build time.
+Everything is one Go module, `github.com/booleanism/surr`, with the five
+services as directories and the shared packages under `internal/`. `go build
+./...` at the root therefore covers the whole tree — 37 packages — and a
+release is a single tag.
+
+The repository was previously six modules joined by a committed `go.work` and
+five `replace github.com/booleanism/surr => ../` directives. That is what made
+it uninstallable: `go install path@version` refuses a module carrying a
+`replace`, and a service module needed the replace to resolve the shared one
+from the proxy. A single module needs neither, so `go install
+github.com/booleanism/surr/hub/cmd/hub@v0.3.0` works. Import paths did not
+change — `github.com/booleanism/surr/internal/logging` was always the path —
+only the `require` lines and the second `go.mod` per service went away.
+
+`tx` never joins the broker — it remains broker-free at runtime, but does
+import shared packages (`internal/logging`, `internal/buildinfo`) at build
+time.
 
 ## End-to-end data flow
 
@@ -529,7 +537,7 @@ for their status.
 | rx handshake/lifecycle: blocking broker RPC inside the SRT listen callback, unbounded pending maps, no `Read`/`Write` deadline, no ingress rejection reason, `StartSink`/`StopSink` returned nil | a slow peer wedged accept or a writer; ctx cancellation left nodes streaming; a publisher whose node was down was served nothing and never re-dispatched | 5s lookup timeout; `pending[V]` (30s TTL, 4096 cap); 10s write and 1s read deadlines; `rejectHandshake` codes; `firstErr` propagation plus a 2s `sinkUnavailableDelay` before the publisher is dropped |
 | minor: `GetBytes` guessed at base64, an empty `ReplyTo` was refused silently, `models.User.Passwd` was JSON-serializable, a duplicate signup email was a 500, `rx` could not bind IPv6, two tx locals shadowed package names | the argon2id hash crossed the broker; a `password` signup created an empty-password account; failures were confusing | `GetBytes` deleted; the refusal is warned about; `Passwd` is `json:"-"`; `credentials` + `DisallowUnknownFields` + `models.ErrUserExists` → 409; `net.SplitHostPort`; renames |
 | rx sink dispatch declared `err :=` *inside* the pool closure, so `do()` returned `Run`'s nil for every failure, and its `Recv` had no deadline | `StartSink` reported success for a node that had died, so the publisher was accepted and the bounded retry never engaged; each stale dispatch parked a pool worker in `Recv` until the process context ended (`--worker 28` of them) | `do()` runs `roundTrip` on the pool and receives the outcome over a `make(chan error, 1)`; `sinkCommandTimeout` (5s) bounds the round trip; a non-zero reply code is now an error |
-| adding a node that was already in a subscription returned a bare domain error, and `{"nodes":[]}` created an empty subscription | `POST /subscriptions/add` answered 500 for a conflict and 200 for a request that creates an unremovable row | `CodeConflict` (`-5`) + `models.ErrNodeAlreadySubscribed` + `isUniqueViolation` translation → 409; empty and nil-id node lists → 400 |
+| adding a node that was already in a subscription returned a bare domain error, and `{"nodes":[]}` created an empty subscription | `POST /subscriptions/add` answered 500 for a conflict and 200 for a request that creates an unremovable row | `CodeConflict` (`-5`) + `models.ErrNodeAlreadySubscribed` + `db.IsUniqueViolation` translation → 409; empty and nil-id node lists → 400 |
 | the sibling registry never forgot a dead node: `introduce` added an entry and nothing removed it | a node killed without a graceful `nodes.remove` stayed resolvable for the life of the process, so every dispatch to it spent a full 5s `sinkCommandTimeout` before the sink was treated as absent (4 cycles in 30s where an unregistered node managed 15) | both registries expire an entry `SiblingTTL` (15s, `SIBLING_TTL_SECONDS` in the Python mirror) after its last introduce, checked lazily on `Get`/`GetName` |
 
 ### Open
@@ -542,10 +550,10 @@ open in the shipped path.
 
 ## Build & tooling
 
-- `make lint` — golangci-lint every module (`.golangci.yml` at repo root:
+- `make lint` — golangci-lint the module (`.golangci.yml` at repo root:
   cyclop max 10, govet enable-all with strict shadowing, gofumpt/gci).
-- `make test` — `go test ./...` in every module, plus `make test-<module>` for
-  one. `TESTFLAGS` is appended (e.g. `TESTFLAGS=-race`); `make test TAGS=va`
+- `make test` — `go test ./...`, plus `make test-<service>` for one service's
+  packages. `TESTFLAGS` is appended (e.g. `TESTFLAGS=-race`); `make test TAGS=va`
   also compiles the `vah264enc` variant, which `make lint`/`make build` skip.
   It then runs the Python suite in `nodes/tests`; `make test-nodes` runs that
   alone, `PYTHON=...` picks another interpreter and `NODESTESTFLAGS=-v` adds

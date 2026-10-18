@@ -1317,10 +1317,10 @@ retried once every two seconds rather than ~34 times a second.
       `CodeNotFound = -4`. **Fixed** with `protocols.CodeConflict = -5`
       (`internal/protocols/handlers.go`), the
       `models.ErrNodeAlreadySubscribed` sentinel (`internal/models/node.go`),
-      an `isUniqueViolation` translation in the subscriptions store
-      (`subscriptions/internal/db/sqlite/errors.go` — a deliberate ten-line
-      duplicate of the hub's, because the root module must not depend on the
-      cgo driver), and a matching branch in the hub's adapter
+      a `db.IsUniqueViolation` translation (originally duplicated in each
+      service's store, because the root module did not link the driver; now one
+      implementation on the dialect, `internal/db/dialect_sqlite.go`), and a
+      matching branch in the hub's adapter
       (`hub/internal/adapter/rabbitmq/subscription.go`). The endpoint now
       answers **409 `node is already in a subscription`**.
 - [x] Tests: `subscriptions/internal/db/sqlite/subscription_test.go`,
@@ -1473,15 +1473,34 @@ deployment could not be diagnosed from its own logs.
       distro because tx needs GStreamer 1.26 for `C.GstIdStr`, the patch version
       because golangci-lint v2.13.2 cannot read Go 1.27.2 export data), and the
       Python half on the runner where PyGObject builds from source.
-- [ ] **`go install github.com/booleanism/surr/hub/cmd/hub@latest` does not
-      work, and this is a decision rather than an oversight.** The five service
-      modules carry `replace github.com/booleanism/surr => ../`, which a
-      published module cannot resolve. Dropping them was tried and reverted:
-      with them gone, a local edit to `internal/models` became invisible to a
-      service build that still exited 0, which is a worse failure than an
-      unsupported install path. The supported path is a checkout — `make build`
-      — and publishing the submodules would need `hub/vX.Y.Z`-style tags and a
-      release process of its own, for an install route nothing here uses.
+- [x] **`go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0` works**, and
+      getting there meant collapsing the repository to a single module.
+
+      The six-module shape could not be installed by any route. `go install
+      path@version` refuses a module whose `go.mod` carries a `replace`, so the
+      five `replace github.com/booleanism/surr => ../` directives had to go; but
+      without them a service module cannot resolve the shared one from the proxy
+      until a version is published, which is why the replaces existed. Dropping
+      them alone was tried and reverted once, because a local edit to
+      `internal/models` became invisible to a service build that still exited 0.
+
+      Two shapes could break the circle: keep the modules and pin them to a
+      published root version with six tags per release (`vX.Y.Z`,
+      `hub/vX.Y.Z`, … in a fixed order), or make the root module the only
+      module so there is no cross-module requirement to pin. The single-module
+      shape was chosen: one `go.mod`, one tag, and the `go.work` plus every
+      `replace` deleted rather than maintained. Import paths are unchanged —
+      `github.com/booleanism/surr/internal/logging` was already the path — and
+      `go build ./...` now covers all 37 packages instead of the root's 8.
+
+- [x] **A binary installed from a version suffix reports that version.**
+      `go install` cannot pass `-ldflags`, so `main.Version` kept its `"dev"`
+      default and an installed binary identified nothing. `internal/buildinfo`
+      recovers the value from the executable's own build metadata
+      (`go version -m` shows `mod github.com/booleanism/surr v0.3.0`) and falls
+      back to the stamped VCS revision for a bare `go build`. `make build`'s
+      injected `git describe` still wins, because it is the only source that can
+      say "dirty".
 
 ## H. Migrations: an embedded runner, and the engine as a build choice
 

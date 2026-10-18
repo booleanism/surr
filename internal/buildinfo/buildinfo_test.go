@@ -65,8 +65,8 @@ func TestFromVCSSHortensTheRevision(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		settings []debug.BuildSetting
 		want     string
+		settings []debug.BuildSetting
 	}{
 		{
 			name:     "clean tree",

@@ -75,8 +75,8 @@ nodes. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 ```sh
 make            # lint + test + typecheck + build everything
 make build      # build only (no lint, no test)
-make lint       # golangci-lint, every module
-make test       # go test ./..., every module, then the nodes/ python suite
+make lint       # golangci-lint
+make test       # go test ./..., then the nodes/ python suite
 make test-nodes # python tests for nodes/lib/core (nodes/tests)
 make typecheck  # pyright over nodes/ (pyproject.toml)
 make clean      # remove .cache/ and bin/
@@ -106,8 +106,19 @@ query manifest) and everything it inherits from `lib/core` instead.
 `bin/surr-rx`, `bin/surr-subscriptions`, `bin/surr-analytics`, `bin/surr-tx`).
 Individual targets: `make build-hub`, `make build-rx`, `make build-subscriptions`,
 `make build-analytics`, `make build-tx`. Likewise `make test-hub`,
-`make test-rx`, `make test-subscriptions`, `make test-analytics`, `make test-tx`,
-`make test-root` test one module.
+`make test-rx`, `make test-subscriptions`, `make test-analytics`, `make test-tx`
+test one service's packages.
+
+Everything is one Go module, so there is also an install path that needs no
+checkout:
+
+```sh
+go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0
+```
+
+A binary installed that way has no `-ldflags`, so `--version` reports the
+module version it was installed from rather than "dev" —
+`internal/buildinfo` reads it back out of the executable's own build metadata.
 
 Knobs: `RELEASE_TYPE=release` adds `-s -w -trimpath`; `TAGS` passes build tags;
 `GOFLAGS` / `LDFLAGS` are appended; `TESTFLAGS` is appended to `go test` (e.g.

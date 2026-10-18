@@ -4,25 +4,31 @@ This file provides guidance to AI coding agents working in this repository. It i
 
 ## Overview
 
-Event-driven AI surveillance system built on GStreamer, SRT, LibreYOLO, MongoDB, SQLite3 and RabbitMQ. Five Go service modules plus a Python "nodes" runtime, all communicating over a RabbitMQ topic exchange.
+Event-driven AI surveillance system built on GStreamer, SRT, LibreYOLO, MongoDB, SQLite3 and RabbitMQ. One Go module holding five services, plus a Python "nodes" runtime, all communicating over a RabbitMQ topic exchange.
 
 Deep-dive docs: [ARCHITECTURE.md](ARCHITECTURE.md) (services, data flow, protocol, storage), [DESIGN.md](DESIGN.md) (rationale, trade-offs, invariants), [DEPLOYMENT.md](DEPLOYMENT.md) (installing and running it without containers) and [TODO.md](TODO.md) (staged execution tracker and fix status). Consult them before non-trivial changes.
 
 ## Commands
 
 ```sh
-make lint          # golangci-lint every module (config: .golangci.yml at repo root)
+make lint          # golangci-lint the module (config: .golangci.yml at repo root)
 make test          # test-go + test-nodes
-make test-go       # go test ./... in every module (no python needed; this is what CI runs)
+make test-go       # go test ./... (no python needed; this is what CI runs)
 make test-nodes    # python tests for nodes/lib/core (nodes/tests; needs ./.venv)
 make typecheck     # pyright over nodes/ (config: ./pyproject.toml; needs ./.venv)
 make build         # build every cmd/ entrypoint into bin/surr-<name>
 make               # lint + test + typecheck + build
 make clean         # remove .cache/ and bin/
 
-# One module / one binary
-make build-tx      # also: build-rx, build-hub, build-subscriptions
-make test-hub      # also: test-rx, test-subscriptions, test-tx, test-root
+# One binary / one service's packages
+make build-tx      # also: build-rx, build-hub, build-subscriptions, build-analytics
+make test-hub      # also: test-rx, test-subscriptions, test-tx, test-analytics
+
+# Cut a release: gates, then one annotated tag, then push
+./scripts/release.sh v0.3.0
+
+# Install a released binary without a checkout
+go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0
 
 # Build a release binary (stripped, trimpath)
 make build-tx RELEASE_TYPE=release
@@ -34,7 +40,7 @@ make build-tx RELEASE_TYPE=release
 ./smoke.sh
 
 # Run a single service (each is a urfave/cli v3 app; see its cmd/<name>/cmdline.go for flags)
-cd hub && go run ./cmd/hub run --help
+go run ./hub/cmd/hub run --help
 
 # Python node (from the repo root; uv sync creates .venv/)
 uv sync
@@ -43,7 +49,7 @@ uv run python nodes/bustle.py --help
 
 Knobs: `RELEASE_TYPE=release` (adds `-s -w -trimpath`), `TAGS` (build tags), `GOFLAGS`, `LDFLAGS`, `VERSION`, `TESTFLAGS` (e.g. `-race`, `-count=1`), `NODESTESTFLAGS`, `PYTHON`, `PYRIGHT`, `TYPECHECKFLAGS`.
 
-`VERSION` defaults to `git describe --tags --always --dirty` and is injected into every binary with `-X main.Version`, so `--version` and the `version=` field on every log line report the build. `LDFLAGS` appends to it rather than replacing it. The Python node resolves the same string independently (`nodes/lib/version.py`), which is what makes a mixed deployment's two build ids comparable. Do not reintroduce a hand-written version constant: the point of the injection is that no constant has to be kept in sync by hand.
+`VERSION` defaults to `git describe --tags --always --dirty` and is injected into every binary with `-X main.Version`, so `--version` and the `version=` field on every log line report the build. `LDFLAGS` appends to it rather than replacing it. A binary built without that injection — `go install ...@vX.Y.Z`, or a bare `go build` — falls back to `internal/buildinfo.Resolve`, which reads the module version the toolchain recorded and then the stamped VCS revision, so no path reports "dev" when an identity exists. The Python node resolves the same string independently (`nodes/lib/version.py`), which is what makes a mixed deployment's two build ids comparable. Do not reintroduce a hand-written version constant: the point of the injection is that no constant has to be kept in sync by hand.
 
 `go install` is deliberately unsupported: the `replace` directives a published module cannot resolve are the same ones that keep a local `internal/` edit visible to a service build. Build from a checkout — `make build` — and stamp `VERSION` if you need the binaries to name a release rather than a commit.
 
@@ -51,22 +57,24 @@ CI is `.github/workflows/ci.yml`: `make lint`, `make test-go` and `make build` o
 
 The Go job runs inside a `golang:1.27.1-trixie` container rather than directly on the runner, and both halves of that image tag are load-bearing:
 
-- **The distro, because `tx` links go-gst.** `go-gst v0.0.2` references `C.GstIdStr`, which GStreamer only added in **1.26**. The `ubuntu-24.04` runner image ships 1.24, so on the bare runner `tx` does not type-check (`could not determine what C.GstIdStr refers to`, then 15 cascading `Add`/`AddPad`/`GetStaticPad` errors) and `make lint` fails before it reaches the other modules. trixie is GStreamer 1.26.2, which clears that floor with room to spare.
+- **The distro, because `tx` links go-gst.** `go-gst v0.0.2` references `C.GstIdStr`, which GStreamer only added in **1.26**. The `ubuntu-24.04` runner image ships 1.24, so on the bare runner `tx` does not type-check (`could not determine what C.GstIdStr refers to`, then 15 cascading `Add`/`AddPad`/`GetStaticPad` errors) and `make lint` fails on the first package it reaches. trixie is GStreamer 1.26.2, which clears that floor with room to spare.
 - **The patch version, because golangci-lint has a ceiling.** golangci-lint v2.13.2 is built with Go 1.27.0 and cannot read the export data Go 1.27.2 emits (`cannot decode "internal/goarch", export data version 5 is greater than maximum supported version 4`), so `golang:1.27-trixie` (1.27.2) fails and `golang:1.27.1-trixie` passes. 1.27.1 is also the highest `go` directive in the repo (rx and tx), so it is the floor, not a downgrade.
 
 The Python job stays on the runner: PyGObject 3.58 builds from source and needs GLib >= 2.80, which ubuntu-24.04 satisfies. It has been green.
 
 The Go job's first step after checkout is `git config --global --add safe.directory "$GITHUB_WORKSPACE"`, and it is not optional. A container job runs as root while the workspace it mounts is owned by the runner's user, and git >= 2.35.2 refuses a repository it does not own (`fatal: detected dubious ownership in repository at '/__w/surr/surr'`, exit 128). `go build` runs `git status` to stamp VCS information into every binary, so without that line the build dies with `error obtaining VCS status: exit status 128` — and the Makefile's own `git describe` for `VERSION` fails the same way. This cannot be reproduced on a developer machine that runs rootless Docker: the host user is mapped to uid 0 inside the container, so the checkout *is* root-owned and git never complains. Only real-root Docker, which is what Actions uses, reproduces it.
 
-`make build-<name>` builds the module directory whose `cmd/<name>/` contains `main.go`, running `go build` from inside that directory (so the module's own `go.mod` applies) and writing `bin/surr-<name>`. `make test` discovers modules the same way, so a failure in any module fails the target. `make test-nodes` uses `./.venv/bin/python` when it exists (`PYTHON=...` overrides) and fails with instructions when that interpreter cannot import `aio_pika`/`numpy`.
+`make build-<name>` builds the `cmd/<name>/` package that contains `main.go` and writes `bin/surr-<name>`. `make test` covers every package in the module, so a failure anywhere fails the target. `make test-nodes` uses `./.venv/bin/python` when it exists (`PYTHON=...` overrides) and fails with instructions when that interpreter cannot import `aio_pika`/`numpy`.
 
 `make typecheck` runs pyright from the repo root against `./pyproject.toml`. `venvPath`/`venv` in that file are load-bearing — pyright does not pick the venv up merely because it was launched from the venv's own `bin/` — and so is `extraPaths = ["nodes"]`, which is what resolves the nodes' `from lib.core import ...` imports from a config file that lives one level above them. `typeCheckingMode = "standard"` is the level the runtime is actually held to. The gate is in `make` but deliberately not in `lint`/`test`, which stay usable on a Go-only checkout.
 
 The Python side is a uv project: `./pyproject.toml` declares the dependencies (pinned exactly, with the torch CPU index wired up through `[tool.uv.sources]`) and `./uv.lock` pins the full transitive graph. The venv is `./.venv` — at the repo root, not in `nodes/` — while all the node code stays in `nodes/`. `[tool.uv] package = false` is what lets `uv sync` install the dependencies without trying to build the project, since `nodes/` is a directory of scripts rather than an importable package.
 
-A committed `go.work` at the repository root lists all six modules. What it buys is one shared build list: without it each module resolves its dependencies independently and can silently drift — adopting the workspace is what surfaced `golang.org/x/sys` sitting at v0.47.0 in `hub` and v0.29.0 in the others. It also makes the workspace-wide patterns work: `go build all`, `go vet all` and `go list all` see all 37 packages across the six modules. It does **not** make `go build ./...` cover the repository — `./...` is a filesystem pattern that stops at every `go.mod`, so at the root it still matches only the root module's 8 packages. The Makefile's per-module loop remains how everything is built and tested.
+The repository is **one Go module**: `github.com/booleanism/surr` at the root, with the five services as directories (`hub/`, `rx/`, `tx/`, `subscriptions/`, `analytics/`) and the shared packages under `internal/`. `go build ./...` at the root covers all 37 packages, and `go list ./...` is the whole tree.
 
-The `replace github.com/booleanism/surr => ../` directives in the five service `go.mod` files stay alongside it and are not redundant. A workspace only applies while you are inside it, so `GOWORK=off` — what a consumer, or a CI job that ignores the workspace, sees — must still resolve the shared module, and the replace is the only thing that makes it resolvable while `github.com/booleanism/surr` is unpublished. Dropping them breaks `GOWORK=off go build` (`missing go.sum entry needed to verify package ... is provided by exactly one module`) and `go mod tidy` (`repository 'https://github.com/booleanism/surr/' not found`). Because of the replace, a new cross-module import needs no `go.mod` edit while a new third-party dependency does. tx never joins the broker at runtime, but does import the shared root `internal/logging` package at build time.
+It used to be six modules tied together by a committed `go.work` plus five `replace github.com/booleanism/surr => ../` directives. That shape could not be installed: `go install path@version` refuses a module whose `go.mod` carries a `replace`, and a service module could not resolve the shared one from the proxy without one. Collapsing to a single module removed both the replaces and the cross-module requirement that would have needed pinning, so `go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0` works with no `go.work` and no ceremony. The cost is that the service module paths moved: `github.com/booleanism/surr/hub` used to name a module and now names a directory, which is why the import paths are unchanged but the `require` lines are gone. Do not reintroduce a second `go.mod` below the root without re-reading this paragraph — it silently restores the uninstallable shape.
+
+A binary installed from a version suffix gets no `-ldflags`, so `main.Version` keeps its `"dev"` default; `internal/buildinfo.Resolve` recovers the version from the binary's own module metadata (`go version -m` shows `mod github.com/booleanism/surr v0.3.0`) and falls back to the stamped VCS revision for a bare `go build`. `make build` still injects `git describe` with `-X` and that value wins, because it is the only source that can say "dirty".
 
 ## Architecture
 
@@ -106,7 +114,7 @@ Python nodes self-register in the hub's `nodes` table: `nodes.add` on boot (retr
 - `internal/protocols/rabbitmq/` — the router (exchange/queue setup, introduce, Send/Recv, delivery dispatch)
 - `internal/pools/` — sync.Pool-based object pools (bytes, goroutines/task running, sibling-name slices, nodes, subscriptions); always `Get()` from a pool and `Put()` it back rather than allocating
 - `internal/models/` — Node, User, Subscription, SRT and analytics models shared across services, plus the sentinels that cross layers (`ErrUserExists`, `ErrNodeAlreadySubscribed`, `ErrQueryTooLarge`, `ErrDeclarationNotFound`)
-- `internal/db/` — SQLite helpers (`Transaction`, `TXFactory`, `VerifySchema`)
+- `internal/db/` — `Transaction`, `TXFactory`, `VerifySchema`, the embedded migration runner (`migrate.go`), and the build-tagged `dialect` seam that chooses its engine
 - `internal/logging/` — zerolog setup (`Setup`, `RedactURL`) and the `Cleanups` registry
 - `internal/backoff/` — exponential backoff with deterministic jitter, used by every restart loop
 - `internal/restart/` — `restart.Loop(ctx, name, f)`, the one wrapper every long-running routine runs inside
@@ -115,13 +123,13 @@ Python nodes self-register in the hub's `nodes` table: `nodes.add` on boot (retr
 
 hub, subscriptions and analytics follow the same layering: `cmd/<svc>/` (CLI + main wiring) → `internal/protocols/` (transport handlers: http/rabbitmq) → `internal/usecases/` (business logic) → `internal/db/sqlite/` (storage) with `internal/adapter/` bridging usecases to the router. analytics also has `internal/db/mongo/` for the aggregation it runs. rx is similar minus the DB. tx is its own world: `internal/src` (GStreamer sources), `internal/sink` (srt/dash/etc sinks), `internal/streaming`, `internal/core` (coder/muxer/pipeline), `internal/server/dash`.
 
-Top level: `internal/` is the shared module root (protocols, pools, models, db, logging, restart) that the five service modules import through the `replace` directive; `nodes/` is the Python runtime (`nodes/lib/core` is the type-agnostic runtime, `nodes/lib/<type>` the worker); `.github/workflows/ci.yml` is CI. Wiring is configuration, not code: each service is a standalone binary with its own flags (broker URL, database path, listen address), so the deployment that connects them lives wherever it is operated, not here.
+Top level: `internal/` holds the shared packages (protocols, pools, models, db, logging, restart, buildinfo) that the five services import; `nodes/` is the Python runtime (`nodes/lib/core` is the type-agnostic runtime, `nodes/lib/<type>` the worker); `.github/workflows/ci.yml` is CI. Wiring is configuration, not code: each service is a standalone binary with its own flags (broker URL, database path, listen address), so the deployment that connects them lives wherever it is operated, not here.
 
 ### Conventions
 
 - **Resource cleanup**: Go services use `*logging.Cleanups` (`internal/logging/cleanups.go`) — `cleanups.Register(func() error {...})` where the resource is created, `Run()` drains them on context cancellation in registration order. Registration is safe at any time, including while the drain is running.
 - **Long-running routines**: wrap every blocking routine in `restart.Loop(ctx, name, f)` (`internal/restart/`). It re-enters `f` after an exponentially growing, jittered delay (`internal/backoff/`) instead of spinning, logs each failure, and returns once ctx is cancelled. A broker connection that drops is handled by `rabbitmq.Supervisor.Watch`, which redials, re-declares the queue and installs it with `router.ReplaceChannel` — the router reads its channel through `channel()`/`queue()` accessors, so publishes and consumes always use the current one.
-- **SQLite schema**: the services never create their own tables, and never migrate implicitly. Migrations live in `<svc>/internal/migrations/sqlite/` (golang-migrate naming, so the tables and `schema_migrations` stay readable by either tool), are compiled in via `<svc>/internal/migrations/embed.go`, and are applied by that service's own `migrate` subcommand (`./bin/surr-hub migrate -d ./hub.db up`, leaf mode `up`/`down`/`status`, `-d/--database` accepted on either side of the mode). `hub`, `subscriptions` and `analytics` call `db.VerifySchema(ctx, sqlDB, migrationsPath, tables...)` right after opening the connection and exit with one actionable error when a table is missing. `migrate` exits non-zero on failure while `run` exits 0 on a clean shutdown, so each `cmd/<svc>/main.go` is `func main() { os.Exit(mainEntry()) }` — `os.Exit` skips deferred calls, and the deferred cancellation is what lets the cleanup hooks run.
+- **SQLite schema**: the services never create their own tables, and never migrate implicitly. Migrations live in `<svc>/internal/migrations/sqlite/` (golang-migrate naming, so the tables and `schema_migrations` stay readable by either tool), are compiled in via `<svc>/internal/migrations/embed.go`, and are applied by that service's own `migrate` subcommand (`./bin/surr-hub migrate -d ./hub.db up`, leaf mode `up`/`down`/`status`, `-d/--database` accepted on either side of the mode). `hub`, `subscriptions` and `analytics` call `db.VerifySchema(ctx, sqlDB, migrateHint, tables...)` right after opening the connection and exit with one actionable error when a table is missing. `migrate` exits non-zero on failure while `run` exits 0 on a clean shutdown, so each `cmd/<svc>/main.go` is `func main() { os.Exit(mainEntry()) }` — `os.Exit` skips deferred calls, and the deferred cancellation is what lets the cleanup hooks run.
 - **The migration runner names its engine at build time, not at run time.** `internal/db/migrate.go` is engine-agnostic; `internal/db/dialect_sqlite.go` (behind `//go:build !postgres`) supplies the five things that are not portable — the driver name, the version-table DDL (`version uint64` is not a Postgres type), `PRAGMA busy_timeout` + `BEGIN IMMEDIATE`, whether the driver accepts a multi-statement `Exec`, whether DDL is transactional, and the bind placeholder. `dialectFor()` is the single dispatch point, and the same build tag selects the embedded migrations package. `internal/db` therefore links `mattn/go-sqlite3` itself: the root module now needs cgo, and the driver is no longer registered by a blank import three layers away in some `main`. Adding a second engine means a second `dialect_<engine>.go` plus that engine's migrations package — not a flag.
 - CLI parsing is hand-rolled on top of urfave/cli v3 into a `CommandLine` struct in `cmd/<svc>/cmdline.go`; new flags go there.
 - New broker commands: register a handler on the serving side (`handlers.Set`), which automatically advertises it in `introduce`; callers resolve the sibling via the siblings registry before `Send`/`Recv`.
@@ -144,6 +152,7 @@ The `E`-numbered items in TODO.md section E are the historical record of how eac
 - **A declaration is a set, and a re-declare replaces it whole.** `UpsertDeclaration` (`analytics/internal/db/sqlite/declaration.go`) is delete-then-insert inside one transaction, because a node owns its manifest entirely: a re-declare that drops a query has to remove it, or the registry keeps offering a query the node no longer serves. The manifest is validated at **declare** time so a broken pipeline is refused where the author can still fix it, and again at **query** time because the registry is not the only way a manifest could have arrived.
 - **Blocking SRT calls are not cancellable by themselves.** `rx/internal/protocols/srt/listen.go` closes the socket on ctx cancellation because that is the only thing that wakes `srt_epoll_wait`; do not call `sock.Listen`/`Accept` directly from a routine. The same applies to an established stream: a bare `sock.Read`/`sock.Write` in a loop never returns on cancellation, so both loops arm a deadline per iteration (1s idle for reads, 10s for writes) and treat a `net.Error` timeout as a tick. This works only because `srtgo` sockets are created non-blocking — a blocking socket ignores the deadline.
 - **The SRT fan-out is reference-counted and the registry owns the close.** `broadcaster.Publish` hands one pooled buffer to every subscriber with `refs` set to the subscriber count; each `Chunk.release()` returns it to the pool exactly once. `Subscribe` returns a `*subscription` handle and only `Unsubscribe(handle)` may close a channel — it refuses a handle that is no longer registered, which is what stops a replaced subscriber's deferred call from closing its successor's channel. Never close a subscriber channel anywhere else.
+- **The database engine is a build-time choice, so both dialect build tags must compile.** `internal/db/dialect_sqlite.go` carries `//go:build !postgres` and the three services' `internal/migrations/embed.go` carry the same tag, so exactly one dialect and one set of embedded SQL are compiled into a binary and there is no runtime switch to get wrong. Nothing outside `dialect_sqlite.go` may name a driver, a `PRAGMA`, a bind variable or `BEGIN IMMEDIATE` — a hardcoded `?` is a runtime error on Postgres, not a compile error. `-tags postgres` currently fails with `build constraints exclude all Go files in .../internal/migrations`, which is the intended signal: a Postgres build has to supply its own migrations package.
 - **Both tx encoder build tags must compile.** The `va` and default variants of `encElementWithOptions` must keep the same signature (`bitrate uint32`); `make lint` and `make build` do not pass build tags, so check the `va` variant explicitly with `make test TAGS=va` (or `cd tx && go build -tags va ./... && go vet -tags va ./...`).
 - **Never hardcode a GStreamer element name that may not be installed.** `gst.ElementFactoryMake` returns nil for a factory the distribution does not ship, and the first `Add`/`Link`/`GetStaticPad` through it is a SIGSEGV, not an error. Go through `pickElement` (`tx/internal/core/coder/element.go`) with a preference list, check `Valid()`, and report what was missing. The concrete trap: `fdkaacdec`/`fdkaacenc` exist only where the non-free fdk-aac was built in, so a developer machine with deb-multimedia has them and a stock Debian image does not.
 - **`tx run` never brings its pipelines to NULL.** The shutdown path deliberately leaves them in PLAYING and exits after `loop.Run()` returns, because the NULL transition disposes the RTSP source and races GIO's threaded resolver on GLib 2.84 (`g_assert (g_cancellable_is_cancelled (cancellable))` in `gio/gthreadedresolver.c`, which segfaults on a clean SIGTERM as much as on an unreachable source). Re-adding `SetState(gst.StateNull)` — from the loop thread or from a cleanup hook — reintroduces the crash. The accepted cost is that an interrupted `--recording` needs remuxing, and `runFailure` is what turns a bus error into a non-zero exit.
