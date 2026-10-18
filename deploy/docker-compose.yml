@@ -130,6 +130,21 @@ services:
       - ../subscriptions/internal/migrations/sqlite:/migrations/subscriptions:ro
     restart: "no"
 
+  migrate-analytics:
+    build:
+      context: ..
+      dockerfile: deploy/migrate.Dockerfile
+    command:
+      - -database
+      - sqlite3:///data/analytics.db
+      - -path
+      - /migrations/analytics
+      - up
+    volumes:
+      - analytics-db:/data
+      - ../analytics/internal/migrations/sqlite:/migrations/analytics:ro
+    restart: "no"
+
   hub:
     build:
       context: ..
@@ -178,6 +193,33 @@ services:
       rabbitmq:
         condition: service_healthy
       migrate-subscriptions:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  analytics:
+    build:
+      context: ..
+      dockerfile: deploy/analytics.Dockerfile
+      args:
+        VERSION: ${VERSION:-unknown}
+    command: ["run"]
+    environment:
+      DSN: /data/analytics.db
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-surr}:${RABBITMQ_PASSWORD:-surr}@rabbitmq:5672//
+      # This service reads the nodes' collections directly, so it needs Mongo
+      # access of its own -- and its own credentials are the point: the node
+      # currently holds root, and giving the read path a separate user is what
+      # lets B5 take that away. See deploy/README.md.
+      MONGO_URL: mongodb://${MONGO_ANALYTICS_USER:-root}:${MONGO_ANALYTICS_PASSWORD:-${MONGO_PASSWORD:-root}}@mongo:27017/
+      MONGO_DB: ${MONGO_DB:-nodes}
+    volumes:
+      - analytics-db:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      migrate-analytics:
         condition: service_completed_successfully
     restart: unless-stopped
 
@@ -344,4 +386,5 @@ volumes:
   mongo-data:
   hub-db:
   subscriptions-db:
+  analytics-db:
   weights:
