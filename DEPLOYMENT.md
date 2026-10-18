@@ -388,11 +388,16 @@ read as "this node saw nothing".
 
 It starts the infrastructure if it is not already running, applies the
 migrations to a throwaway database directory, starts every service and a
-synthetic RTSP source, and asserts the whole chain: the client-error status
-codes, node registration, subscription, `tx` publishing into `rx`, the node
-pulling frames and writing documents, the analytics report and its label types,
-the 409 for a stopped node, and `tx` exiting 0 on SIGTERM. It tears everything
-down afterwards and prints a pass/fail summary.
+synthetic RTSP source, and asserts 48 facts about the whole chain: that the six
+binaries agree on a version, that every migration applied, the client-error
+status codes, node registration and its five declared queries, subscription,
+`tx` connecting to `rx` and a document reaching MongoDB, the analytics report
+with its window, bucket width and label types, the 409 for a stopped node and
+the 200 once it returns, and `tx` exiting 0 on SIGTERM. It tears everything down
+afterwards, including on failure, and prints a pass/fail summary.
+
+Every knob is also a flag, which is what `--help` lists; the environment
+variables below are the same settings.
 
 Useful knobs:
 
