@@ -393,7 +393,7 @@ Cross-cutting conventions:
   bind `uuid.UUID` values (→ TEXT) while the read path bound `ID[:]` (→ BLOB),
   so membership lookups matched nothing (§A0).
 
-### 11. Analytics service: writer-owned queries (service built, cutover pending)
+### 11. Analytics service: writer-owned queries
 
 The service is built, tested, deployed and on the read path (TODO.md B1–B5);
 what is left is fleet-wide declarations (B6). This section records the decision
@@ -500,8 +500,21 @@ now.
   declarations.
 - Rolling deploys can briefly mix query versions across instances of the same
   node type; mitigated by versioned query names if it ever bites.
+- **A declaration outlives the node that made it, so liveness is a separate
+  question from existence.** The registry is keyed by node id and nothing
+  deletes a row, which is deliberate: every deployment that mints a fresh node
+  id (as `deploy/smoke.sh` does, because `subscribed_nodes.node_id` is UNIQUE
+  and no endpoint moves a node between subscriptions) would otherwise need a
+  sweep, and a sweep needs a timestamp the `nodes.add` payload does not carry.
+  The read path therefore asks the sibling registry whether the node is
+  advertising itself, and refuses with 409 rather than running the queries: an
+  empty window and a dead node both produce empty arrays, and a report full of
+  empty arrays reads as "this node saw nothing", which is the one conclusion a
+  surveillance system must never present as data. The same reasoning is why
+  `/nodes/availability` filters on liveness — offering a dead node is how a
+  client ends up subscribed to one.
 
-### 12. Nodes runtime: type-agnostic core (planned, not on `main`)
+### 12. Nodes runtime: type-agnostic core
 
 **Status: landed** (`lib/core/node.py`, A2). (A version of this refactor also
 exists on `refs/remotes/gitea/main` as commit `66e308b "nodes: pythonic
@@ -532,7 +545,7 @@ rather than their results.
 
 ### 13. Logging: zerolog, context-first (implemented)
 
-Implemented in `internal/logging/` and wired into all four Go services;
+Implemented in `internal/logging/` and wired into all five Go services;
 TODO.md section C is complete. Python nodes use stdlib `logging` via
 `nodes/lib/core/logging_setup.py`.
 

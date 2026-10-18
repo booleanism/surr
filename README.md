@@ -273,8 +273,8 @@ Protected routes require `Authorization: Bearer <access token>`.
 | `POST` | `/auth/signin` | — | Exchange credentials for a JWT + refresh cookie |
 | `POST` | `/auth/refresh` | cookie | Rotate the refresh token, mint a new access token |
 | `POST` | `/auth/logout` | cookie | Revoke the refresh token |
-| `GET` | `/nodes/availability` | ✓ | Nodes not yet bound to a subscription |
-| `GET` | `/nodes/analytics?node_id=&time_cluster=` | ✓ | Every query the node declared, with the window used (`{window, queries: [{name, description, data}]}`) |
+| `GET` | `/nodes/availability` | ✓ | Nodes running now and not yet bound to a subscription |
+| `GET` | `/nodes/analytics?node_id=&time_cluster=` | ✓ | Every query the node declared, with the window used (`{window, queries: [{name, description, data}]}`); 409 if the node is not running |
 | `POST` | `/subscriptions/add` | ✓ | Bind nodes to a new subscription |
 | `POST` | `/subscriptions/remove` | ✓ | Remove a subscription |
 

@@ -332,6 +332,19 @@ leaves its socket spent, which is fine: the routine is only stopped at shutdown.
     `GET /nodes/analytics`, `POST /subscriptions/add`,
     `POST /subscriptions/remove` (auth-protected). Removing a subscription the
     caller does not own answers 403.
+  - `/nodes/availability` offers a row only if it is unsubscribed **and** the
+    node is advertising itself on the broker. Liveness comes from the sibling
+    registry, not from the `nodes` table: `nodes.add` is sent once per run and
+    carries no timestamp, so a row left by a node killed without a graceful
+    `nodes.remove` is indistinguishable from a live one (TODO.md F6). A node
+    that is not advertising itself is not offered, because subscribing to it
+    produces a sink that refuses to start later for no visible reason.
+  - `/nodes/analytics` answers **409** for a node that is not advertising
+    itself (`models.ErrNodeUnavailable`). A declaration outlives the node that
+    made it, so running it would return every query's empty shape — a report
+    that reads as "this node saw nothing" instead of "this node is gone". The
+    check runs after the ownership check, so it leaks nothing about a node the
+    caller does not own.
 
 Every request body is capped at 1 MiB (`middlewares.MaxBodyBytes`) and the
 server sets Read/Write/Idle timeouts on top of `ReadHeaderTimeout`.

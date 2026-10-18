@@ -28,9 +28,9 @@ they were found in, not to the fixed tree.
 system, on a `docker compose` stack built from a single commit and driven by
 `deploy/smoke.sh`. Every one of them needs a live process to be reachable — a
 node that dies between two broker calls, a duplicate row left in a database by
-a previous run, a reply code nothing consumed. F1-F5 are fixed; F6 (dead nodes
-leaving rows behind) is open and LOW, and was found by the same sweep run again
-after the analytics rewrite.
+a previous run, a reply code nothing consumed. All six are fixed. F6 (dead
+nodes leaving rows behind) was found by the same sweep run again after the
+analytics rewrite.
 
 ## A. Nodes refactor (type-agnostic runtime) — DESIGN.md §12
 
@@ -1203,7 +1203,7 @@ The venv is `./.venv` at the repo root, while all the node code stays in
       rather than printed; urfave/cli prints its own usage, so nothing is lost,
       but a log line would be better than a silent exit.
 
-## F. Defects found by the live deployment sweep (all fixed except F6)
+## F. Defects found by the live deployment sweep (all fixed)
 
 Section E came from reading the code. This section came from running it: a
 `docker compose` stack built from one commit (`1911b36`), driven end-to-end by
@@ -1348,28 +1348,71 @@ retried once every two seconds rather than ~34 times a second.
       service and a node disagreeing about when a peer is dead is a difference
       in behaviour that nothing on the wire reveals.
 
-### F6. Dead nodes leave rows in the hub and the analytics registry (LOW) — open
+### F6. Dead nodes leave rows in the hub and the analytics registry — fixed
 
-- [ ] Found while verifying the analytics rewrite on the live stack, not by a
+- [x] Found while verifying the analytics rewrite on the live stack, not by a
       test: after a handful of `deploy/smoke.sh` runs the hub's `nodes` table
       held eleven rows for one live node, and the analytics `declarations` table
       held two dead nodes' manifests — still carrying the retired
       `counts_detail`/`counts_summary`/`counts_totals` query names.
-- [ ] Why it is only LOW: `GET /nodes/availability` reads the sibling registry,
-      not the table, and answered 204 with one node running, so nothing
-      user-visible lists the dead rows. `UpsertDeclaration` is
-      delete-then-insert, so a node that comes back with the same id replaces
-      its manifest rather than merging into it; the stale names cannot be
-      answered for a live node.
-- [ ] Why it is still worth fixing: the growth is unbounded — every smoke run
-      mints a fresh node id (deliberately, because `subscribed_nodes.node_id` is
-      UNIQUE and the API cannot move a node between subscriptions), so a
-      persistent `hub-db` volume accumulates a row and four declarations per
-      run. `GET /nodes/analytics?node_id=<dead>` answers from a manifest for a
-      node that will never run again, which reads like a live report.
-- [ ] The shape of the fix is F5's: expire what nobody has re-announced. The
-      hub knows when a node last registered (`nodes.add` is idempotent and
-      carries no timestamp today), so a `last_seen` column plus a sweep — or the
-      same lazy check on read — would let both tables forget. Not done here
-      because it needs a migration, and a migration is not a documentation
-      change.
+- [x] The growth is unbounded and is by design: every smoke run mints a fresh
+      node id (because `subscribed_nodes.node_id` is UNIQUE and the API cannot
+      move a node between subscriptions), so a persistent `hub-db` volume
+      accumulates a row and four declarations per run. Nothing sweeps either
+      table, and `nodes.add` carries no timestamp, so a row cannot even be
+      dated.
+- [x] **Correction to the original write-up.** It claimed
+      `GET /nodes/availability` "reads the sibling registry, not the table" and
+      that the 204 therefore proved the dead rows were invisible. That was
+      wrong: `AvailableNodes` read `SelectAllNodes` — the table — and filtered
+      only by subscription, so an unsubscribed dead row *was* offered. The 204
+      in that run meant every row was subscribed (smoke.sh subscribes the node
+      it mints), which is a different fact. A client that had never subscribed
+      would have been offered a node that would never answer, and the failure
+      would have surfaced much later as a sink that refused to start.
+- [x] Fixed without a migration, by taking the answer from the introduce
+      stream instead of from the table. Every peer re-broadcasts its command
+      set once a second and a node's commands embed its id
+      (`<node-id>.sink.start`), so the sibling registry already knew which
+      nodes were up — it just was not asked:
+      - `internal/protocols/siblings.go`: NEW `LiveNodeIDs(ids *[]uuid.UUID) int`
+        (one entry per node, not per command; the slice is truncated first so a
+        pooled buffer can be passed straight in) and `NodeAlive(id uuid.UUID) bool`.
+        Both use the existing `SiblingTTL` through the same `fresh()` call
+        `GetName` uses: two answers to "is this peer alive" would be a
+        difference between listing a node and calling it.
+      - `hub/internal/usecases/node.go`: `AvailableNodes` now filters on
+        liveness as well as subscription, through a new `LiveNodes` interface.
+        An empty registry is a legitimate answer (nothing has introduced itself
+        yet) and means an empty list, not "every node is dead".
+      - `hub/internal/adapter/rabbitmq/nodes.go`: `GetAnalytics` refuses a node
+        that is not advertising itself, returning NEW
+        `models.ErrNodeUnavailable`. The manifest outlives the node that declared
+        it, so without this the endpoint answers every query with its empty
+        shape and the report reads as "this node saw nothing" rather than "this
+        node is gone". Checked after the ownership check, so an unsubscribed node
+        still gets the same answer as before and no liveness leaks.
+      - `hub/internal/protocols/http/handlers/nodes.go`: that error maps to
+        **409**, not 500 — the request was well formed and the node is the
+        caller's, so the server is not at fault and the client should retry when
+        the node is back.
+      - `internal/pools/uuid.go`: NEW `UUIDPool`/`UUIDPoolResetAndPut` for the
+        per-request id set, following the existing pool pattern.
+- [x] Not done: pruning the rows and declarations themselves. They are now
+      unreachable through the API (a dead row is never offered and its manifest
+      is never answered), so the remaining cost is disk. Deleting them needs
+      either a `last_seen` column plus a sweep or a boot-time reconciliation
+      against the registry, and both are a migration rather than a read-path
+      fix; F5's lazy expiry was the cheaper half of the same idea.
+- [x] Tests: `internal/protocols/siblings_test.go` (5 new — id parsed out of
+      the commands, one entry per node, expiry through both accessors, the slice
+      truncated, the id matched as a prefix and not as a substring),
+      `hub/internal/usecases/node_test.go` (NEW, 2 — the three reasons a row is
+      not offered, and an empty registry), `hub/internal/protocols/http/handlers/nodes_test.go`
+      (NEW, 2 — 409 for a dead node, 500 still for anything else), plus the
+      adapter test. All six mutations killed. Two of them initially survived for
+      instructive reasons: `Contains` instead of `HasPrefix` is unobservable on a
+      well-formed command (killed by a test that advertises an id after a dot,
+      pinning the same parse `LiveNodeIDs` does), and the expiry test called
+      `LiveNodeIDs` before `NodeAlive` on one registry — and expiry *deletes*,
+      so the first call hid the evidence from the second.
