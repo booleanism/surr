@@ -1,7 +1,7 @@
 # Architecture
 
-Event-driven, microservices-based AI surveillance system. Five independently
-deployable processes — four Go binaries and a Python worker runtime — cooperate
+Event-driven, microservices-based AI surveillance system. Six independently
+deployable processes — five Go binaries and a Python worker runtime — cooperate
 over a RabbitMQ topic exchange ("control plane") while video frames travel over
 SRT ("data plane"). Analytics land in MongoDB; control state lives in SQLite.
 
@@ -21,6 +21,11 @@ SRT ("data plane"). Analytics land in MongoDB; control state lives in SQLite.
                │
         camera RTSP feeds tx; rx fans frames out to every subscribed node
 ```
+
+`analytics` (Go) is the sixth process and the read path: it keeps the registry of
+queries each node declared in SQLite and runs them against the same MongoDB, so
+the service that writes the documents is the one that defines what can be asked
+about them.
 
 ## Services
 

@@ -395,9 +395,9 @@ Cross-cutting conventions:
 
 ### 11. Analytics service: writer-owned queries
 
-The service is built, tested, deployed and on the read path (TODO.md B1–B5);
-what is left is fleet-wide declarations (B6). This section records the decision
-so that what follows keeps its shape. An earlier
+The service is built, tested and on the read path, including fleet-wide
+declarations (TODO.md B1–B6). This section records the decision so that what
+follows keeps its shape. An earlier
 first attempt survives as dangling commits and a stash from the abandoned
 `feat/analytics-service` branch; it was not the base of this one.
 

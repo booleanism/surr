@@ -1,14 +1,14 @@
 // The workspace lists every Go module in this repository: the shared root and
-// the four services that import it. It is committed on purpose.
+// the five services that import it. It is committed on purpose.
 //
-// What it buys: ONE build list for all five modules. Without a workspace each
+// What it buys: ONE build list for all six modules. Without a workspace each
 // module resolves its dependencies independently -- `hub` could sit on
 // golang.org/x/sys v0.47.0 while `rx` builds against v0.29.0 and nothing says
 // so. Here they share one resolution, and `go work sync` writes that shared
 // build list back into each go.mod, which is why adopting this file also bumped
-// x/sys in the four modules that had drifted. It also makes the workspace-wide
-// patterns work: `go build all`, `go vet all` and `go list all` see all 32
-// packages across the five modules.
+// x/sys in the modules that had drifted. It also makes the workspace-wide
+// patterns work: `go build all`, `go vet all` and `go list all` see every
+// package across all six modules.
 //
 // What it does NOT do: `go build ./...` at the repository root still covers only
 // the root module's 8 packages. A nested module is never matched by `./...`,
@@ -17,7 +17,7 @@
 // Makefile.
 //
 // What it does NOT replace: the `replace github.com/booleanism/surr => ../`
-// directives in the four service go.mod files stay. A workspace only applies
+// directives in the five service go.mod files stay. A workspace only applies
 // while you are inside it -- `GOWORK=off` (what a consumer, or a CI job that
 // ignores the workspace, sees) must still resolve the shared module, and the
 // only thing that makes it resolvable is the replace, because

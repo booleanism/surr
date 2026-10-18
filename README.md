@@ -19,7 +19,10 @@ central orchestrator.
 > Tests cover the RPC reply layer, the restart backoff, the rx data plane and the
 > `nodes/lib/core` runtime, and `make typecheck` gates the Python side with
 > pyright; what no test covers is the wiring — a real SRT socket and a real
-> GStreamer pipeline — so that is exercised by running the system.
+> GStreamer pipeline — so `./smoke.sh` exercises it by running the system. It
+> brings up RabbitMQ and MongoDB if they are not already listening, starts every
+> service plus a synthetic camera on its own ports, and asserts the whole chain
+> end to end. [DEPLOYMENT.md](DEPLOYMENT.md) is the runbook it automates.
 
 ## How it fits together
 
