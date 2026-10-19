@@ -48,7 +48,7 @@ five `replace github.com/booleanism/surr => ../` directives. That is what made
 it uninstallable: `go install path@version` refuses a module carrying a
 `replace`, and a service module needed the replace to resolve the shared one
 from the proxy. A single module needs neither, so `go install
-github.com/booleanism/surr/hub/cmd/hub@v0.3.0` works. Import paths did not
+github.com/booleanism/surr/hub/cmd/hub@v0.3.1` works. Import paths did not
 change — `github.com/booleanism/surr/internal/logging` was always the path —
 only the `require` lines and the second `go.mod` per service went away.
 

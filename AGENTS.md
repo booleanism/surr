@@ -25,10 +25,10 @@ make build-tx      # also: build-rx, build-hub, build-subscriptions, build-analy
 make test-hub      # also: test-rx, test-subscriptions, test-tx, test-analytics
 
 # Cut a release: gates, then one annotated tag, then push
-./scripts/release.sh v0.3.0
+./scripts/release.sh v0.3.1
 
 # Install a released binary without a checkout
-go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0
+go install github.com/booleanism/surr/hub/cmd/hub@v0.3.1
 
 # Build a release binary (stripped, trimpath)
 make build-tx RELEASE_TYPE=release
@@ -72,9 +72,9 @@ The Python side is a uv project: `./pyproject.toml` declares the dependencies (p
 
 The repository is **one Go module**: `github.com/booleanism/surr` at the root, with the five services as directories (`hub/`, `rx/`, `tx/`, `subscriptions/`, `analytics/`) and the shared packages under `internal/`. `go build ./...` at the root covers all 37 packages, and `go list ./...` is the whole tree.
 
-It used to be six modules tied together by a committed `go.work` plus five `replace github.com/booleanism/surr => ../` directives. That shape could not be installed: `go install path@version` refuses a module whose `go.mod` carries a `replace`, and a service module could not resolve the shared one from the proxy without one. Collapsing to a single module removed both the replaces and the cross-module requirement that would have needed pinning, so `go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0` works with no `go.work` and no ceremony. The cost is that the service module paths moved: `github.com/booleanism/surr/hub` used to name a module and now names a directory, which is why the import paths are unchanged but the `require` lines are gone. Do not reintroduce a second `go.mod` below the root without re-reading this paragraph — it silently restores the uninstallable shape.
+It used to be six modules tied together by a committed `go.work` plus five `replace github.com/booleanism/surr => ../` directives. That shape could not be installed: `go install path@version` refuses a module whose `go.mod` carries a `replace`, and a service module could not resolve the shared one from the proxy without one. Collapsing to a single module removed both the replaces and the cross-module requirement that would have needed pinning, so `go install github.com/booleanism/surr/hub/cmd/hub@v0.3.1` works with no `go.work` and no ceremony. The cost is that the service module paths moved: `github.com/booleanism/surr/hub` used to name a module and now names a directory, which is why the import paths are unchanged but the `require` lines are gone. Do not reintroduce a second `go.mod` below the root without re-reading this paragraph — it silently restores the uninstallable shape.
 
-A binary installed from a version suffix gets no `-ldflags`, so `main.Version` keeps its `"dev"` default; `internal/buildinfo.Resolve` recovers the version from the binary's own module metadata (`go version -m` shows `mod github.com/booleanism/surr v0.3.0`) and falls back to the stamped VCS revision for a bare `go build`. `make build` still injects `git describe` with `-X` and that value wins, because it is the only source that can say "dirty".
+A binary installed from a version suffix gets no `-ldflags`, so `main.Version` keeps its `"dev"` default; `internal/buildinfo.Resolve` recovers the version from the binary's own module metadata (`go version -m` shows `mod github.com/booleanism/surr v0.3.1`) and falls back to the stamped VCS revision for a bare `go build`. `make build` still injects `git describe` with `-X` and that value wins, because it is the only source that can say "dirty".
 
 ## Architecture
 

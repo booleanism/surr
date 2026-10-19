@@ -1473,7 +1473,7 @@ deployment could not be diagnosed from its own logs.
       distro because tx needs GStreamer 1.26 for `C.GstIdStr`, the patch version
       because golangci-lint v2.13.2 cannot read Go 1.27.2 export data), and the
       Python half on the runner where PyGObject builds from source.
-- [x] **`go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0` works**, and
+- [x] **`go install github.com/booleanism/surr/hub/cmd/hub@v0.3.1` works**, and
       getting there meant collapsing the repository to a single module.
 
       The six-module shape could not be installed by any route. `go install
@@ -1493,11 +1493,19 @@ deployment could not be diagnosed from its own logs.
       `github.com/booleanism/surr/internal/logging` was already the path — and
       `go build ./...` now covers all 37 packages instead of the root's 8.
 
+- [x] **Released as `v0.3.1`.** All five binaries install from a clean module
+      cache (`GOMODCACHE=$(mktemp -d) go install ...@v0.3.1`) and each reports
+      `version v0.3.1`, which is the end-to-end proof of both items above: the
+      single module made the install path resolve, and `buildinfo` made the
+      installed binary name what it is. `v0.3.0` predates the second half, so an
+      install from it still reports `dev` — the tag is kept because `git
+      describe` counts it.
+
 - [x] **A binary installed from a version suffix reports that version.**
       `go install` cannot pass `-ldflags`, so `main.Version` kept its `"dev"`
       default and an installed binary identified nothing. `internal/buildinfo`
       recovers the value from the executable's own build metadata
-      (`go version -m` shows `mod github.com/booleanism/surr v0.3.0`) and falls
+      (`go version -m` shows `mod github.com/booleanism/surr v0.3.1`) and falls
       back to the stamped VCS revision for a bare `go build`. `make build`'s
       injected `git describe` still wins, because it is the only source that can
       say "dirty".

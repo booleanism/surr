@@ -113,7 +113,7 @@ Everything is one Go module, so there is also an install path that needs no
 checkout:
 
 ```sh
-go install github.com/booleanism/surr/hub/cmd/hub@v0.3.0
+go install github.com/booleanism/surr/hub/cmd/hub@v0.3.1
 ```
 
 A binary installed that way has no `-ldflags`, so `--version` reports the
